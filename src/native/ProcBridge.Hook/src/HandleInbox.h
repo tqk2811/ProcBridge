@@ -45,6 +45,10 @@ namespace ProcBridge::Hook
             {
                 return;
             }
+            // Only taking the slots runs under the lock; adopt may call the Broker (Stat), so it runs after the lock is
+            // released. Each entry is taken by exactly one caller, so a concurrent Drain cannot adopt it twice.
+            DuplicatedHandle taken[SlotCount];
+            ULONG count = 0;
             AcquireSRWLockExclusive(&_lock);
             const LONG sequence = ReadSequence(view);
             if (sequence != _seen)
@@ -52,14 +56,17 @@ namespace ProcBridge::Hook
                 _seen = sequence;
                 for (ULONG i = 0; i < SlotCount; ++i)
                 {
-                    DuplicatedHandle entry;
-                    if (Take(view, i, entry))
+                    if (Take(view, i, taken[count]))
                     {
-                        adopt(static_cast<const DuplicatedHandle&>(entry));
+                        ++count;
                     }
                 }
             }
             ReleaseSRWLockExclusive(&_lock);
+            for (ULONG i = 0; i < count; ++i)
+            {
+                adopt(static_cast<const DuplicatedHandle&>(taken[i]));
+            }
         }
 
         /// Writes entry into the inbox of targetProcess. False when that process has no inbox, its inbox belongs to an
