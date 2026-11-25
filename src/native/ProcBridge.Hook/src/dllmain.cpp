@@ -155,6 +155,11 @@ namespace
             return ERROR_GEN_FAILURE;
         }
         g_minHookInitialized = true;
+        // Pinned: the hooks, the directory watch poller and thread pool callbacks run code of this module until the
+        // process ends, so it must never be unloaded (a FreeLibrary that drops the count to 0 is ignored).
+        HMODULE pinned = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+            reinterpret_cast<LPCWSTR>(&GetSelfPath), &pinned);
         ProcBridge::Hook::IHandleInheritance& inheritance = ProcBridge::Hook::GetLocalHandleInheritance();
         result = ProcBridge::Hook::InstallFileHooks(*resolver);
         if (result == ERROR_SUCCESS)

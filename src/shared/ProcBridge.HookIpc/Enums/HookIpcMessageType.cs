@@ -35,4 +35,6 @@ public enum HookIpcMessageType : ushort
     Lock = 15,
     /// <summary>NtUnlockFile on a handle with a write token (M8).</summary>
     Unlock = 16,
+    /// <summary>Long poll for every watch of the process at once: waits until one of them has changes and returns them by watch.</summary>
+    WaitAnyChanges = 17,
 }

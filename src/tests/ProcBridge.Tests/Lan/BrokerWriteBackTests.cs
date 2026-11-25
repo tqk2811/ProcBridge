@@ -121,6 +121,26 @@ public sealed class BrokerWriteBackTests
     }
 
     [TestMethod]
+    public async Task OpenForWrite_ChangeElsewhereDuringStat_AsksMachineBOnlyOnce()
+    {
+        // Another file changing while the stat is in flight (a build writing its outputs) keeps that stat out of the
+        // cache; the open must still use it instead of asking machine B again (one round trip per request).
+        await using Session s = await Session.StartAsync();
+        // Above the read-ahead size: no background listing of the folder joins the count.
+        s.Share.WriteFile("a.txt", new byte[100 * 1024]);
+        FileCache cache = s.Broker.Cache;
+        Assert.IsTrue(await cache.IsWritableAsync(CancellationToken.None)); // asked once per session, not part of the open
+        cache.BeforeMetadataStore = () => cache.Invalidate("elsewhere.txt");
+        long before = s.Broker.Client.Pool.GetRequestsPerSlot().Sum();
+
+        HookResolveReply open = await s.ResolveAsync("a.txt", GenericRead | GenericWrite, 1);
+
+        cache.BeforeMetadataStore = null;
+        Assert.AreEqual(2, s.Broker.Client.Pool.GetRequestsPerSlot().Sum() - before, "one stat and one read");
+        await s.CloseAsync(open.WriteToken);
+    }
+
+    [TestMethod]
     public async Task CreateNewFile_IsCreatedOnMachineBFirst_AndWrittenBackOnClose()
     {
         await using Session s = await Session.StartAsync();

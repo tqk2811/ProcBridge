@@ -6,6 +6,8 @@
 //        ProcBridge.NativeProbe.<arch>.exe --<command> <arguments>   (single checks, see RunCommand)
 //        ProcBridge.NativeProbe.<arch>.exe --write <new folder>     (M3 write scenario, see WriteScenario)
 //        ProcBridge.NativeProbe.<arch>.exe --notify <watched> <real> (M7 change notifications, see NotifyScenario)
+//        ProcBridge.NativeProbe.<arch>.exe --notify-many <watched> <real> <count> (many watched handles, see NotifyMany)
+//        ProcBridge.NativeProbe.<arch>.exe --notify-restart|--notify-gap <watched> <real> (Broker restart / registration race)
 //        ProcBridge.NativeProbe.<arch>.exe --read-at|--map-hash|--load|--symbols|--lock|--lock-async ... (M8, see ReadAt and below)
 //        ProcBridge.NativeProbe.<arch>.exe --image [dll]            (started from a virtual folder, see ImageNames)
 //        ProcBridge.NativeProbe.<arch>.exe --image-wait <started> <go> | --run <command line>
@@ -2153,6 +2155,42 @@ namespace
         CloseHandle(port);
     }
 
+    /// The event handle with its low bit set: the event is signalled but no completion packet is posted.
+    void NotifyCompletionPortSkip(const std::wstring& watched, const std::wstring& real)
+    {
+        Handle directory(OpenWatched(watched, true));
+        Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+        const HANDLE port = CreateIoCompletionPort(directory.Get(), nullptr, 0x77, 0);
+        if (port == nullptr)
+        {
+            WriteLine(L"notify.iocpSkip: port " + Error(GetLastError()));
+            return;
+        }
+        OVERLAPPED overlapped{};
+        overlapped.hEvent = reinterpret_cast<HANDLE>(reinterpret_cast<ULONG_PTR>(event.Get()) | 1);
+        alignas(8) BYTE buffer[4096];
+        if (!ReadDirectoryChangesW(directory.Get(), buffer, sizeof(buffer), FALSE, NameFilter, nullptr, &overlapped, nullptr))
+        {
+            WriteLine(L"notify.iocpSkip: issue " + Error(GetLastError()));
+            CloseHandle(port);
+            return;
+        }
+        LaterCreate create(real + L"\\n-iocpskip.txt", 0);
+        const bool signalled = WaitForSingleObject(event.Get(), NotifyTimeoutMs) == WAIT_OBJECT_0;
+        DWORD bytes = 0;
+        ULONG_PTR key = 0;
+        LPOVERLAPPED completed = nullptr;
+        GetQueuedCompletionStatus(port, &bytes, &key, &completed, 500);
+        WriteLine(L"notify.iocpSkip: signalled=" + Num(signalled) + L" packet=" + Num(completed != nullptr));
+        if (!signalled)
+        {
+            CancelIoEx(directory.Get(), &overlapped);
+        }
+        create.Join();
+        directory.Reset();
+        CloseHandle(port);
+    }
+
     /// NtNotifyChangeDirectoryFile with a 4 byte buffer: no entry fits.
     void NotifySmallBuffer(const std::wstring& watched, const std::wstring& real)
     {
@@ -2279,12 +2317,216 @@ namespace
         NotifyEventClosed(watched, real);
         NotifyApc(watched, real);
         NotifyCompletionPort(watched, real);
+        NotifyCompletionPortSkip(watched, real);
         NotifyTree(watched, real);
         NotifySmallBuffer(watched, real);
         NotifyEnd(watched, L"cancelEx");
         NotifyEnd(watched, L"cancel");
         NotifyEnd(watched, L"close");
         NotifySyncCancel(watched);
+        return 0;
+    }
+
+    /// --notify-many <watched> <real> <count>: watches the folders m0..m<count-1> (made by the caller) at once, each
+    /// handle with an overlapped request of its own, and creates a file in each through <real>. Round 1 issues every
+    /// request before the files appear; round 2 issues them again; round 3 creates the files before issuing (the
+    /// handle keeps the changes since its first request, like the kernel's notify buffer). Prints how many handles saw
+    /// the right file in each round.
+    int NotifyMany(const wchar_t* watchedArgument, const wchar_t* realArgument, const wchar_t* countArgument)
+    {
+        const std::wstring watched = watchedArgument;
+        const std::wstring real = realArgument;
+        const int count = _wtoi(countArgument);
+        if (count <= 0 || count > 1024)
+        {
+            return 2;
+        }
+        struct Watch
+        {
+            HANDLE Directory = INVALID_HANDLE_VALUE;
+            HANDLE Event = nullptr;
+            OVERLAPPED Overlapped{};
+            DWORD Buffer[256]{}; // FILE_NOTIFY_INFORMATION is DWORD aligned
+        };
+        std::vector<Watch> watches(static_cast<size_t>(count));
+        int opened = 0;
+        for (int i = 0; i < count; ++i)
+        {
+            Watch& watch = watches[static_cast<size_t>(i)];
+            watch.Directory = OpenWatched(watched + L"\\m" + std::to_wstring(i), true);
+            watch.Event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            opened += watch.Directory != INVALID_HANDLE_VALUE && watch.Event != nullptr ? 1 : 0;
+        }
+        WriteLine(L"notify.many: opened=" + Num(opened) + L"/" + Num(count));
+        const auto issue = [&](Watch& watch) noexcept
+        {
+            ResetEvent(watch.Event);
+            watch.Overlapped = OVERLAPPED{};
+            watch.Overlapped.hEvent = watch.Event;
+            return ReadDirectoryChangesW(watch.Directory, watch.Buffer, sizeof(watch.Buffer), FALSE, NameFilter, nullptr,
+                &watch.Overlapped, nullptr) != FALSE;
+        };
+        const auto create = [&](const std::wstring& name) noexcept
+        {
+            for (int i = 0; i < count; ++i)
+            {
+                const HANDLE file = CreateFileW((real + L"\\m" + std::to_wstring(i) + L"\\" + name).c_str(), GENERIC_WRITE, 0, nullptr,
+                    CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (file != INVALID_HANDLE_VALUE)
+                {
+                    CloseHandle(file);
+                }
+            }
+        };
+        const auto collect = [&](const std::wstring& name) noexcept
+        {
+            int seen = 0;
+            const DWORD deadline = GetTickCount() + NotifyTimeoutMs;
+            for (Watch& watch : watches)
+            {
+                const DWORD now = GetTickCount();
+                const DWORD left = static_cast<LONG>(deadline - now) > 0 ? deadline - now : 0;
+                DWORD bytes = 0;
+                if (WaitForSingleObject(watch.Event, left) != WAIT_OBJECT_0)
+                {
+                    CancelIoEx(watch.Directory, &watch.Overlapped);
+                    GetOverlappedResult(watch.Directory, &watch.Overlapped, &bytes, TRUE);
+                    continue;
+                }
+                if (GetOverlappedResult(watch.Directory, &watch.Overlapped, &bytes, FALSE)
+                    && FirstNotifyEntry(reinterpret_cast<const BYTE*>(watch.Buffer), bytes, false) == L"action=1 name=" + name)
+                {
+                    ++seen;
+                }
+            }
+            return seen;
+        };
+        const std::wstring rounds[] = { L"r1.txt", L"r2.txt", L"r3.txt" };
+        for (int round = 0; round < 3; ++round)
+        {
+            if (round == 2)
+            {
+                create(rounds[round]);
+                Sleep(NotifyChangeDelayMs); // the changes reach the handles before their requests
+            }
+            int issued = 0;
+            for (Watch& watch : watches)
+            {
+                issued += issue(watch) ? 1 : 0;
+            }
+            if (round < 2)
+            {
+                create(rounds[round]);
+            }
+            const int seen = collect(rounds[round]);
+            WriteLine(L"notify.many.round" + Num(round + 1) + L": issued=" + Num(issued) + L" seen=" + Num(seen));
+        }
+        for (Watch& watch : watches)
+        {
+            if (watch.Directory != INVALID_HANDLE_VALUE)
+            {
+                CloseHandle(watch.Directory);
+            }
+            if (watch.Event != nullptr)
+            {
+                CloseHandle(watch.Event);
+            }
+        }
+        return 0;
+    }
+
+    /// Waits for one overlapped ReadDirectoryChangesW on directory and prints "<step>: ok=.. <first entry>" or "<step>: timeout".
+    std::wstring IssueAndWait(HANDLE directory, const std::wstring& createPath, DWORD createDelayMs)
+    {
+        Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+        OVERLAPPED overlapped{};
+        overlapped.hEvent = event.Get();
+        alignas(8) BYTE buffer[4096];
+        if (!ReadDirectoryChangesW(directory, buffer, sizeof(buffer), FALSE, NameFilter, nullptr, &overlapped, nullptr))
+        {
+            return L"issue " + Error(GetLastError());
+        }
+        // Started after the call returned: with a slow registration (--notify-gap) the call itself takes a while.
+        LaterCreate create(createPath, createDelayMs);
+        DWORD bytes = 0;
+        if (WaitForSingleObject(event.Get(), NotifyTimeoutMs) != WAIT_OBJECT_0)
+        {
+            CancelIoEx(directory, &overlapped);
+            GetOverlappedResult(directory, &overlapped, &bytes, TRUE);
+            return L"timeout";
+        }
+        const BOOL ok = GetOverlappedResult(directory, &overlapped, &bytes, FALSE);
+        return L"ok=" + Num(ok) + L" " + (ok ? FirstNotifyEntry(buffer, bytes, false) : Error(GetLastError()));
+    }
+
+    /// --notify-restart <watched> <real>: a request waits while the test restarts the Broker. It must end (the watch
+    /// is gone with the old Broker: STATUS_NOTIFY_ENUM_DIR, no entries), and later requests on the same handle must see
+    /// changes again through the new Broker.
+    int NotifyRestart(const wchar_t* watchedArgument, const wchar_t* realArgument)
+    {
+        const std::wstring real = realArgument;
+        Handle directory(OpenWatched(watchedArgument, true));
+        Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+        OVERLAPPED overlapped{};
+        overlapped.hEvent = event.Get();
+        alignas(8) BYTE buffer[4096];
+        if (!ReadDirectoryChangesW(directory.Get(), buffer, sizeof(buffer), FALSE, NameFilter, nullptr, &overlapped, nullptr))
+        {
+            WriteLine(L"notify.restart.first: issue " + Error(GetLastError()));
+            return 0;
+        }
+        DWORD bytes = 0;
+        if (WaitForSingleObject(event.Get(), 60000) != WAIT_OBJECT_0)
+        {
+            WriteLine(L"notify.restart.first: timeout");
+            CancelIoEx(directory.Get(), &overlapped);
+            GetOverlappedResult(directory.Get(), &overlapped, &bytes, TRUE);
+            return 0;
+        }
+        const BOOL ok = GetOverlappedResult(directory.Get(), &overlapped, &bytes, FALSE);
+        WriteLine(L"notify.restart.first: ok=" + Num(ok) + L" " + (ok ? FirstNotifyEntry(buffer, bytes, false) : Error(GetLastError())));
+        // The new Broker may still be connecting (its first notification is a rescan): try a few times.
+        std::wstring second;
+        for (int attempt = 0; attempt < 10; ++attempt)
+        {
+            second = IssueAndWait(directory.Get(), real + L"\\n-restart" + std::to_wstring(attempt) + L".txt", 200);
+            if (second.find(L"name=n-restart") != std::wstring::npos)
+            {
+                break;
+            }
+            Sleep(300);
+        }
+        const size_t at = second.find(L"name=n-restart");
+        WriteLine(L"notify.restart.second: " + (at != std::wstring::npos ? second.substr(0, at) + L"name=n-restart" : second));
+        return 0;
+    }
+
+    /// --notify-gap <watched> <real>: the file appears while the first request on the handle is still registering
+    /// (the test slows the hook down between the Broker's answer and recording the watch id).
+    int NotifyGap(const wchar_t* watchedArgument, const wchar_t* realArgument)
+    {
+        const std::wstring real = realArgument;
+        Handle directory(OpenWatched(watchedArgument, true));
+        Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+        OVERLAPPED overlapped{};
+        overlapped.hEvent = event.Get();
+        alignas(8) BYTE buffer[4096];
+        LaterCreate create(real + L"\\n-gap.txt", 700);
+        if (!ReadDirectoryChangesW(directory.Get(), buffer, sizeof(buffer), FALSE, NameFilter, nullptr, &overlapped, nullptr))
+        {
+            WriteLine(L"notify.gap: issue " + Error(GetLastError()));
+            return 0;
+        }
+        DWORD bytes = 0;
+        if (WaitForSingleObject(event.Get(), NotifyTimeoutMs) != WAIT_OBJECT_0)
+        {
+            WriteLine(L"notify.gap: timeout");
+            CancelIoEx(directory.Get(), &overlapped);
+            GetOverlappedResult(directory.Get(), &overlapped, &bytes, TRUE);
+            return 0;
+        }
+        const BOOL ok = GetOverlappedResult(directory.Get(), &overlapped, &bytes, FALSE);
+        WriteLine(L"notify.gap: ok=" + Num(ok) + L" " + (ok ? FirstNotifyEntry(buffer, bytes, false) : Error(GetLastError())));
         return 0;
     }
 
@@ -2678,6 +2920,18 @@ namespace
         if (command == L"--notify" && argc == 4)
         {
             return NotifyScenario(argv[2], argv[3]);
+        }
+        if (command == L"--notify-restart" && argc == 4)
+        {
+            return NotifyRestart(argv[2], argv[3]);
+        }
+        if (command == L"--notify-gap" && argc == 4)
+        {
+            return NotifyGap(argv[2], argv[3]);
+        }
+        if (command == L"--notify-many" && argc == 5)
+        {
+            return NotifyMany(argv[2], argv[3], argv[4]);
         }
         if (command == L"--threads" && argc == 4)
         {

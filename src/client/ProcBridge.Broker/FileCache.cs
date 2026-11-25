@@ -343,6 +343,13 @@ public sealed class FileCache
     public Task<CachedItem> EnsureAsync(string remotePath, bool allowRanges, CancellationToken cancellationToken)
         => EnsureAsync(remotePath, readAhead: true, allowRanges, cancellationToken);
 
+    /// <summary>
+    /// Like <see cref="EnsureAsync(string, bool, CancellationToken)"/> with the stat the caller just got from machine B:
+    /// no second stat, even when an invalidation elsewhere kept <paramref name="current"/> out of the cache.
+    /// </summary>
+    public Task<CachedItem> EnsureAsync(string remotePath, FsEntry current, bool allowRanges, CancellationToken cancellationToken)
+        => EnsureAsync(remotePath, readAhead: true, allowRanges, cancellationToken, current);
+
     /// <summary>Bytes downloaded into ranged copies so far (M8), for tests and measurements.</summary>
     public long RangeBytesDownloaded => _rangesById.Values.Sum(x => x.BytesDownloaded);
 
@@ -414,9 +421,9 @@ public sealed class FileCache
     /// <summary>Completes when every read-ahead started so far has finished.</summary>
     public Task WaitForReadAheadAsync() => Task.WhenAll(_readAheadTasks.Keys);
 
-    private async Task<CachedItem> EnsureAsync(string remotePath, bool readAhead, bool allowRanges, CancellationToken cancellationToken)
+    private async Task<CachedItem> EnsureAsync(string remotePath, bool readAhead, bool allowRanges, CancellationToken cancellationToken, FsEntry? current = null)
     {
-        FsEntry entry = await StatAsync(remotePath, cancellationToken).ConfigureAwait(false);
+        FsEntry entry = current ?? await StatAsync(remotePath, cancellationToken).ConfigureAwait(false);
         string localPath = GetLocalPath(remotePath);
         if (entry.IsDirectory)
         {

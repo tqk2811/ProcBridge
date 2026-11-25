@@ -11,7 +11,8 @@ namespace ProcBridge.Broker;
 /// <summary>
 /// Directory watches the hook registered for NtNotifyChangeDirectoryFile[Ex] (plan section 10, M7). Each watch
 /// queues the changes of <see cref="FileCache.RemoteChanged"/> that fall inside its directory until the hook collects
-/// them with a WaitChanges long poll. A rescan, a reconnect of the change watcher or a full queue marks the watch as
+/// them with a long poll: WaitAnyChanges collects every watch of a process at once (the hook keeps one pipe instance for
+/// it), WaitChanges a single watch. A rescan, a reconnect of the change watcher or a full queue marks the watch as
 /// overflowed, which the hook turns into <c>STATUS_NOTIFY_ENUM_DIR</c>.
 /// Every watch belongs to the client process that registered it (the owner, see <see cref="Attach"/>): only that
 /// process can wait on or remove it, and the watches of a process go away when its last pipe connection closes.
@@ -28,11 +29,13 @@ public sealed class HookWatchRegistry : IDisposable
     public const int MaxWatches = 4096;
 
     private readonly ConcurrentDictionary<uint, Watch> _watches = new();
+    private readonly ConcurrentDictionary<long, OwnerSignal> _signals = new();
     private readonly Dictionary<long, int> _connections = [];
     private readonly object _connectionsLock = new();
     private int _nextId;
 
     private readonly int _replyBudget;
+    private readonly int _anyReplyBudget;
     private readonly FileCache _cache;
     private readonly Channel<FsChangeNotification> _notifications = Channel.CreateUnbounded<FsChangeNotification>(new UnboundedChannelOptions { SingleReader = true });
     private readonly Task _dispatcher;
@@ -41,6 +44,7 @@ public sealed class HookWatchRegistry : IDisposable
     public HookWatchRegistry(FileCache cache, int replyBudget = DefaultReplyBudget)
     {
         _replyBudget = replyBudget;
+        _anyReplyBudget = replyBudget + HookWaitChangesReply.FixedSize - HookWaitAnyChangesReply.FixedSize;
         _cache = cache;
         _dispatcher = Task.Run(DispatchAsync);
         cache.RemoteChanged += OnRemoteChanged;
@@ -88,6 +92,8 @@ public sealed class HookWatchRegistry : IDisposable
                 return;
             }
             _connections.Remove(owner);
+            if (_signals.TryRemove(owner, out OwnerSignal? signal))
+                signal.Set(); // A WaitAnyChanges still blocked returns empty.
             // Under the lock so an Attach that follows cannot see this owner's old watches.
             foreach (KeyValuePair<uint, Watch> pair in _watches)
             {
@@ -106,7 +112,10 @@ public sealed class HookWatchRegistry : IDisposable
         do
             id = (uint)Interlocked.Increment(ref _nextId);
         while (id == 0);
-        _watches[id] = new Watch(owner, remoteDirectory, subtree);
+        OwnerSignal signal = GetSignal(owner);
+        _watches[id] = new Watch(owner, remoteDirectory, subtree, signal);
+        // A WaitAnyChanges of the owner in progress returns empty, so the next poll covers the new watch too.
+        signal.Set();
         return id;
     }
 
@@ -141,6 +150,80 @@ public sealed class HookWatchRegistry : IDisposable
         }
         return watch.Drain(_replyBudget);
     }
+
+    /// <summary>
+    /// Waits until a watch of <paramref name="owner"/> has changes, the owner adds a watch or <paramref name="timeout"/>
+    /// passes, then returns the queued changes of every ready watch of the owner, as many as fit a reply. A watch whose
+    /// changes do not all fit keeps the rest for the next poll.
+    /// </summary>
+    public async Task<HookWaitAnyChangesReply> WaitAnyAsync(long owner, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        OwnerSignal signal = GetSignal(owner);
+        // Taken before the scan: a change that arrives after the scan completes it, so nothing is missed.
+        Task woken = signal.Reset();
+        List<HookWatchChanges> ready = Collect(owner, signal);
+        if (ready.Count == 0 && timeout != TimeSpan.Zero)
+        {
+            try
+            {
+                await woken.WaitAsync(timeout, cancellationToken).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+            }
+            ready = Collect(owner, signal);
+        }
+        return new HookWaitAnyChangesReply { Watches = ready };
+    }
+
+    /// <summary>
+    /// The signal of a connected owner (kept until its last connection closes); an owner with no connection gets a
+    /// throwaway one, so a call from a process that already went away leaves nothing behind.
+    /// </summary>
+    private OwnerSignal GetSignal(long owner)
+    {
+        lock (_connectionsLock)
+            return _connections.ContainsKey(owner) ? _signals.GetOrAdd(owner, static _ => new OwnerSignal()) : new OwnerSignal();
+    }
+
+    /// <summary>Owners with a stored signal; tests check that nothing is left for owners that are gone.</summary>
+    internal int SignalCount => _signals.Count;
+
+    /// <summary>
+    /// Drains the ready watches of <paramref name="owner"/> into one reply, round robin: the scan starts after the
+    /// last watch the previous reply carried, so a watch that always has changes cannot keep the others out.
+    /// </summary>
+    private List<HookWatchChanges> Collect(long owner, OwnerSignal signal)
+    {
+        var ready = new List<HookWatchChanges>();
+        int budget = _anyReplyBudget;
+        KeyValuePair<uint, Watch>[] owned = _watches.Where(x => x.Value.Owner == owner).OrderBy(x => x.Key).ToArray();
+        int start = Array.FindIndex(owned, x => x.Key > signal.LastCollected);
+        if (start < 0)
+            start = 0;
+        for (int n = 0; n < owned.Length; n++)
+        {
+            KeyValuePair<uint, Watch> pair = owned[(start + n) % owned.Length];
+            Watch watch = pair.Value;
+            if (!watch.HasData || ready.Count == ushort.MaxValue)
+                continue;
+            if (budget < HookWatchChanges.FixedSize + MinChangeSize)
+                break;
+            // A change too big for what is left waits for the next poll; only a reply's first group may declare it lost.
+            if (ready.Count > 0 && watch.FirstChangeSize > budget - HookWatchChanges.FixedSize)
+                continue;
+            HookWaitChangesReply drained = watch.Drain(budget - HookWatchChanges.FixedSize);
+            if (drained.Changes.Count == 0 && !drained.Overflow)
+                continue;
+            ready.Add(new HookWatchChanges(pair.Key, drained.Changes, drained.Overflow));
+            signal.LastCollected = pair.Key;
+            budget -= HookWatchChanges.FixedSize + drained.Changes.Sum(x => x.EncodedSize);
+        }
+        return ready;
+    }
+
+    /// <summary>Smallest encoded change (action and an empty name): below this a group cannot carry anything.</summary>
+    private const int MinChangeSize = 6;
 
     private void OnRemoteChanged(FsChangeNotification notification) => _notifications.Writer.TryWrite(notification);
 
@@ -184,9 +267,56 @@ public sealed class HookWatchRegistry : IDisposable
 
     private static ProtocolStatusException UnknownWatch(uint id) => new(NtStatus.InvalidHandle, $"Unknown watch {id}.");
 
-    private sealed class Watch(long owner, string directory, bool subtree)
+    /// <summary>Wakes the WaitAnyChanges poll of one owner: set by any of its watches becoming ready and by a new watch.</summary>
+    private sealed class OwnerSignal
+    {
+        private readonly object _lock = new();
+        private TaskCompletionSource _woken = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>Id of the last watch a reply carried (one poll at a time per owner, so no lock).</summary>
+        public uint LastCollected { get; set; }
+
+        public void Set()
+        {
+            lock (_lock)
+                _woken.TrySetResult();
+        }
+
+        /// <summary>Arms the signal for a new wait and returns the task that the next <see cref="Set"/> completes.</summary>
+        public Task Reset()
+        {
+            lock (_lock)
+            {
+                if (_woken.Task.IsCompleted)
+                    _woken = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                return _woken.Task;
+            }
+        }
+    }
+
+    private sealed class Watch(long owner, string directory, bool subtree, OwnerSignal signal)
     {
         public long Owner { get; } = owner;
+
+        /// <summary>Encoded size of the oldest queued change, 0 when none (or when changes were lost).</summary>
+        public int FirstChangeSize
+        {
+            get
+            {
+                lock (_lock)
+                    return !_overflow && _queue.TryPeek(out HookChange change) ? change.EncodedSize : 0;
+            }
+        }
+
+        /// <summary>Queued changes or lost changes to report.</summary>
+        public bool HasData
+        {
+            get
+            {
+                lock (_lock)
+                    return !_closed && (_overflow || _queue.Count > 0);
+            }
+        }
 
         private readonly string _prefix = directory.Trim('/') is { Length: > 0 } trimmed ? trimmed + "/" : string.Empty;
         private readonly object _lock = new();
@@ -223,6 +353,7 @@ public sealed class HookWatchRegistry : IDisposable
                 }
                 _ready.TrySetResult();
             }
+            signal.Set();
         }
 
         public void MarkOverflow()
@@ -236,6 +367,7 @@ public sealed class HookWatchRegistry : IDisposable
                 _overflow = true;
                 _ready.TrySetResult();
             }
+            signal.Set();
         }
 
         public void Close()

@@ -14,7 +14,7 @@ namespace ProcBridge.HookIpc;
 /// </remarks>
 public static class HookIpcProtocol
 {
-    public const ushort Version = 3;
+    public const ushort Version = 4;
 
     public const int HeaderSize = 16;
 

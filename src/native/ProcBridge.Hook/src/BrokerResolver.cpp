@@ -396,58 +396,47 @@ namespace ProcBridge::Hook
         }
     }
 
-    NTSTATUS BrokerResolver::Watch(int mapping, const UNICODE_STRING& ntPath, bool subtree, ULONG completionFilter,
-        WatchChannel*& channel, uint32_t& watchId) const noexcept
+    NTSTATUS BrokerResolver::OpenWatchChannel(WatchChannel*& channel) const noexcept
     {
-        channel = nullptr;
-        watchId = 0;
         BrokerClient::Connection* connection = nullptr;
-        NTSTATUS status = _client.OpenChannel(connection);
-        if (!NT_SUCCESS(status))
-        {
-            return status;
-        }
-        const UNICODE_STRING relative = RelativePath(mapping, ntPath, PathKind::Nt);
-        bool healthy = false;
-        {
-            BrokerClient::Call call(_client, HookIpc::MessageType::WatchDirectory, connection);
-            HookIpc::WatchRequest request{};
-            request.MappingIndex = static_cast<uint16_t>(mapping);
-            request.Flags = subtree ? HookIpc::WatchFlagSubtree : 0;
-            request.CompletionFilter = completionFilter;
-            call.Put(&request, sizeof(request));
-            call.PutString(relative.Buffer, relative.Length);
-            BrokerReply reply;
-            status = call.Send(reply);
-            healthy = call.Healthy();
-            if (NT_SUCCESS(status))
-            {
-                HookIpc::WatchReply answer{};
-                MessageReader reader(reply.Body, reply.BodySize);
-                if (reader.Read(&answer, sizeof(answer)) && answer.WatchId != 0)
-                {
-                    watchId = answer.WatchId;
-                }
-                else
-                {
-                    status = STATUS_INVALID_NETWORK_RESPONSE;
-                }
-            }
-        }
-        if (NT_SUCCESS(status) && healthy)
-        {
-            channel = reinterpret_cast<WatchChannel*>(connection);
-            return STATUS_SUCCESS;
-        }
-        // A failed exchange leaves the instance unusable; a registered watch gets a new channel with its first long poll.
-        BrokerClient::CloseChannel(connection);
+        const NTSTATUS status = _client.OpenChannel(connection);
+        channel = NT_SUCCESS(status) ? reinterpret_cast<WatchChannel*>(connection) : nullptr;
         return status;
     }
 
-    NTSTATUS BrokerResolver::WaitChanges(WatchChannel*& channel, uint32_t watchId, HANDLE cancelEvent, BYTE* buffer,
-        ChangeBatch& batch) const noexcept
+    NTSTATUS BrokerResolver::Watch(int mapping, const UNICODE_STRING& ntPath, bool subtree, ULONG completionFilter,
+        uint32_t& watchId) const noexcept
     {
-        batch = ChangeBatch{};
+        watchId = 0;
+        const UNICODE_STRING relative = RelativePath(mapping, ntPath, PathKind::Nt);
+        BrokerClient::Call call(_client, HookIpc::MessageType::WatchDirectory);
+        HookIpc::WatchRequest request{};
+        request.MappingIndex = static_cast<uint16_t>(mapping);
+        request.Flags = subtree ? HookIpc::WatchFlagSubtree : 0;
+        request.CompletionFilter = completionFilter;
+        call.Put(&request, sizeof(request));
+        call.PutString(relative.Buffer, relative.Length);
+        BrokerReply reply;
+        NTSTATUS status = call.Send(reply);
+        if (NT_SUCCESS(status))
+        {
+            HookIpc::WatchReply answer{};
+            MessageReader reader(reply.Body, reply.BodySize);
+            if (reader.Read(&answer, sizeof(answer)) && answer.WatchId != 0)
+            {
+                watchId = answer.WatchId;
+            }
+            else
+            {
+                status = STATUS_INVALID_NETWORK_RESPONSE;
+            }
+        }
+        return status;
+    }
+
+    NTSTATUS BrokerResolver::WaitAnyChanges(WatchChannel*& channel, BYTE* buffer, ULONG& bytes) const noexcept
+    {
+        bytes = 0;
         BrokerClient::Connection* connection = ToConnection(channel);
         if (connection == nullptr)
         {
@@ -461,36 +450,23 @@ namespace ProcBridge::Hook
         NTSTATUS status = STATUS_SUCCESS;
         bool healthy = true;
         {
-            BrokerClient::Call call(_client, HookIpc::MessageType::WaitChanges, connection);
-            HookIpc::WaitChangesRequest request{};
-            request.WatchId = watchId;
+            BrokerClient::Call call(_client, HookIpc::MessageType::WaitAnyChanges, connection);
+            HookIpc::WaitAnyChangesRequest request{};
             request.TimeoutMilliseconds = HookIpc::InfiniteTimeout;
             call.Put(&request, sizeof(request));
             BrokerReply reply;
-            status = call.Send(reply, cancelEvent, INFINITE);
+            status = call.Send(reply, nullptr, INFINITE);
             healthy = call.Healthy();
             if (NT_SUCCESS(status))
             {
                 memcpy(buffer, reply.Body, reply.BodySize);
-                MessageReader reader(buffer, reply.BodySize);
-                HookIpc::WaitChangesReply answer{};
-                if (reader.Read(&answer, sizeof(answer)))
-                {
-                    batch.Entries = reader.Position();
-                    batch.Bytes = reader.Remaining();
-                    batch.Count = answer.Count;
-                    batch.Overflow = (answer.Flags & HookIpc::ChangesFlagOverflow) != 0;
-                }
-                else
-                {
-                    status = STATUS_INVALID_NETWORK_RESPONSE;
-                }
+                bytes = reply.BodySize;
             }
         }
         if (!healthy)
         {
-            // An abandoned long poll leaves the instance unusable. Open the next one before closing it: the Broker
-            // drops the watches of this process once its last pipe closes.
+            // A broken instance is unusable. Open the next one before closing it: the Broker drops the watches of
+            // this process once its last pipe closes.
             BrokerClient::Connection* fresh = nullptr;
             channel = NT_SUCCESS(_client.OpenChannel(fresh)) ? reinterpret_cast<WatchChannel*>(fresh) : nullptr;
             BrokerClient::CloseChannel(connection);
@@ -498,18 +474,17 @@ namespace ProcBridge::Hook
         return status;
     }
 
-    void BrokerResolver::Unwatch(WatchChannel* channel, uint32_t watchId) const noexcept
+    void BrokerResolver::Unwatch(uint32_t watchId) const noexcept
     {
-        if (watchId != 0)
+        if (watchId == 0)
         {
-            BrokerClient::Call call(_client, HookIpc::MessageType::Unwatch);
-            HookIpc::UnwatchRequest request{};
-            request.WatchId = watchId;
-            call.Put(&request, sizeof(request));
-            BrokerReply reply;
-            call.Send(reply);
+            return;
         }
-        // After Unwatch: the channel kept the process known to the Broker until the watch was gone.
-        BrokerClient::CloseChannel(ToConnection(channel));
+        BrokerClient::Call call(_client, HookIpc::MessageType::Unwatch);
+        HookIpc::UnwatchRequest request{};
+        request.WatchId = watchId;
+        call.Put(&request, sizeof(request));
+        BrokerReply reply;
+        call.Send(reply);
     }
 }

@@ -46,7 +46,7 @@ public sealed record BrokerOptions
     public int ReadAheadMaxFiles { get; init; } = 64;
 
     /// <summary>See <see cref="FileCacheOptions.ReadAheadParallelism"/>.</summary>
-    public int ReadAheadParallelism { get; init; } = 2;
+    public int ReadAheadParallelism { get; init; } = 8;
 
     /// <summary>See <see cref="FileCacheOptions.RangeThreshold"/> (M8); 0 downloads every file whole.</summary>
     public long RangeThreshold { get; init; } = 64L * 1024 * 1024;

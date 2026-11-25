@@ -60,9 +60,9 @@ namespace ProcBridge::Hook
         /// Per-call timeout in milliseconds.
         DWORD Timeout() const noexcept { return _timeoutMs; }
 
-        /// Opens a pipe instance outside the pool for one caller (a directory watch and its WaitChanges long polls,
-        /// plan section 10): a long poll never holds an instance other requests wait for, and the open channel keeps
-        /// this process known to the Broker while the watch lives. Close it with CloseChannel.
+        /// Opens a pipe instance outside the pool for one caller (the WaitAnyChanges long polls of the directory
+        /// watches, plan section 10): a long poll never holds an instance other requests wait for, and the open channel
+        /// keeps this process known to the Broker while watches live. Close it with CloseChannel.
         NTSTATUS OpenChannel(Connection*& channel) noexcept { return Open(channel); }
         static void CloseChannel(Connection* channel) noexcept
         {

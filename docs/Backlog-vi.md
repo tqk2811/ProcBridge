@@ -180,8 +180,8 @@ Plan 13.7. Ghi 2026-11-26.
 - `RangeFile` không bao giờ rời `FileCache._rangesById` (Broker không biết handle nào của Hook còn giữ `RangeId`): bản
   bị thay hoặc xoá chỉ đóng handle ghi (`Abandon`), bảng khối vẫn nằm trong bộ nhớ tới khi Broker dừng. Cần Hook báo
   đóng handle có `RangeId` để gỡ.
-- Chưa có số đo với độ trễ mạng thật, chưa chỉnh kích thước khối theo kiểu đọc (đọc nhỏ rải rác tải 2 khối/lần khi vắt
-  qua ranh giới).
+- Chưa chỉnh kích thước khối theo kiểu đọc: đọc nhỏ rải rác tải trọn khối 256 KB (2 khối khi vắt qua ranh giới), ở
+  10 Mbit/s một khối tốn thời gian gấp đôi RTT 100 ms (số đo Plan 13.7).
 
 ## [Vừa] Khoá file trên máy B (M8): phần còn thiếu
 
@@ -309,14 +309,6 @@ Hook đã phục vụ thông báo thay đổi trên thư mục ảo (`DirectoryW
   huỷ yêu cầu.
 - Thread gọi thoát không huỷ các yêu cầu nó đã gửi (kernel huỷ IRP của thread khi thread thoát).
 
-## [Vừa] Mỗi watch có yêu cầu chờ chiếm một thread pool và một pipe instance
-
-`DirectoryWatches` chạy một worker (`QueueUserWorkItem`, `WT_EXECUTELONGFUNCTION`) và giữ một pipe instance riêng
-cho mỗi handle thư mục ảo đang có yêu cầu chờ. Process mở hàng trăm handle theo dõi (IDE, công cụ build) sẽ chiếm
-nhiều thread pool và nhiều instance của pipe Broker. Phương án: dồn mọi watchId của process vào MỘT long poll
-(`WaitChanges` nhận danh sách watchId, trả `(watchId, thay đổi)`), một worker chung phân phát theo handle.
-Ghi 2026-11-25.
-
 ## [Vừa] Theo dõi thay đổi: phần còn thiếu sau M7 (C#)
 
 - `CompletionFilter` chưa được áp đúng: Agent dùng `FileSystemWatcher` nên không biết thuộc tính nào đổi, Broker
@@ -330,13 +322,24 @@ Ghi 2026-11-25.
 - Walk `FsTree` bỏ dở giữa chừng giữ trạng thái trên Agent tới khi kết nối đóng (giới hạn bởi
   `MaxTreeWalksPerConnection`); Broker hiện mở kết nối riêng cho mỗi walk nên không bị ảnh hưởng.
 
-## [Vừa] Đo hiệu năng M7 với độ trễ thật
+## [Vừa] Đo build thật qua Hook với độ trễ
 
-`src/tools/ProcBridge.Bench` mới đo trên loopback. Điều kiện xong M7 là đo thời gian build so với chạy cục bộ: cần
-một `IConnectionFactory` chèn độ trễ/băng thông giả lập (hoặc chạy qua LAN/relay thật), và chạy build thật (vd
-`dotnet build` một solution mẫu) qua Hook khi Hook đã nối Broker. Read-ahead hiện tranh connection pool với request
-tiền cảnh (chưa có ưu tiên, liên quan mục cửa sổ tín dụng; mặc định đã hạ xuống 2 tải song song cho toàn cache) và
-không bị huỷ khi `BrokerHost` dừng.
+Số đo Broker ↔ Agent qua proxy trễ đã có (Plan 13.7). Điều kiện xong M7 còn thiếu: chạy build thật (vd `dotnet build`
+một solution mẫu) qua Hook nối Broker qua `LatencyProxy` và so với chạy cục bộ. Read-ahead (mặc định 8 tải song song
+cho toàn cache) chưa có ưu tiên so với request tiền cảnh (liên quan mục cửa sổ tín dụng) và không bị huỷ khi
+`BrokerHost` dừng.
+
+## [Vừa] Bớt round trip khi mở ghi và ghi ngược file nhỏ
+
+Theo Plan 13.7: mở có quyền ghi tốn 2 RTT (stat rồi `FsRead`), ghi ngược file nhỏ 2 RTT (`FsWrite` rồi `FsCommit`).
+Có thể cho `FsCommit` mang luôn dữ liệu khi file nhỏ hơn một khung, và một request "stat + đọc nếu khác version" cho
+lần mở ghi (cần thêm message Broker ↔ Agent).
+
+## [Thấp] Epoch invalidation của FileCache là toàn cục
+
+Mọi invalidation (một file bất kỳ đổi) bump `_epoch`, nên mọi stat/list đang bay đều không được lưu cache và lần hỏi kế
+tiếp lại đi máy B. Lúc build ghi nhiều file thì metadata của các file khác cứ bị hỏi lại. Nên theo dõi epoch theo
+đường dẫn (kèm thư mục cha khi xoá/đổi tên cây).
 
 ## [Thấp] Đổi tên máy đã ghép cặp
 

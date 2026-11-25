@@ -22,6 +22,10 @@ public sealed class HookIpcServer : IAsyncDisposable
     private readonly Func<bool, NamedPipeServerStream> _createInstance;
     private readonly CancellationTokenSource _stopping = new();
     private readonly ConcurrentDictionary<NamedPipeServerStream, Task> _clients = new();
+    private int _peakClientCount;
+
+    /// <summary>Most pipe connections open at the same time so far; tests check that watches share one instance.</summary>
+    internal int PeakClientCount => Volatile.Read(ref _peakClientCount);
     private Task _acceptLoop = Task.CompletedTask;
     private int _disposed;
     private long _anonymousClients;
@@ -112,6 +116,9 @@ public sealed class HookIpcServer : IAsyncDisposable
 
             NamedPipeServerStream connected = next;
             _clients[connected] = Task.Run(() => ServeAsync(connected));
+            int count = _clients.Count;
+            for (int peak = Volatile.Read(ref _peakClientCount); count > peak; peak = Volatile.Read(ref _peakClientCount))
+                Interlocked.CompareExchange(ref _peakClientCount, count, peak);
             next = null;
         }
     }
@@ -180,7 +187,8 @@ public sealed class HookIpcServer : IAsyncDisposable
     }
 
     private static bool IsWaitChanges(ReadOnlySpan<byte> message)
-        => message.Length >= HookIpcProtocol.HeaderSize && (HookIpcMessageType)BitConverter.ToUInt16(message[6..8]) == HookIpcMessageType.WaitChanges;
+        => message.Length >= HookIpcProtocol.HeaderSize
+            && (HookIpcMessageType)BitConverter.ToUInt16(message[6..8]) is HookIpcMessageType.WaitChanges or HookIpcMessageType.WaitAnyChanges;
 
     /// <summary>
     /// Handles a request that can block for a long time (WaitChanges long poll) while still reading the pipe: the client

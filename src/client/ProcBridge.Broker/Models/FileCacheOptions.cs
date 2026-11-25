@@ -23,9 +23,10 @@ public sealed record FileCacheOptions
 
     /// <summary>
     /// Read-ahead downloads running at once across all directories. They share the connection pool with foreground
-    /// requests, so the default leaves most of it to them.
+    /// requests (streams multiplexed on the same connections), so this mostly bounds the bytes queued ahead of them on
+    /// a slow link.
     /// </summary>
-    public int ReadAheadParallelism { get; init; } = 2;
+    public int ReadAheadParallelism { get; init; } = 8;
 
     /// <summary>
     /// Files larger than this are cached by ranges (M8): a sparse copy of the right size whose blocks are downloaded

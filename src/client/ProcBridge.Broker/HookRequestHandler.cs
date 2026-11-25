@@ -74,7 +74,7 @@ public sealed class HookRequestHandler : IDisposable
         _holds?.ClientDisconnected(clientId);
     }
 
-    /// <summary>Directory watches of the hook (WatchDirectory, WaitChanges, Unwatch).</summary>
+    /// <summary>Directory watches of the hook (WatchDirectory, WaitChanges, WaitAnyChanges, Unwatch).</summary>
     public HookWatchRegistry Watches { get; }
 
     public void Dispose() => Watches.Dispose();
@@ -223,6 +223,15 @@ public sealed class HookRequestHandler : IDisposable
                     ? Timeout.InfiniteTimeSpan
                     : TimeSpan.FromMilliseconds(wait.TimeoutMilliseconds);
                 return await Watches.WaitAsync(clientId, wait.WatchId, timeout, cancellationToken).ConfigureAwait(false);
+            }
+
+            case HookIpcMessageType.WaitAnyChanges:
+            {
+                HookWaitAnyChangesRequest wait = Read(request, HookWaitAnyChangesRequest.Read);
+                TimeSpan timeout = wait.TimeoutMilliseconds == HookIpcProtocol.InfiniteTimeout
+                    ? Timeout.InfiniteTimeSpan
+                    : TimeSpan.FromMilliseconds(wait.TimeoutMilliseconds);
+                return await Watches.WaitAnyAsync(clientId, timeout, cancellationToken).ConfigureAwait(false);
             }
 
             case HookIpcMessageType.Unwatch:
@@ -392,7 +401,7 @@ public sealed class HookRequestHandler : IDisposable
         else
         {
             // Opens that only read may get a ranged copy; anything that may write brings the whole file in first.
-            item = await _cache.EnsureAsync(remotePath, allowRanges: !mayChange, cancellationToken).ConfigureAwait(false);
+            item = await _cache.EnsureAsync(remotePath, entry, allowRanges: !mayChange, cancellationToken).ConfigureAwait(false);
         }
 
         ulong token = 0;
