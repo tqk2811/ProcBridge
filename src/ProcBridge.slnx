@@ -10,6 +10,7 @@
   </Folder>
   <Folder Name="/agent/">
     <Project Path="agent/ProcBridge.Agent/ProcBridge.Agent.csproj" />
+    <Project Path="agent/ProcBridge.Agent.Explorer/ProcBridge.Agent.Explorer.csproj" />
   </Folder>
   <Folder Name="/tools/">
     <Project Path="tools/ProcBridge.Bench/ProcBridge.Bench.csproj" />
