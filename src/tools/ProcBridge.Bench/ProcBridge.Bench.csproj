@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>ProcBridge.Bench</RootNamespace>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\agent\ProcBridge.Agent\ProcBridge.Agent.csproj" />
+    <ProjectReference Include="..\..\client\ProcBridge.Broker\ProcBridge.Broker.csproj" />
+  </ItemGroup>
+</Project>
