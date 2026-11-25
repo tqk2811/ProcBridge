@@ -71,7 +71,7 @@ internal sealed class ShareTreeWalk
                 if (budget - cost < 0 && anyEntry)
                     break;
                 budget -= cost;
-                part.Add(AgentShare.ToEntry(info, info.Name, _currentDetails.TryGetValue(info.Name, out FileDetailsReader.FileDetails d) ? d : null));
+                part.Add(AgentShare.ToListedEntry(info, _currentDetails.TryGetValue(info.Name, out FileDetailsReader.FileDetails d) ? d : null));
                 anyEntry = true;
                 _remainingEntries--;
                 _currentIndex++;

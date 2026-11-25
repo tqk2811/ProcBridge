@@ -206,14 +206,6 @@ liệt kê theo kết nối hoặc cache danh sách ngắn hạn phía Agent.
 Request quá hạn trả `STATUS_IO_TIMEOUT` nhưng kết nối vẫn được coi là sống; Agent treo hẳn thì request nào cũng
 chờ đủ `RequestTimeout`. Nên có ping/keepalive và đánh dấu kết nối chết sau vài lần quá hạn liên tiếp.
 
-## [Thấp] Probe_ThroughAgent_MatchesRealFolder chập chờn trên CI
-
-`Probe_ThroughAgent_MatchesRealFolder ("x64")` một lần trên CI (run 45626967765, chạy lại thì xanh) lệch ở dòng
-`GetFileAttributesEx` của thư mục `sub`: `written` của thư mục thật lớn hơn khoảng 0,5 ms so với bản qua Agent
-(bằng `created`). Nghi do NTFS cập nhật chậm giờ ghi trong mục của thư mục cha so với giờ đọc qua handle, nên hai
-đường đọc thấy hai giá trị khi test vừa tạo file trong `sub`. Nên so sánh `written` của thư mục có dung sai hoặc
-bỏ trường này khỏi phép so. Ghi 2026-11-25.
-
 ## [Thấp] Review độc lập cho M2
 
 Đợt M2 (phần C# và phần ghép Hook ↔ Broker) do subagent làm, không được tạo subagent review nên chưa có lượt

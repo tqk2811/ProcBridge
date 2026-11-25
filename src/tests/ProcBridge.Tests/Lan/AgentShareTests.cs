@@ -8,6 +8,34 @@ namespace ProcBridge.Tests.Lan;
 [TestClass]
 public sealed class AgentShareTests
 {
+    /// <summary>
+    /// NTFS updates the parent's copy of a subdirectory's times lazily: right after a file is created in "sub", a raw
+    /// enumeration of the root still shows sub's old write time while a stat of sub (and the real GetFileAttributesEx)
+    /// shows the new one. Listing and tree walk must report what a stat reports (flaky Probe_ThroughAgent_MatchesRealFolder).
+    /// </summary>
+    [TestMethod]
+    public void ListedSubdirectory_MatchesItsStat_RightAfterAChildWasCreated()
+    {
+        using var folder = new TempFolder("share");
+        var share = new AgentShare("src", folder.Path);
+        for (int i = 0; i < 5; i++)
+        {
+            string name = $"sub{i}";
+            Directory.CreateDirectory(folder.Combine(name));
+            Thread.Sleep(5);
+            File.WriteAllText(System.IO.Path.Combine(folder.Combine(name), "x.txt"), "x");
+
+            // Stat last: opening and closing sub brings the parent's copy up to date.
+            FsEntry walked = share.StartTree("", 1, 1000).NextPage(1 << 20).Single(x => x.Path.Length == 0).Entries.Single(x => x.Name == name);
+            FsEntry listed = share.List("", 0, 0).Entries.Single(x => x.Name == name);
+            FsEntry stat = share.Stat(name);
+
+            Assert.AreEqual(stat.LastWriteTime, listed.LastWriteTime, "listing");
+            Assert.AreEqual(stat.LastWriteTime, walked.LastWriteTime, "tree walk");
+            Assert.AreEqual(stat.ChangeTime, listed.ChangeTime, "listing change time");
+        }
+    }
+
     [TestMethod]
     [DataRow("NUL")]
     [DataRow("nul")]

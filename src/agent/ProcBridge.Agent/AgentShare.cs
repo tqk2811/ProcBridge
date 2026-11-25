@@ -191,7 +191,7 @@ public sealed partial class AgentShare
         return new FsListResponse
         {
             Entries = all.Skip(start).Take(count)
-                .Select(x => ToEntry(x, x.Name, details.TryGetValue(x.Name, out FileDetailsReader.FileDetails d) ? d : null))
+                .Select(x => ToListedEntry(x, details.TryGetValue(x.Name, out FileDetailsReader.FileDetails d) ? d : null))
                 .ToArray(),
             HasMore = start + count < all.Length,
         };
@@ -251,6 +251,25 @@ public sealed partial class AgentShare
 
     /// <param name="details">File id, change time and allocation size when they could be read; otherwise the change
     /// time falls back to the last write time and the id and allocation size stay unknown.</param>
+    /// <summary>
+    /// Entry of a listing or tree walk. Enumeration returns the copy of each child's metadata kept in the parent
+    /// directory's index; NTFS updates that copy for a subdirectory lazily (right after a child is created in it the
+    /// copy still has the old write time, for up to a few seconds), while <see cref="Stat"/> and the real
+    /// <c>GetFileAttributesEx</c> read the directory itself. Subdirectories are therefore read again from themselves, so
+    /// a listed directory and a stat of it agree. Files keep the scanned values: their copy is updated when the writer
+    /// closes them, and reading every file again would cost one open per file.
+    /// </summary>
+    internal static FsEntry ToListedEntry(FileSystemInfo info, FileDetailsReader.FileDetails? scanned)
+    {
+        if (info is DirectoryInfo && (info.Attributes & FileAttributes.ReparsePoint) == 0)
+        {
+            var own = new DirectoryInfo(info.FullName);
+            if (own.Exists)
+                return ToEntry(own, info.Name, FileDetailsReader.Read(own.FullName) ?? scanned);
+        }
+        return ToEntry(info, info.Name, scanned);
+    }
+
     internal static FsEntry ToEntry(FileSystemInfo info, string name, FileDetailsReader.FileDetails? details)
     {
         long lastWrite = info.LastWriteTimeUtc.ToFileTimeUtc();
