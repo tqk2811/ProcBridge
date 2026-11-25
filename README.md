@@ -4,4 +4,4 @@ Run a process (and all of its child processes) on machine A while it works on a 
 machine B, over LAN or the internet, as if that folder were local. Only the hooked process tree sees
 the virtual folder; everything else on machine A is untouched.
 
-Status: design stage, no code yet. See [docs/Plan-vi.md](docs/Plan-vi.md) (Vietnamese).
+Status: M0 skeleton (empty projects, build + CI). Code and build system live in `src/`. See [docs/Plan-vi.md](docs/Plan-vi.md) (Vietnamese).
