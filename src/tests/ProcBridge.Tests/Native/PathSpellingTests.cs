@@ -74,6 +74,22 @@ public sealed class PathSpellingTests
     [TestMethod]
     [DataRow("x64")]
     [DataRow("Win32")]
+    public void OpenByFileId_BelowVirtualRoot_FileOutsideBackingFolder_StaysReal(string platform)
+    {
+        // The id names a file of the same volume outside the backing folder: the new handle is not virtual.
+        using HookSandbox sandbox = new(platform);
+        string outside = Path.Combine(sandbox.BaseDirectory, "outside.txt");
+        File.WriteAllText(outside, "outside");
+
+        ProcessResult result = sandbox.RunHooked($"\"{sandbox.Binaries.Probe}\" --open-by-id \"{sandbox.VirtualRoot}\" \"{outside}\"");
+
+        Assert.AreEqual(0, result.ExitCode, result.StandardOutput + result.StandardError);
+        Assert.AreEqual($"by-id: \\\\?\\{outside}", result.StandardOutput.TrimEnd());
+    }
+
+    [TestMethod]
+    [DataRow("x64")]
+    [DataRow("Win32")]
     public async Task OpenByFileId_ThroughAgent_IsNotSupported(string platform)
     {
         // The process only sees machine B's file ids; on the cache volume they would open an unrelated file.

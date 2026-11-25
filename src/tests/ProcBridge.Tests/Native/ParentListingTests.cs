@@ -56,6 +56,8 @@ public sealed class ParentListingTests
         [
             $"find-exact: {leaf} dir=1",
             $"find-upper: {leaf} dir=1",
+            $"find-wild: {leaf} dir=1",
+            "nt-overlapped: count=0 status=0x80000006",
             "find-star: count=1 dir=1",
             "nt-null: count=1 status=0x80000006",
             "nt-single: count=1 status=0x80000006",

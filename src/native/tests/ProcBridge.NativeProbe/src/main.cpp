@@ -128,6 +128,12 @@ namespace
             _handle = handle;
         }
         HANDLE Get() const noexcept { return _handle; }
+        HANDLE Release() noexcept
+        {
+            const HANDLE handle = _handle;
+            _handle = INVALID_HANDLE_VALUE;
+            return handle;
+        }
         bool IsValid() const noexcept { return _handle != nullptr && _handle != INVALID_HANDLE_VALUE; }
 
     private:
@@ -2909,6 +2915,49 @@ namespace
         std::wstring upper = root;
         CharUpperBuffW(upper.data() + slash + 1, static_cast<DWORD>(leaf.size()));
         WriteLine(L"find-upper: " + find(upper));
+        // '?' and '*' in the last component (FindFirstFile turns some into DOS wildcards '<', '>', '"').
+        WriteLine(L"find-wild: " + find(parent + L"\\" + leaf.substr(0, 1) + L"?" + leaf.substr(2, 3) + L"*."));
+        {
+            // Overlapped handle: the system answers asynchronously, the hook must not touch that answer.
+            const auto query = reinterpret_cast<NtQueryDirectoryFileFn>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryDirectoryFile"));
+            Handle overlapped(CreateFileW(parent.c_str(), FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, nullptr));
+            Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+            std::vector<BYTE> buffer(64 * 1024);
+            int found = 0;
+            NTSTATUS status = STATUS_SUCCESS;
+            for (int call = 0; call < 1000 && overlapped.IsValid(); ++call)
+            {
+                IO_STATUS_BLOCK io{};
+                ResetEvent(event.Get());
+                status = query(overlapped.Get(), event.Get(), nullptr, nullptr, &io, buffer.data(), static_cast<ULONG>(buffer.size()),
+                    FileNamesInformationClass, FALSE, nullptr, FALSE);
+                if (status == STATUS_PENDING)
+                {
+                    WaitForSingleObject(event.Get(), 10000);
+                    status = io.Status;
+                }
+                if (!NT_SUCCESS(status))
+                {
+                    break;
+                }
+                for (ULONG offset = 0;;)
+                {
+                    ULONG next = 0;
+                    ULONG nameBytes = 0;
+                    memcpy(&next, buffer.data() + offset, sizeof(next));
+                    memcpy(&nameBytes, buffer.data() + offset + 8, sizeof(nameBytes));
+                    found += _wcsnicmp(reinterpret_cast<const wchar_t*>(buffer.data() + offset + 12), leaf.c_str(), leaf.size()) == 0
+                        && nameBytes == leaf.size() * sizeof(wchar_t) ? 1 : 0;
+                    if (next == 0)
+                    {
+                        break;
+                    }
+                    offset += next;
+                }
+            }
+            WriteLine(L"nt-overlapped: count=" + Num(found) + L" " + Status(status));
+        }
         WIN32_FIND_DATAW data{};
         int count = 0;
         int directories = 0;
@@ -3001,11 +3050,14 @@ namespace
         return CloseHandle(handle) ? 0 : 1;
     }
 
-    /// --dup-to-child <file>: opens file without inheritance, starts a child (--read-handle) that inherits nothing but
-    /// its standard handles, duplicates the handle into the child with DuplicateHandle and sends the value through the
-    /// child's stdin (as a process passes a handle over IPC). Prints its own view of the handle, then the child's.
-    int DuplicateToChild(const wchar_t* file)
+    /// --dup-to-child <file> [child exe] [squat|close-source]: opens file without inheritance, starts a child
+    /// (--read-handle, this probe or child exe) that inherits nothing but its standard handles, duplicates the handle into
+    /// the child with DuplicateHandle and sends the value through the child's stdin (as a process passes a handle over
+    /// IPC). Prints its own view of the handle, then the child's. squat: the child is created suspended and its handle
+    /// inbox name is taken first with a section anyone may write. close-source: DUPLICATE_CLOSE_SOURCE.
+    int DuplicateToChild(const wchar_t* file, const wchar_t* childExe, const wchar_t* modeArgument)
     {
+        const std::wstring mode = modeArgument != nullptr ? modeArgument : L"";
         Handle opened(OpenRead(file));
         if (!opened.IsValid())
         {
@@ -3033,7 +3085,7 @@ namespace
                 inherited.push_back(handle);
             }
         }
-        const std::wstring path = SelfPath();
+        const std::wstring path = childExe != nullptr && *childExe != 0 ? std::wstring(childExe) : SelfPath();
         std::wstring commandLine = L"\"" + path + L"\" --read-handle";
         STARTUPINFOEXW startup{};
         startup.StartupInfo.cb = sizeof(startup);
@@ -3048,7 +3100,8 @@ namespace
         }
         startup.lpAttributeList = attributes.Get();
         PROCESS_INFORMATION info{};
-        if (!CreateProcessW(path.c_str(), commandLine.data(), nullptr, nullptr, TRUE, EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr,
+        const DWORD suspend = mode == L"squat" ? CREATE_SUSPENDED : 0;
+        if (!CreateProcessW(path.c_str(), commandLine.data(), nullptr, nullptr, TRUE, EXTENDED_STARTUPINFO_PRESENT | suspend, nullptr, nullptr,
             &startup.StartupInfo, &info))
         {
             WriteLine(L"create: " + Error(GetLastError()));
@@ -3058,9 +3111,24 @@ namespace
         child.Process = info.hProcess;
         child.Thread = info.hThread;
         childInput.Reset();
+        Handle squatter(nullptr);
+        if (suspend != 0)
+        {
+            // Null DACL: any process could write fake entries into it. The child's hook must refuse the name.
+            SECURITY_DESCRIPTOR open{};
+            InitializeSecurityDescriptor(&open, SECURITY_DESCRIPTOR_REVISION);
+            SetSecurityDescriptorDacl(&open, TRUE, nullptr, FALSE);
+            SECURITY_ATTRIBUTES anyone{ sizeof(anyone), &open, FALSE };
+            const std::wstring name = L"Local\\ProcBridge-HandleInbox-" + std::to_wstring(info.dwProcessId);
+            squatter.Reset(CreateFileMappingW(INVALID_HANDLE_VALUE, &anyone, PAGE_READWRITE, 0, 1024 * 1024, name.c_str()));
+            ResumeThread(child.Thread);
+        }
         WriteLine(L"parent: " + FinalPath(opened.Get()) + L" " + Identity(opened.Get()));
         HANDLE copy = nullptr;
-        if (!DuplicateHandle(GetCurrentProcess(), opened.Get(), child.Process, &copy, 0, FALSE, DUPLICATE_SAME_ACCESS))
+        const DWORD options = DUPLICATE_SAME_ACCESS | (mode == L"close-source" ? DUPLICATE_CLOSE_SOURCE : 0);
+        // close-source: the system closes this process's handle, whatever DuplicateHandle returns.
+        const HANDLE source = mode == L"close-source" ? opened.Release() : opened.Get();
+        if (!DuplicateHandle(GetCurrentProcess(), source, child.Process, &copy, 0, FALSE, options))
         {
             WriteLine(L"duplicate: " + Error(GetLastError()));
             TerminateProcess(child.Process, 1);
@@ -3156,9 +3224,9 @@ namespace
         {
             return OpenById(argv[2], argv[3]);
         }
-        if (command == L"--dup-to-child" && argc == 3)
+        if (command == L"--dup-to-child" && argc >= 3 && argc <= 5)
         {
-            return DuplicateToChild(argv[2]);
+            return DuplicateToChild(argv[2], argc >= 4 ? argv[3] : nullptr, argc >= 5 ? argv[4] : nullptr);
         }
         if (command == L"--read-handle" && argc == 2)
         {

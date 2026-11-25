@@ -4,9 +4,9 @@ Việc còn treo, chưa thuộc mốc đang làm. Xử lý xong mục nào thì 
 
 ## [Thấp] Thư mục gốc ảo trong thư mục cha: các ca chưa phủ
 
-Mục của gốc ảo được chèn vào cuối lượt liệt kê thư mục cha thật (Plan 13.8). Chưa phủ: thư mục cha không có thật (mở
-thư mục cha đã lỗi); handle overlapped mà hàm gốc trả `STATUS_PENDING` (không chèn); gốc ảo nằm trong gốc ảo khác; mục
-chèn ở cuối chứ không theo thứ tự tên; `SL_INDEX_SPECIFIED`; quá 64 lượt quét thư mục cha cùng lúc; ở chế độ cục bộ
+Mục của gốc ảo được chèn vào cuối lượt liệt kê thư mục cha thật (Plan mục 13, "Hook: đường dẫn và handle ngoài thư mục ảo"). Chưa phủ: thư mục cha không có thật (mở
+thư mục cha đã lỗi); gốc ảo nằm trong gốc ảo khác; mục
+chèn ở cuối chứ không theo thứ tự tên; `SL_INDEX_SPECIFIED`; quá 64 lượt quét thư mục cha cùng lúc; handle overlapped hay lời gọi có event/APC (cố ý không chèn); ở chế độ cục bộ
 (`PROCBRIDGE_MAP`) mục không có file ID. Ghi 2026-11-26.
 
 ## [Vừa] Ký tự ổ giả (V:\) làm thư mục ảo
@@ -14,11 +14,11 @@ chèn ở cuối chứ không theo thứ tự tên; `SL_INDEX_SPECIFIED`; quá 6
 Plan 4.3 cho phép thư mục ảo nằm trên ổ không tồn tại. M1 chưa thử: `QueryDosDeviceW` của ổ ảo thất bại nên
 `NtQueryObject` trả tên theo volume của thư mục thật (`GetFinalPathNameByHandle` ra sai ổ), và
 `GetVolumeInformation("V:\")`, `GetDriveType` chưa được giả lập. Thiết kế volume giả (thiết bị riêng, symbolic link, mount
-manager, thông tin volume, device map) ở Plan 13.8; chưa làm. Gốc ảo trên ổ giả không được chèn vào liệt kê thư mục cha.
+manager, thông tin volume, device map) ở Plan mục 13 ("Hook: đường dẫn và handle ngoài thư mục ảo"); chưa làm. Gốc ảo trên ổ giả không được chèn vào liệt kê thư mục cha.
 
 ## [Thấp] Đường dẫn dạng khác: phần còn thiếu
 
-`\DosDevices\`, `\GLOBAL??\`, tên 8.3 nằm ngoài thư mục ảo và mở theo file ID đã xử lý (Plan 13.8). Còn thiếu:
+`\DosDevices\`, `\GLOBAL??\`, tên 8.3 nằm ngoài thư mục ảo và mở theo file ID đã xử lý (Plan mục 13, "Hook: đường dẫn và handle ngoài thư mục ảo"). Còn thiếu:
 - Tên 8.3 *bên trong* thư mục ảo: qua Broker, máy B không trả tên ngắn (`ShortName` rỗng) nên `SUB~1` không mở được; chế độ
   cục bộ để hệ thống file của thư mục thật tự giải.
 - `\??\GLOBALROOT\...` và đường dẫn tương đối theo handle thư mục thật được mở bằng tên 8.3 (`NtQueryObject` trả đúng dạng
@@ -28,11 +28,13 @@ manager, thông tin volume, device map) ở Plan 13.8; chưa làm. Gốc ảo tr
 
 ## [Thấp] Handle nhân bản sang process khác: các ca chưa phủ
 
-Process có hook nhân bản handle ảo vào process khác có hook thì mục được chuyển qua hộp thư chung (Plan 13.8). Chưa phủ:
-bên nhận tự kéo handle về (`DuplicateHandle(nguồn khác, ..., chính nó)`, bên gửi không chạy hook); handle process đích
-thiếu quyền query (`GetProcessId` lỗi); hộp thư đầy (16 ô chưa đọc) hoặc đường dẫn ảo dài hơn 1024 ký tự; nhân bản kèm
-`DUPLICATE_CLOSE_SOURCE` khi bên gửi còn bản sao khác giữ write token (Broker có thể nhận thừa một `CloseWrite`); process
-khác chiếm trước tên section `Local\ProcBridge-HandleInbox-<pid>`. Ghi 2026-11-26.
+Process có hook nhân bản handle ảo vào process khác có hook thì bên nhận theo dõi bản sao qua hộp thư chung (Plan mục 13,
+"Hook: đường dẫn và handle ngoài thư mục ảo"). Chưa phủ: bên nhận tự kéo handle về (`DuplicateHandle(nguồn khác, ...,
+chính nó)`, bên gửi không chạy hook); handle process đích thiếu quyền query; hộp thư đầy (16 ô chưa đọc); tên hộp thư bị
+chiếm trước (tính năng tắt cho process đó); bên nhận không giữ write token nên thứ nó ghi chỉ về máy B khi bên gửi đóng bản
+cuối (kèm `DUPLICATE_CLOSE_SOURCE` thì là lúc nhân bản); delete-on-close không chuyển; range id trong mục được tin (mục giả
+chỉ làm Broker tải thừa). Process cùng user, cùng integrity level vẫn ghi được vào hộp thư, chặn bằng kiểm tra phía nhận.
+Ghi 2026-11-26.
 
 ## [Vừa] Inject con: các đường chưa phủ
 

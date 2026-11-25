@@ -92,32 +92,79 @@ namespace ProcBridge::Hook
         // M8: set once a ranged cache copy was opened (or inherited); until then reads and mappings skip the table.
         std::atomic<bool> g_anyRange{ false };
 
+        /// True when handle is a file or directory whose real name lies under the backing folder of mapping (what a handle
+        /// opened through that virtual root is). virtualNt (optional) receives the matching virtual NT path (FreeString).
+        bool IsBackedByMapping(HANDLE handle, int mapping, UNICODE_STRING* virtualNt) noexcept
+        {
+            if (GetFileType(handle) != FILE_TYPE_DISK)
+            {
+                return false;
+            }
+            const PathMapping& map = g_resolver->GetMapping(mapping);
+            const size_t bufferBytes = sizeof(ObjectNameInfo) + MaxNameBytes;
+            HeapBuffer buffer(bufferBytes);
+            if (!buffer || map.RealDevicePath.Length == 0
+                || !NT_SUCCESS(g_ntQueryObject(handle, ObjectNameInformation, buffer.Get(), static_cast<ULONG>(bufferBytes), nullptr)))
+            {
+                return false;
+            }
+            const UNICODE_STRING& name = reinterpret_cast<const ObjectNameInfo*>(buffer.Get())->Name;
+            if (name.Buffer == nullptr || !HasPathPrefix(name.Buffer, name.Length, map.RealDevicePath))
+            {
+                return false;
+            }
+            if (virtualNt == nullptr)
+            {
+                return true;
+            }
+            return ConcatString(*virtualNt, map.VirtualNt,
+                reinterpret_cast<const wchar_t*>(reinterpret_cast<const BYTE*>(name.Buffer) + map.RealDevicePath.Length),
+                static_cast<size_t>(name.Length) - map.RealDevicePath.Length);
+        }
+
         /// Tracks the virtual handles other hooked processes duplicated into this one since the last call (HandleInbox).
-        /// Runs first in every hook that looks a handle up; one shared memory read when nothing arrived.
+        /// Runs first in every hook that looks a handle up; one shared memory read when nothing arrived. An entry is only a
+        /// hint: it is dropped unless its mapping is the same root here and the handle really is a file under that root's
+        /// backing folder; the virtual path comes from the handle's own name, machine B's metadata from Stat.
         void AdoptIncomingHandles() noexcept
         {
+            ReentryGuard guard; // Stat below goes to the Broker: its own calls must not drain again
+            if (!guard.IsOutermost())
+            {
+                return;
+            }
             g_inbox.Drain([](const DuplicatedHandle& entry)
                 {
                     const HANDLE handle = ULongToHandle(entry.Handle);
-                    g_directoryNames.Remove(handle);
-                    g_parentScans.Remove(handle);
-                    if (entry.Mapping < 0 || entry.Mapping >= g_resolver->Count())
+                    if (entry.Mapping < 0 || entry.Mapping >= g_resolver->Count()
+                        || entry.RootHash != HandleInbox::RootHash(g_resolver->GetMapping(entry.Mapping).VirtualNt))
                     {
                         return;
                     }
-                    g_handles.Add(handle, entry.Mapping);
-                    if (entry.Remote && g_resolver->IsRemote())
+                    UNICODE_STRING virtualNt{};
+                    if (!IsBackedByMapping(handle, entry.Mapping, &virtualNt))
                     {
-                        g_remoteHandles.Add(handle, entry.Mapping, entry.Path, entry.Info, entry.WriteToken, entry.DeleteOnClose);
-                        if (entry.Info.RangeId != 0)
+                        return;
+                    }
+                    HookIpc::FileInfo info{};
+                    if (g_resolver->IsRemote() && !NT_SUCCESS(g_resolver->Stat(entry.Mapping, virtualNt, PathKind::Nt, info)))
+                    {
+                        FreeString(virtualNt);
+                        return;
+                    }
+                    g_directoryNames.Remove(handle);
+                    g_parentScans.Remove(handle);
+                    g_handles.Add(handle, entry.Mapping);
+                    if (g_resolver->IsRemote())
+                    {
+                        info.RangeId = entry.RangeId;
+                        g_remoteHandles.Add(handle, entry.Mapping, virtualNt, info);
+                        if (entry.RangeId != 0)
                         {
                             g_anyRange.store(true, std::memory_order_relaxed);
                         }
                     }
-                    else
-                    {
-                        g_remoteHandles.Remove(handle);
-                    }
+                    FreeString(virtualNt);
                 });
         }
 
@@ -183,7 +230,7 @@ namespace ProcBridge::Hook
             IO_STATUS_BLOCK io{};
             if (!NT_SUCCESS(g_ntOpenFile(&handle, FILE_LIST_DIRECTORY | SYNCHRONIZE, &attributes, &io,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_FOR_BACKUP_INTENT)))
+                FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT)))
             {
                 return false;
             }
@@ -210,7 +257,8 @@ namespace ProcBridge::Hook
         bool ExpandShortNames(const UNICODE_STRING& path, UNICODE_STRING& expanded) noexcept
         {
             const USHORT chars = path.Length / sizeof(wchar_t);
-            if (!StartsWithText(path, L"\\??\\", 4))
+            // Drive letter paths only (\??\X:\...): UNC and Volume{GUID} roots are left alone.
+            if (!StartsWithText(path, L"\\??\\", 4) || chars < 7 || path.Buffer[5] != L':' || path.Buffer[6] != L'\\')
             {
                 return false;
             }
@@ -414,6 +462,7 @@ namespace ProcBridge::Hook
                         else
                         {
                             _mapping = g_handles.Find(_attributes.RootDirectory);
+                            _byFileId = true;
                         }
                     }
                     return;
@@ -484,6 +533,8 @@ namespace ProcBridge::Hook
             RedirectedAttributes& operator=(const RedirectedAttributes&) = delete;
 
             bool Matched() const noexcept { return _mapping >= 0; }
+            /// Opened by file id below a virtual handle: tracked only if the file lies under the backing folder.
+            bool ByFileId() const noexcept { return _byFileId; }
             /// STATUS_SUCCESS, or the status the hook returns without calling the system.
             NTSTATUS Error() const noexcept { return _error; }
             int Mapping() const noexcept { return _mapping; }
@@ -669,6 +720,7 @@ namespace ProcBridge::Hook
             wchar_t* _heapName = nullptr;
             int _mapping = -1;
             bool _rewritten = false;
+            bool _byFileId = false;
             NTSTATUS _error = STATUS_SUCCESS;
         };
 
@@ -730,7 +782,7 @@ namespace ProcBridge::Hook
             }
             g_directoryNames.Remove(handle);
             g_parentScans.Remove(handle);
-            if (redirect.Matched())
+            if (redirect.Matched() && (!redirect.ByFileId() || IsBackedByMapping(handle, redirect.Mapping(), nullptr)))
             {
                 g_handles.Add(handle, redirect.Mapping());
             }
@@ -2090,6 +2142,17 @@ namespace ProcBridge::Hook
             }
         }
 
+        /// True when the handle was opened for synchronous I/O (FILE_SYNCHRONOUS_IO_[NON]ALERT).
+        bool IsSynchronousHandle(HANDLE handle) noexcept
+        {
+            constexpr ULONG FileModeInformationClass = 16;
+            constexpr ULONG SynchronousModes = 0x10 | 0x20;
+            ULONG mode = 0;
+            IO_STATUS_BLOCK io{};
+            return NT_SUCCESS(g_ntQueryInformationFile(handle, &io, &mode, sizeof(mode), FileModeInformationClass))
+                && (mode & SynchronousModes) != 0;
+        }
+
         /// Mask of the virtual roots that sit directly in the folder of a real directory handle.
         uint32_t RootsInFolder(HANDLE directory) noexcept
         {
@@ -2148,18 +2211,20 @@ namespace ProcBridge::Hook
         /// parent folder of virtual roots gets their entries once the system's own entries are exhausted
         /// (STATUS_NO_MORE_FILES, or STATUS_NO_SUCH_FILE for a pattern nothing real matches). status is replaced when
         /// entries were added. A pattern given with the first query is remembered, since later queries come without one.
-        void AddVirtualRootEntries(HANDLE fileHandle, PIO_STATUS_BLOCK ioStatusBlock, PVOID information, ULONG length,
+        void AddVirtualRootEntries(HANDLE fileHandle, HANDLE event, PIO_APC_ROUTINE apcRoutine, PIO_STATUS_BLOCK ioStatusBlock, PVOID information, ULONG length,
             ULONG informationClass, bool returnSingleEntry, PUNICODE_STRING fileName, bool restartScan, NTSTATUS& status) noexcept
         {
             const bool exhausted = status == STATUS_NO_MORE_FILES || status == STATUS_NO_SUCH_FILE;
             const bool startsScan = fileName != nullptr || restartScan;
-            if (g_parentRootMask == 0 || (!exhausted && !startsScan) || status == STATUS_PENDING)
+            // Only a plain synchronous call: an event, an APC or an asynchronous handle (completion port) was already told
+            // the system's answer.
+            if (g_parentRootMask == 0 || (!exhausted && !startsScan) || status == STATUS_PENDING || event != nullptr || apcRoutine != nullptr)
             {
                 return;
             }
             if (startsScan)
             {
-                const uint32_t roots = RootsInFolder(fileHandle);
+                const uint32_t roots = IsSynchronousHandle(fileHandle) ? RootsInFolder(fileHandle) : 0;
                 if (roots == 0)
                 {
                     g_parentScans.Remove(fileHandle);
@@ -2188,7 +2253,7 @@ namespace ProcBridge::Hook
             if (!g_parentScans.Get(fileHandle, pending, pattern))
             {
                 // A scan started without a pattern (.NET passes none): any name matches.
-                const uint32_t roots = startsScan ? 0 : RootsInFolder(fileHandle);
+                const uint32_t roots = startsScan || !IsSynchronousHandle(fileHandle) ? 0 : RootsInFolder(fileHandle);
                 if (roots == 0)
                 {
                     return;
@@ -2226,10 +2291,18 @@ namespace ProcBridge::Hook
                 const ULONG start = AlignDirectoryEntry(written);
                 if (static_cast<ULONGLONG>(start) + format.NameOffset() + leaf.Length > scratchBytes)
                 {
-                    if (!any)
+                    if (!any && start + format.NameOffset() <= scratchBytes)
                     {
-                        status = STATUS_BUFFER_OVERFLOW;
-                        SafeSetIoStatus(ioStatusBlock, status, 0);
+                        // Like the system: the fixed part with the full name length, as much of the name as fits.
+                        const ULONG partial = (scratchBytes - start - format.NameOffset()) & ~1UL;
+                        format.Write(scratch.Get() + start, info, leaf.Buffer, partial);
+                        const ULONG fullBytes = leaf.Length;
+                        memcpy(scratch.Get() + start + format.NameLengthOffset(), &fullBytes, sizeof(fullBytes));
+                        written = start + format.NameOffset() + partial;
+                        if (SafeCopy(information, scratch.Get(), written) && SafeSetIoStatus(ioStatusBlock, STATUS_BUFFER_OVERFLOW, written))
+                        {
+                            status = STATUS_BUFFER_OVERFLOW;
+                        }
                     }
                     break;
                 }
@@ -2267,30 +2340,17 @@ namespace ProcBridge::Hook
             return process == GetCurrentProcess() || (process != nullptr && GetProcessId(process) == GetCurrentProcessId());
         }
 
-        /// A virtual handle duplicated into another process: its entry goes to the hook of that process (HandleInbox), which
-        /// tracks the copy at its next handle lookup. The receiver holds the write token too, so the Broker is told to expect
-        /// its close (RetainWrite); with DUPLICATE_CLOSE_SOURCE the sender's reference moves over instead.
-        void SendDuplicate(HANDLE targetProcess, HANDLE copy, int mapping, bool remote, const UNICODE_STRING& path,
-            const HookIpc::FileInfo& info, uint64_t writeToken, bool deleteOnClose, bool closeSource) noexcept
+        /// A virtual handle duplicated into another process: the hook of that process is told (HandleInbox) and tracks the
+        /// copy at its next handle lookup, after checking the handle itself. The write token stays with this process: what
+        /// the receiver writes is written back when this process closes its last copy (or now, with DUPLICATE_CLOSE_SOURCE).
+        void SendDuplicate(HANDLE targetProcess, HANDLE copy, int mapping, uint32_t rangeId) noexcept
         {
-            const DWORD processId = GetProcessId(targetProcess); // 0 without query access: the copy stays untracked
-            if (processId == 0)
-            {
-                return;
-            }
             DuplicatedHandle entry;
             entry.Handle = HandleToULong(copy);
             entry.Mapping = mapping;
-            entry.Remote = remote;
-            entry.DeleteOnClose = remote && deleteOnClose;
-            entry.Info = info;
-            entry.Path = path;
-            const bool retained = remote && writeToken != 0 && !closeSource && NT_SUCCESS(g_resolver->RetainWrite(writeToken));
-            entry.WriteToken = remote && (retained || closeSource) ? writeToken : 0;
-            if (!HandleInbox::Send(processId, entry) && retained)
-            {
-                g_resolver->CloseWrite(writeToken);
-            }
+            entry.RootHash = HandleInbox::RootHash(g_resolver->GetMapping(mapping).VirtualNt);
+            entry.RangeId = rangeId;
+            HandleInbox::Send(targetProcess, entry); // no inbox, other process with that id, full: the copy stays untracked
         }
 
         /// DuplicateHandle inside the process: the copy of a virtual handle is virtual too, a copy that
@@ -2323,6 +2383,7 @@ namespace ProcBridge::Hook
                 FreeString(remotePath);
                 return status;
             }
+            RemovedRemoteHandle closedSource;
             if (sourceIsSelf && (options & DUPLICATE_CLOSE_SOURCE) != 0)
             {
                 if (mapping >= 0)
@@ -2331,7 +2392,7 @@ namespace ProcBridge::Hook
                 }
                 g_directoryNames.Remove(sourceHandle);
                 g_parentScans.Remove(sourceHandle);
-                g_remoteHandles.Remove(sourceHandle);
+                g_remoteHandles.Remove(sourceHandle, 0, &closedSource);
                 g_watches.Closed(sourceHandle);
             }
             HANDLE copy = nullptr;
@@ -2358,11 +2419,20 @@ namespace ProcBridge::Hook
                     g_remoteHandles.Remove(copy);
                 }
             }
-            else if (copied && mapping >= 0)
+            else
             {
-                SendDuplicate(targetProcess, copy, mapping, remote, remotePath, remoteInfo, remoteToken, remoteDeleteOnClose,
-                    (options & DUPLICATE_CLOSE_SOURCE) != 0);
+                if (copied && mapping >= 0)
+                {
+                    SendDuplicate(targetProcess, copy, mapping, remote ? remoteInfo.RangeId : 0);
+                }
+                // The source left this process: like NtClose, its last reference to the write token ends here (a copy in
+                // this process above kept it instead).
+                if (closedSource.WriteToken != 0)
+                {
+                    g_resolver->CloseWrite(closedSource.WriteToken);
+                }
             }
+            FreeString(closedSource.Path);
             FreeString(remotePath);
             return status;
         }
@@ -2387,7 +2457,7 @@ namespace ProcBridge::Hook
             }
             status = g_ntQueryDirectoryFile(fileHandle, event, apcRoutine, apcContext, ioStatusBlock, information, length,
                 informationClass, returnSingleEntry, fileName, restartScan);
-            AddVirtualRootEntries(fileHandle, ioStatusBlock, information, length, informationClass, returnSingleEntry != FALSE, fileName,
+            AddVirtualRootEntries(fileHandle, event, apcRoutine, ioStatusBlock, information, length, informationClass, returnSingleEntry != FALSE, fileName,
                 restartScan != FALSE, status);
             return status;
         }
@@ -2416,7 +2486,7 @@ namespace ProcBridge::Hook
             }
             status = g_ntQueryDirectoryFileEx(fileHandle, event, apcRoutine, apcContext, ioStatusBlock, information, length,
                 informationClass, queryFlags, fileName);
-            AddVirtualRootEntries(fileHandle, ioStatusBlock, information, length, informationClass, single, fileName, restart, status);
+            AddVirtualRootEntries(fileHandle, event, apcRoutine, ioStatusBlock, information, length, informationClass, single, fileName, restart, status);
             return status;
         }
 
