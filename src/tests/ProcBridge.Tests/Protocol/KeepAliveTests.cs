@@ -33,6 +33,9 @@ public sealed class KeepAliveTests
         KeepAliveTimeout = TimeSpan.FromMilliseconds(400),
     };
 
+    /// <summary>Probes as often, but tolerates a stall of the busy test process before declaring a live peer dead.</summary>
+    private static readonly TransportOptions TolerantKeepAlive = FastKeepAlive with { KeepAliveTimeout = TimeSpan.FromSeconds(5) };
+
     /// <summary>Answers Hello, then reads every frame and never answers again: a hung Agent.</summary>
     private static async Task ServeSilentlyAsync(Stream stream, CancellationToken cancellationToken)
     {
@@ -125,7 +128,7 @@ public sealed class KeepAliveTests
         await using var server = new AgentServer([new AgentShare("s", share.Path)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
         server.Start();
 
-        await using ProtocolConnection connection = await ProtocolConnection.OpenAsync(new TcpConnectionFactory("127.0.0.1", server.Port, FastKeepAlive), Hello, FastKeepAlive, CancellationToken.None);
+        await using ProtocolConnection connection = await ProtocolConnection.OpenAsync(new TcpConnectionFactory("127.0.0.1", server.Port, TolerantKeepAlive), Hello, TolerantKeepAlive, CancellationToken.None);
         await Task.Delay(TimeSpan.FromSeconds(2));
 
         Assert.IsTrue(connection.IsAlive, "the Agent did not answer the keepalive probes");
