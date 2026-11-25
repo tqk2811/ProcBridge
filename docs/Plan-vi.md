@@ -877,6 +877,21 @@ Nhận xét:
   dẫn quá dài thì bản sao không được theo dõi như trước. Kiểm (`HandleDuplicationTests.cs`, x64 và Win32): con chỉ kế thừa
   handle chuẩn, cha nhân bản handle ảo vào con rồi gửi giá trị qua stdin; con thấy tên ảo, file ID và thời gian giống cha
   (qua Agent là của máy B, không phải bản cache); đỏ trên Hook cũ.
+- **Ký tự ổ giả (`V:\`), thiết kế, chưa làm**: hiện gốc `V:\dir` chạy được nhờ mượn volume của thư mục thật làm
+  `VirtualDevicePath` (`VirtualDriveMissing`), nên `GetFinalPathNameByHandle` ra sai ổ, còn gốc ổ `V:\` bị từ chối và
+  `GetVolumeInformation`/`GetDriveType`/`GetLogicalDrives` không biết `V:`. Đủ cho ổ giả cần một volume giả trọn vẹn:
+  1. Mỗi ổ giả có tên thiết bị riêng `\Device\ProcBridgeVolumeV` làm `VirtualDevicePath`; `NtQueryObject` đổi tên ra thiết
+     bị này thay cho volume thật.
+  2. Hook `NtOpenSymbolicLinkObject`/`NtQuerySymbolicLinkObject` cho `\??\V:` (`QueryDosDeviceW`) trả tên thiết bị trên.
+  3. Hook `NtDeviceIoControlFile` trên handle của `\Device\MountPointManager`: `IOCTL_MOUNTMGR_QUERY_DOS_VOLUME_PATH(S)` với
+     tên thiết bị giả trả `V:\` (kernelbase dùng nó cho `VOLUME_NAME_DOS`); `VOLUME_NAME_GUID` báo lỗi như ổ không có GUID.
+  4. Cho phép gốc ổ `V:\` làm thư mục ảo khi ổ không tồn tại (gốc ổ thật vẫn bị từ chối); mở `\??\V:\` vào thư mục phía sau.
+     `NtQueryVolumeInformationFile` trên handle của ổ giả (`FileFsVolumeInformation`, `FileFsAttributeInformation`,
+     `FileFsSizeInformation`, `FileFsFullSizeInformation`, `FileFsDeviceInformation`) trả nhãn, serial, hệ thống file, dung
+     lượng của máy B (Agent cần lệnh mới) hoặc của volume thật ở chế độ cục bộ; `GetDriveType` đọc `FileFsDeviceInformation`.
+  5. `GetLogicalDrives` đọc device map của process (`NtQueryInformationProcess(ProcessDeviceMap)`): hook thêm bit của ổ giả.
+  6. Liệt kê thư mục cha (mục trên) không áp cho gốc ổ. Test: NativeProbe so `V:\` với thư mục thật như `HookComparisonTests`
+     (tên cuối, volume, kiểu ổ), cục bộ và qua Agent, x64 và Win32.
 
 ---
 

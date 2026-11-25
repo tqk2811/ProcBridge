@@ -13,7 +13,8 @@ chèn ở cuối chứ không theo thứ tự tên; `SL_INDEX_SPECIFIED`; quá 6
 
 Plan 4.3 cho phép thư mục ảo nằm trên ổ không tồn tại. M1 chưa thử: `QueryDosDeviceW` của ổ ảo thất bại nên
 `NtQueryObject` trả tên theo volume của thư mục thật (`GetFinalPathNameByHandle` ra sai ổ), và
-`GetVolumeInformation("V:\")`, `GetDriveType` chưa được giả lập.
+`GetVolumeInformation("V:\")`, `GetDriveType` chưa được giả lập. Thiết kế volume giả (thiết bị riêng, symbolic link, mount
+manager, thông tin volume, device map) ở Plan 13.8; chưa làm. Gốc ảo trên ổ giả không được chèn vào liệt kê thư mục cha.
 
 ## [Thấp] Đường dẫn dạng khác: phần còn thiếu
 
