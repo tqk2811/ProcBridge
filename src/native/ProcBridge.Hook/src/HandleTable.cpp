@@ -25,6 +25,7 @@ namespace ProcBridge::Hook
             {
                 // Stale entry (handle closed without passing through NtClose, e.g. by the kernel).
                 _entries[i].Mapping = mapping;
+                _entries[i].Generation = _nextGeneration++;
                 ReleaseSRWLockExclusive(&_lock);
                 return;
             }
@@ -47,12 +48,12 @@ namespace ProcBridge::Hook
             _entries = entries;
             _capacity = capacity;
         }
-        _entries[count] = { handle, mapping };
+        _entries[count] = { handle, mapping, _nextGeneration++ };
         _count.store(count + 1, std::memory_order_release);
         ReleaseSRWLockExclusive(&_lock);
     }
 
-    int HandleTable::Find(HANDLE handle) const noexcept
+    int HandleTable::Find(HANDLE handle, ULONG64* generation) const noexcept
     {
         if (_count.load(std::memory_order_acquire) == 0)
         {
@@ -66,6 +67,10 @@ namespace ProcBridge::Hook
             if (_entries[i].Handle == handle)
             {
                 mapping = _entries[i].Mapping;
+                if (generation != nullptr)
+                {
+                    *generation = _entries[i].Generation;
+                }
                 break;
             }
         }
@@ -75,7 +80,18 @@ namespace ProcBridge::Hook
 
     void HandleTable::Remove(HANDLE handle) noexcept
     {
-        if (_count.load(std::memory_order_acquire) == 0)
+        RemoveIf(handle, true, 0);
+    }
+
+    void HandleTable::Remove(HANDLE handle, ULONG64 generation) noexcept
+    {
+        RemoveIf(handle, false, generation);
+    }
+
+    void HandleTable::RemoveIf(HANDLE handle, bool anyGeneration, ULONG64 generation) noexcept
+    {
+        // Shared probe first: Remove runs for every successful open that is not virtual.
+        if (Find(handle) < 0)
         {
             return;
         }
@@ -83,7 +99,7 @@ namespace ProcBridge::Hook
         const size_t count = _count.load(std::memory_order_relaxed);
         for (size_t i = 0; i < count; ++i)
         {
-            if (_entries[i].Handle == handle)
+            if (_entries[i].Handle == handle && (anyGeneration || _entries[i].Generation == generation))
             {
                 _entries[i] = _entries[count - 1];
                 _count.store(count - 1, std::memory_order_release);

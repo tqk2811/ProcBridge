@@ -185,13 +185,18 @@ namespace ProcBridge::Hook
             bool _failed = false;
         };
 
-        /// A new handle value may equal a handle that was closed without NtClose: drop stale entries.
+        /// A new handle value may equal a handle that was closed without NtClose (NtDuplicateObject with
+        /// DUPLICATE_CLOSE_SOURCE, kernel): replace or drop stale entries.
         void TrackOpenedHandle(HANDLE handle, const RedirectedAttributes& redirect) noexcept
         {
             g_directoryNames.Remove(handle);
             if (redirect.Matched())
             {
                 g_handles.Add(handle, redirect.Mapping());
+            }
+            else
+            {
+                g_handles.Remove(handle);
             }
         }
 
@@ -430,10 +435,23 @@ namespace ProcBridge::Hook
 
         NTSTATUS NTAPI HookNtClose(HANDLE handle)
         {
-            // Remove before closing: once closed, another thread may receive the same handle value.
-            g_handles.Remove(handle);
-            g_directoryNames.Remove(handle);
-            return g_ntClose(handle);
+            // Remove only after the close succeeded (a failed close keeps the handle open). Once closed,
+            // another thread may already have received the same value and a new entry: the generation
+            // check leaves that entry alone.
+            ULONG64 generation = 0;
+            const bool tracked = g_handles.Find(handle, &generation) >= 0;
+            const NTSTATUS status = g_ntClose(handle);
+            if (NT_SUCCESS(status))
+            {
+                if (tracked)
+                {
+                    g_handles.Remove(handle, generation);
+                }
+                // A cached directory name is only a cache: a stale entry for a reused value is also
+                // dropped by the next hooked open that returns it.
+                g_directoryNames.Remove(handle);
+            }
+            return status;
         }
 
         struct HookEntry

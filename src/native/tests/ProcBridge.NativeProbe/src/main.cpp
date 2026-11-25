@@ -3,6 +3,7 @@
 // on the real folder and a run through the virtual folder must print exactly the same text.
 //
 // Usage: ProcBridge.NativeProbe.<arch>.exe <root>
+//        ProcBridge.NativeProbe.<arch>.exe --<command> <arguments>   (single checks, see RunCommand)
 // Expected tree under <root> (created by the test): a.txt, sub\b.txt, sub\deep\c.bin, empty\,
 // ro.txt (read-only), unicode file name. Last access times are never printed (they drift).
 #define WIN32_NO_STATUS
@@ -664,8 +665,111 @@ namespace
     };
 }
 
+namespace
+{
+    void WriteLine(const std::wstring& text)
+    {
+        const std::wstring line = text + L"\n";
+        const int bytes = WideCharToMultiByte(CP_UTF8, 0, line.c_str(), static_cast<int>(line.size()), nullptr, 0, nullptr, nullptr);
+        std::string utf8(static_cast<size_t>(bytes), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, line.c_str(), static_cast<int>(line.size()), utf8.data(), bytes, nullptr, nullptr);
+        DWORD written = 0;
+        WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
+    }
+
+    std::wstring FinalPath(HANDLE handle)
+    {
+        wchar_t path[MAX_PATH * 2];
+        const DWORD length = GetFinalPathNameByHandleW(handle, path, static_cast<DWORD>(std::size(path)), FILE_NAME_NORMALIZED);
+        return length == 0 || length >= std::size(path) ? Error(GetLastError()) : std::wstring(path, length);
+    }
+
+    HANDLE OpenRead(const wchar_t* path)
+    {
+        return CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+    }
+
+    /// --stale-handle <virtual file> <real file>: closes a virtual handle without NtClose
+    /// (DuplicateHandle with DUPLICATE_CLOSE_SOURCE and no target process), reopens the real file until
+    /// the old handle value comes back and prints the final path of that new handle.
+    int StaleHandle(const wchar_t* virtualFile, const wchar_t* realFile)
+    {
+        const HANDLE stale = OpenRead(virtualFile);
+        if (stale == INVALID_HANDLE_VALUE)
+        {
+            WriteLine(L"open virtual: " + Error(GetLastError()));
+            return 1;
+        }
+        if (!DuplicateHandle(GetCurrentProcess(), stale, nullptr, nullptr, 0, FALSE, DUPLICATE_CLOSE_SOURCE))
+        {
+            WriteLine(L"close source: " + Error(GetLastError()));
+            return 1;
+        }
+        std::vector<HANDLE> others;
+        HANDLE reused = INVALID_HANDLE_VALUE;
+        for (int attempt = 0; attempt < 1024 && reused == INVALID_HANDLE_VALUE; ++attempt)
+        {
+            const HANDLE handle = OpenRead(realFile);
+            if (handle == INVALID_HANDLE_VALUE)
+            {
+                WriteLine(L"open real: " + Error(GetLastError()));
+                return 1;
+            }
+            (handle == stale ? reused : others.emplace_back()) = handle;
+        }
+        WriteLine(reused == INVALID_HANDLE_VALUE ? L"reused: none" : L"reused: " + FinalPath(reused));
+        for (HANDLE handle : others)
+        {
+            CloseHandle(handle);
+        }
+        if (reused != INVALID_HANDLE_VALUE)
+        {
+            CloseHandle(reused);
+        }
+        return 0;
+    }
+
+    /// --failed-close <file>: a close that fails (handle protected from close) keeps the handle open, so its
+    /// final path must not change.
+    int FailedClose(const wchar_t* file)
+    {
+        const HANDLE handle = OpenRead(file);
+        if (handle == INVALID_HANDLE_VALUE)
+        {
+            WriteLine(L"open: " + Error(GetLastError()));
+            return 1;
+        }
+        SetHandleInformation(handle, HANDLE_FLAG_PROTECT_FROM_CLOSE, HANDLE_FLAG_PROTECT_FROM_CLOSE);
+        const BOOL closed = CloseHandle(handle);
+        WriteLine(L"close: " + (closed ? std::wstring(L"closed") : Error(GetLastError())));
+        WriteLine(L"after: " + FinalPath(handle));
+        SetHandleInformation(handle, HANDLE_FLAG_PROTECT_FROM_CLOSE, 0);
+        CloseHandle(handle);
+        return 0;
+    }
+
+    int RunCommand(int argc, wchar_t** argv)
+    {
+        const std::wstring command = argv[1];
+        if (command == L"--stale-handle" && argc == 4)
+        {
+            return StaleHandle(argv[2], argv[3]);
+        }
+        if (command == L"--failed-close" && argc == 3)
+        {
+            return FailedClose(argv[2]);
+        }
+        std::fputs("ProcBridge.NativeProbe: unknown command\n", stderr);
+        return 2;
+    }
+}
+
 int wmain(int argc, wchar_t** argv)
 {
+    if (argc >= 2 && argv[1][0] == L'-' && argv[1][1] == L'-')
+    {
+        return RunCommand(argc, argv);
+    }
     if (argc != 2)
     {
         std::fputs("Usage: ProcBridge.NativeProbe <root>\n", stderr);
