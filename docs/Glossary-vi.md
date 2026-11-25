@@ -57,3 +57,8 @@ lần ghi đều gửi ngay sang máy B.
 ## Test so sánh (differential testing)
 
 Chạy cùng một kịch bản trên hai môi trường (thư mục thật và thư mục ảo) rồi so kết quả; khác nhau là lỗi.
+
+## Lane (tunnel relay)
+
+Một kết nối WebSocket dữ liệu trong một phiên tunnel qua Relay. Mỗi phiên có nhiều lane song song; lane cùng
+số của máy A và máy B được Relay ghép cặp và chép nguyên khung giữa hai đầu.
