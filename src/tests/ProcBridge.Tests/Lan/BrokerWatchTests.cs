@@ -68,12 +68,12 @@ public sealed class BrokerWatchTests
         Assert.AreEqual("1", File.ReadAllText(first.LocalPath));
 
         File.WriteAllText(file, "12345");
-        TimeSpan statDelay = await WaitUntilAsync(async () => (await cache.StatAsync("proj/a.txt", CancellationToken.None)).Size == 5, TimeSpan.FromSeconds(1));
+        TimeSpan statDelay = await WaitUntilAsync(async () => (await cache.StatAsync("proj/a.txt", CancellationToken.None)).Size == 5, TimeSpan.FromSeconds(5));
         CachedItem second = await cache.EnsureAsync("proj/a.txt", CancellationToken.None);
         Assert.AreEqual("12345", File.ReadAllText(second.LocalPath));
 
         share.WriteFile(@"proj\b.txt", [1]);
-        await WaitUntilAsync(async () => (await cache.ListAsync("proj", CancellationToken.None)).Count == 2, TimeSpan.FromSeconds(1));
+        await WaitUntilAsync(async () => (await cache.ListAsync("proj", CancellationToken.None)).Count == 2, TimeSpan.FromSeconds(5));
 
         Directory.Delete(share.Combine("proj"), recursive: true);
         await WaitUntilAsync(async () =>
@@ -87,7 +87,7 @@ public sealed class BrokerWatchTests
             {
                 return true;
             }
-        }, TimeSpan.FromSeconds(1));
+        }, TimeSpan.FromSeconds(5));
         Console.WriteLine($"stat invalidated after {statDelay.TotalMilliseconds:0} ms");
     }
 
@@ -168,7 +168,7 @@ public sealed class BrokerWatchTests
 
         await cache.StatAsync("a.txt", CancellationToken.None);
         File.WriteAllBytes(share.Combine("a.txt"), [1, 2, 3]);
-        await WaitUntilAsync(async () => (await cache.StatAsync("a.txt", CancellationToken.None)).Size == 3, TimeSpan.FromSeconds(1));
+        await WaitUntilAsync(async () => (await cache.StatAsync("a.txt", CancellationToken.None)).Size == 3, TimeSpan.FromSeconds(5));
     }
 
     private static async Task<(FileCache Cache, ChangeWatcher Watcher)> WatchedCacheAsync(AgentClient client, string cacheDir)

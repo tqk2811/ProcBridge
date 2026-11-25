@@ -50,6 +50,9 @@ Hook C++ cần:
 - Dựng `FILE_NOTIFY_INFORMATION` (hoặc `FILE_NOTIFY_EXTENDED_INFORMATION` cho bản Ex) từ danh sách thay đổi;
   buffer của process không đủ chỗ hoặc reply có cờ `ChangesFlagOverflow` thì trả `STATUS_NOTIFY_ENUM_DIR`.
 - Trả nguyên `Status` lỗi của reply (vd `STATUS_INVALID_HANDLE` khi watch đã bị gỡ, `STATUS_NOT_A_DIRECTORY`).
+- Watch thuộc về process Hook (PID của client pipe): Broker gỡ hết watch của một process khi kết nối pipe CUỐI CÙNG của
+  nó đóng, và một long poll `WaitChanges` bị huỷ ngay khi pipe của nó đứt. Hook vì vậy phải giữ ít nhất một pipe mở
+  suốt thời gian còn handle đang watch; pipe pool đóng hết rồi mở lại thì mọi `WatchId` cũ báo `STATUS_INVALID_HANDLE`.
 
 ## [Vừa] FileId và ChangeTime thật từ Agent
 
@@ -99,7 +102,8 @@ chờ đủ `RequestTimeout`. Nên có ping/keepalive và đánh dấu kết n�
 `src/tools/ProcBridge.Bench` mới đo trên loopback. Điều kiện xong M7 là đo thời gian build so với chạy cục bộ: cần
 một `IConnectionFactory` chèn độ trễ/băng thông giả lập (hoặc chạy qua LAN/relay thật), và chạy build thật (vd
 `dotnet build` một solution mẫu) qua Hook khi Hook đã nối Broker. Read-ahead hiện tranh connection pool với request
-tiền cảnh (chưa có ưu tiên, liên quan mục cửa sổ tín dụng) và không bị huỷ khi `BrokerHost` dừng.
+tiền cảnh (chưa có ưu tiên, liên quan mục cửa sổ tín dụng; mặc định đã hạ xuống 2 tải song song cho toàn cache) và
+không bị huỷ khi `BrokerHost` dừng.
 
 ## [Thấp] Agent chưa xác thực, chưa mã hoá
 
