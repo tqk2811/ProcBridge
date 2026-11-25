@@ -20,6 +20,8 @@ public sealed class SecureRemoteExplorer : IRemoteExplorer
 
     public Task<ExplorerPolicyResponse> GetPolicyAsync(CancellationToken cancellationToken) => _client.GetPolicyAsync(cancellationToken);
 
+    public Task<ShareListResponse> ListSharesAsync(CancellationToken cancellationToken) => _client.ListSharesAsync(cancellationToken);
+
     public Task<DrivesResponse> ListDrivesAsync(CancellationToken cancellationToken) => _client.ListDrivesAsync(cancellationToken);
 
     public Task<DirectoryListResponse> ListDirectoryAsync(string path, CancellationToken cancellationToken) => _client.ListDirectoryAsync(path, cancellationToken);

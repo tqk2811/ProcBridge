@@ -128,6 +128,12 @@ namespace
             _handle = handle;
         }
         HANDLE Get() const noexcept { return _handle; }
+        HANDLE Release() noexcept
+        {
+            const HANDLE handle = _handle;
+            _handle = INVALID_HANDLE_VALUE;
+            return handle;
+        }
         bool IsValid() const noexcept { return _handle != nullptr && _handle != INVALID_HANDLE_VALUE; }
 
     private:
@@ -2834,6 +2840,307 @@ namespace
         return 0;
     }
 
+    /// Counts the entries named leaf in a listing of directory with NtQueryDirectoryFile (no pattern, as .NET lists).
+    /// restarts: how many more times the scan is restarted and read to the end.
+    std::wstring CountNtEntries(const std::wstring& directory, const std::wstring& leaf, ULONG informationClass, bool single, int restarts)
+    {
+        const auto query = reinterpret_cast<NtQueryDirectoryFileFn>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryDirectoryFile"));
+        Handle handle(CreateFileW(directory.c_str(), FILE_LIST_DIRECTORY | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+        if (!handle.IsValid())
+        {
+            return Error(GetLastError());
+        }
+        const ULONG nameOffset = informationClass == FileNamesInformationClass ? 12 : 104; // FileIdBothDirectoryInformation
+        const ULONG nameLengthOffset = informationClass == FileNamesInformationClass ? 8 : 60;
+        std::vector<BYTE> buffer(64 * 1024);
+        int count = 0;
+        NTSTATUS status = STATUS_SUCCESS;
+        for (int pass = 0; pass <= restarts; ++pass)
+        {
+            bool restart = pass > 0;
+            for (;;)
+            {
+                IO_STATUS_BLOCK io{};
+                status = query(handle.Get(), nullptr, nullptr, nullptr, &io, buffer.data(), static_cast<ULONG>(buffer.size()), informationClass,
+                    single ? TRUE : FALSE, nullptr, restart ? TRUE : FALSE);
+                restart = false;
+                if (!NT_SUCCESS(status))
+                {
+                    break;
+                }
+                for (ULONG offset = 0;;)
+                {
+                    const BYTE* entry = buffer.data() + offset;
+                    ULONG next = 0;
+                    ULONG nameBytes = 0;
+                    memcpy(&next, entry, sizeof(next));
+                    memcpy(&nameBytes, entry + nameLengthOffset, sizeof(nameBytes));
+                    const std::wstring name(reinterpret_cast<const wchar_t*>(entry + nameOffset), nameBytes / sizeof(wchar_t));
+                    if (_wcsicmp(name.c_str(), leaf.c_str()) == 0)
+                    {
+                        ++count;
+                    }
+                    if (next == 0)
+                    {
+                        break;
+                    }
+                    offset += next;
+                }
+            }
+        }
+        return L"count=" + Num(count) + L" " + Status(status);
+    }
+
+    /// --parent-listing <virtual root>: the virtual root as an entry of its parent folder's listings (FindFirstFile
+    /// without wildcard, with "*", NtQueryDirectoryFile without pattern, single entries, a restarted scan) and
+    /// GetLongPathName on a path below it.
+    int ParentListing(const wchar_t* rootArgument)
+    {
+        std::wstring root = rootArgument;
+        const size_t slash = root.find_last_of(L'\\');
+        const std::wstring parent = root.substr(0, slash);
+        const std::wstring leaf = root.substr(slash + 1);
+        auto find = [](const std::wstring& path) {
+            WIN32_FIND_DATAW data{};
+            const HANDLE found = FindFirstFileW(path.c_str(), &data);
+            if (found == INVALID_HANDLE_VALUE)
+            {
+                return Error(GetLastError());
+            }
+            FindClose(found);
+            return std::wstring(data.cFileName) + L" dir=" + Num((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ? 1 : 0);
+        };
+        WriteLine(L"find-exact: " + find(root));
+        std::wstring upper = root;
+        CharUpperBuffW(upper.data() + slash + 1, static_cast<DWORD>(leaf.size()));
+        WriteLine(L"find-upper: " + find(upper));
+        // '?' and '*' in the last component (FindFirstFile turns some into DOS wildcards '<', '>', '"').
+        WriteLine(L"find-wild: " + find(parent + L"\\" + leaf.substr(0, 1) + L"?" + leaf.substr(2, 3) + L"*."));
+        {
+            // Overlapped handle: the system answers asynchronously, the hook must not touch that answer.
+            const auto query = reinterpret_cast<NtQueryDirectoryFileFn>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryDirectoryFile"));
+            Handle overlapped(CreateFileW(parent.c_str(), FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, nullptr));
+            Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+            std::vector<BYTE> buffer(64 * 1024);
+            int found = 0;
+            NTSTATUS status = STATUS_SUCCESS;
+            for (int call = 0; call < 1000 && overlapped.IsValid(); ++call)
+            {
+                IO_STATUS_BLOCK io{};
+                ResetEvent(event.Get());
+                status = query(overlapped.Get(), event.Get(), nullptr, nullptr, &io, buffer.data(), static_cast<ULONG>(buffer.size()),
+                    FileNamesInformationClass, FALSE, nullptr, FALSE);
+                if (status == STATUS_PENDING)
+                {
+                    WaitForSingleObject(event.Get(), 10000);
+                    status = io.Status;
+                }
+                if (!NT_SUCCESS(status))
+                {
+                    break;
+                }
+                for (ULONG offset = 0;;)
+                {
+                    ULONG next = 0;
+                    ULONG nameBytes = 0;
+                    memcpy(&next, buffer.data() + offset, sizeof(next));
+                    memcpy(&nameBytes, buffer.data() + offset + 8, sizeof(nameBytes));
+                    found += _wcsnicmp(reinterpret_cast<const wchar_t*>(buffer.data() + offset + 12), leaf.c_str(), leaf.size()) == 0
+                        && nameBytes == leaf.size() * sizeof(wchar_t) ? 1 : 0;
+                    if (next == 0)
+                    {
+                        break;
+                    }
+                    offset += next;
+                }
+            }
+            WriteLine(L"nt-overlapped: count=" + Num(found) + L" " + Status(status));
+        }
+        WIN32_FIND_DATAW data{};
+        int count = 0;
+        int directories = 0;
+        const HANDLE all = FindFirstFileW((parent + L"\\*").c_str(), &data);
+        if (all != INVALID_HANDLE_VALUE)
+        {
+            do
+            {
+                if (_wcsicmp(data.cFileName, leaf.c_str()) == 0)
+                {
+                    ++count;
+                    directories += (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ? 1 : 0;
+                }
+            } while (FindNextFileW(all, &data));
+            FindClose(all);
+        }
+        WriteLine(L"find-star: count=" + Num(count) + L" dir=" + Num(directories));
+        WriteLine(L"nt-null: " + CountNtEntries(parent, leaf, 37, false, 0));
+        WriteLine(L"nt-single: " + CountNtEntries(parent, leaf, FileNamesInformationClass, true, 0));
+        WriteLine(L"nt-restart: " + CountNtEntries(parent, leaf, 37, false, 1));
+        wchar_t longPath[MAX_PATH * 2];
+        const DWORD length = GetLongPathNameW((root + L"\\sub").c_str(), longPath, static_cast<DWORD>(std::size(longPath)));
+        WriteLine(L"long: " + (length == 0 || length >= std::size(longPath) ? Error(GetLastError()) : std::wstring(longPath, length)));
+        return 0;
+    }
+
+    /// --nt-final-name <NT path>: opens the path with NtOpenFile as given (\DosDevices\..., \GLOBAL??\...) and prints
+    /// the final path of the handle.
+    int NtFinalName(const wchar_t* ntPath)
+    {
+        const auto open = reinterpret_cast<NtOpenFileFn>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtOpenFile"));
+        UNICODE_STRING name{};
+        RtlInitUnicodeString(&name, ntPath);
+        OBJECT_ATTRIBUTES attributes{};
+        InitializeObjectAttributes(&attributes, &name, OBJ_CASE_INSENSITIVE, nullptr, nullptr);
+        HANDLE handle = nullptr;
+        IO_STATUS_BLOCK io{};
+        const NTSTATUS status = open(&handle, FILE_READ_DATA | SYNCHRONIZE, &attributes, &io, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE);
+        if (!NT_SUCCESS(status))
+        {
+            WriteLine(L"name: " + Status(status));
+            return 1;
+        }
+        WriteLine(L"name: " + FinalPath(handle));
+        CloseHandle(handle);
+        return 0;
+    }
+
+    /// --open-by-id <directory> <file>: opens file by path, reads its file id, then opens that id with OpenFileById
+    /// relative to a handle of directory and prints the final path of the result.
+    int OpenById(const wchar_t* directory, const wchar_t* file)
+    {
+        Handle byPath(OpenRead(file));
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (!byPath.IsValid() || !GetFileInformationByHandle(byPath.Get(), &info))
+        {
+            WriteLine(L"by-path: " + Error(GetLastError()));
+            return 1;
+        }
+        Handle root(CreateFileW(directory, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+            OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+        if (!root.IsValid())
+        {
+            WriteLine(L"directory: " + Error(GetLastError()));
+            return 1;
+        }
+        FILE_ID_DESCRIPTOR id{};
+        id.dwSize = sizeof(id);
+        id.Type = FileIdType;
+        id.FileId.QuadPart = static_cast<LONGLONG>((static_cast<ULONGLONG>(info.nFileIndexHigh) << 32) | info.nFileIndexLow);
+        Handle byId(OpenFileById(root.Get(), &id, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, 0));
+        WriteLine(L"by-id: " + (byId.IsValid() ? FinalPath(byId.Get()) : Error(GetLastError())));
+        return 0;
+    }
+
+    /// --read-handle: reads a handle value (decimal) from stdin and prints the final path and identity of that handle,
+    /// which the parent duplicated into this process.
+    int ReadHandle()
+    {
+        char text[32] = {};
+        DWORD read = 0;
+        if (!ReadFile(GetStdHandle(STD_INPUT_HANDLE), text, sizeof(text) - 1, &read, nullptr) || read == 0)
+        {
+            WriteLine(L"child: read " + Error(GetLastError()));
+            return 1;
+        }
+        const HANDLE handle = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(std::strtoull(text, nullptr, 10)));
+        WriteLine(L"child: " + FinalPath(handle) + L" " + Identity(handle));
+        return CloseHandle(handle) ? 0 : 1;
+    }
+
+    /// --dup-to-child <file> [child exe] [squat|close-source]: opens file without inheritance, starts a child
+    /// (--read-handle, this probe or child exe) that inherits nothing but its standard handles, duplicates the handle into
+    /// the child with DuplicateHandle and sends the value through the child's stdin (as a process passes a handle over
+    /// IPC). Prints its own view of the handle, then the child's. squat: the child is created suspended and its handle
+    /// inbox name is taken first with a section anyone may write. close-source: DUPLICATE_CLOSE_SOURCE.
+    int DuplicateToChild(const wchar_t* file, const wchar_t* childExe, const wchar_t* modeArgument)
+    {
+        const std::wstring mode = modeArgument != nullptr ? modeArgument : L"";
+        Handle opened(OpenRead(file));
+        if (!opened.IsValid())
+        {
+            WriteLine(L"open: " + Error(GetLastError()));
+            return 1;
+        }
+        SECURITY_ATTRIBUTES inherit{ sizeof(inherit), nullptr, TRUE };
+        HANDLE readEnd = nullptr;
+        HANDLE writeEnd = nullptr;
+        if (!CreatePipe(&readEnd, &writeEnd, &inherit, 0) || !SetHandleInformation(writeEnd, HANDLE_FLAG_INHERIT, 0))
+        {
+            WriteLine(L"pipe: " + Error(GetLastError()));
+            return 1;
+        }
+        Handle childInput(readEnd);
+        Handle input(writeEnd);
+        AttributeList attributes;
+        HANDLE standard[] = { readEnd, GetStdHandle(STD_OUTPUT_HANDLE), GetStdHandle(STD_ERROR_HANDLE) };
+        std::vector<HANDLE> inherited;
+        for (HANDLE handle : standard)
+        {
+            if (handle != nullptr && handle != INVALID_HANDLE_VALUE && std::find(inherited.begin(), inherited.end(), handle) == inherited.end())
+            {
+                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+                inherited.push_back(handle);
+            }
+        }
+        const std::wstring path = childExe != nullptr && *childExe != 0 ? std::wstring(childExe) : SelfPath();
+        std::wstring commandLine = L"\"" + path + L"\" --read-handle";
+        STARTUPINFOEXW startup{};
+        startup.StartupInfo.cb = sizeof(startup);
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup.StartupInfo.hStdInput = readEnd;
+        startup.StartupInfo.hStdOutput = standard[1];
+        startup.StartupInfo.hStdError = standard[2];
+        if (!attributes.Set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited.data(), inherited.size() * sizeof(HANDLE)))
+        {
+            WriteLine(L"attributes: " + Error(GetLastError()));
+            return 1;
+        }
+        startup.lpAttributeList = attributes.Get();
+        PROCESS_INFORMATION info{};
+        const DWORD suspend = mode == L"squat" ? CREATE_SUSPENDED : 0;
+        if (!CreateProcessW(path.c_str(), commandLine.data(), nullptr, nullptr, TRUE, EXTENDED_STARTUPINFO_PRESENT | suspend, nullptr, nullptr,
+            &startup.StartupInfo, &info))
+        {
+            WriteLine(L"create: " + Error(GetLastError()));
+            return 1;
+        }
+        ChildProcess child;
+        child.Process = info.hProcess;
+        child.Thread = info.hThread;
+        childInput.Reset();
+        Handle squatter(nullptr);
+        if (suspend != 0)
+        {
+            // Null DACL: any process could write fake entries into it. The child's hook must refuse the name.
+            SECURITY_DESCRIPTOR open{};
+            InitializeSecurityDescriptor(&open, SECURITY_DESCRIPTOR_REVISION);
+            SetSecurityDescriptorDacl(&open, TRUE, nullptr, FALSE);
+            SECURITY_ATTRIBUTES anyone{ sizeof(anyone), &open, FALSE };
+            const std::wstring name = L"Local\\ProcBridge-HandleInbox-" + std::to_wstring(info.dwProcessId);
+            squatter.Reset(CreateFileMappingW(INVALID_HANDLE_VALUE, &anyone, PAGE_READWRITE, 0, 1024 * 1024, name.c_str()));
+            ResumeThread(child.Thread);
+        }
+        WriteLine(L"parent: " + FinalPath(opened.Get()) + L" " + Identity(opened.Get()));
+        HANDLE copy = nullptr;
+        const DWORD options = DUPLICATE_SAME_ACCESS | (mode == L"close-source" ? DUPLICATE_CLOSE_SOURCE : 0);
+        // close-source: the system closes this process's handle, whatever DuplicateHandle returns.
+        const HANDLE source = mode == L"close-source" ? opened.Release() : opened.Get();
+        if (!DuplicateHandle(GetCurrentProcess(), source, child.Process, &copy, 0, FALSE, options))
+        {
+            WriteLine(L"duplicate: " + Error(GetLastError()));
+            TerminateProcess(child.Process, 1);
+            return 1;
+        }
+        const std::string value = std::to_string(reinterpret_cast<ULONG_PTR>(copy)) + "\n";
+        DWORD written = 0;
+        WriteFile(input.Get(), value.data(), static_cast<DWORD>(value.size()), &written, nullptr);
+        input.Reset();
+        return static_cast<int>(WaitExitCode(child.Process));
+    }
+
     int RunCommand(int argc, wchar_t** argv)
     {
         const std::wstring command = argv[1];
@@ -2904,6 +3211,26 @@ namespace
         if (command == L"--dir-classes" && argc == 3)
         {
             return DirectoryClasses(argv[2]);
+        }
+        if (command == L"--parent-listing" && argc == 3)
+        {
+            return ParentListing(argv[2]);
+        }
+        if (command == L"--nt-final-name" && argc == 3)
+        {
+            return NtFinalName(argv[2]);
+        }
+        if (command == L"--open-by-id" && argc == 4)
+        {
+            return OpenById(argv[2], argv[3]);
+        }
+        if (command == L"--dup-to-child" && argc >= 3 && argc <= 5)
+        {
+            return DuplicateToChild(argv[2], argc >= 4 ? argv[3] : nullptr, argc >= 5 ? argv[4] : nullptr);
+        }
+        if (command == L"--read-handle" && argc == 2)
+        {
+            return ReadHandle();
         }
         if (command == L"--stdin-id" && argc == 2)
         {

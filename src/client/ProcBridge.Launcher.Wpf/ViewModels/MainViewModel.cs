@@ -11,7 +11,7 @@ public sealed class MainViewModel : IAsyncDisposable
     {
         Machines = new MachinesViewModel(registry, dialogs);
         Run = new RunViewModel(runner, optionsFactory);
-        Profiles = new ProfilesViewModel(profiles, dialogs, Machines, Run);
+        Profiles = new ProfilesViewModel(profiles, dialogs, Machines, Run, explorerFactory);
         Explorer = new RemoteExplorerViewModel(Machines, explorerFactory, dialogs);
     }
 

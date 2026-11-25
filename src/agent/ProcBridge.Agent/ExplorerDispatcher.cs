@@ -15,10 +15,13 @@ namespace ProcBridge.Agent;
 internal sealed class ExplorerDispatcher
 {
     private readonly ExplorerSession _session;
+    private readonly IReadOnlyList<ShareEntry> _shares;
 
-    public ExplorerDispatcher(ExplorerSession session)
+    /// <param name="shares">Shares of the Agent, answered to <see cref="MessageType.ExplorerSysShares"/>.</param>
+    public ExplorerDispatcher(ExplorerSession session, IReadOnlyList<ShareEntry> shares)
     {
         _session = session;
+        _shares = shares;
     }
 
     public static bool IsExplorerMessage(MessageType type) => (ushort)type is >= 0x1100 and < 0x1500;
@@ -76,6 +79,9 @@ internal sealed class ExplorerDispatcher
                     FileRoots = _session.Policy.FileRoots,
                     RegistryRoots = _session.Policy.RegistryRoots,
                 });
+            case MessageType.ExplorerSysShares:
+                Read<ShareListRequest>(request);
+                return Reply(_session.ListShares(_shares));
             default:
                 throw new ProtocolStatusException(NtStatus.NotImplemented, $"Message {request.MessageType} is not supported.");
         }

@@ -47,6 +47,8 @@ public enum MessageType : ushort
     ExplorerSysInfo = 0x1404,
     /// <summary>The profile machine B keeps for the caller (ExplorerPolicyResponse); never refused.</summary>
     ExplorerSysPolicy = 0x1405,
+    /// <summary>The shares of the Agent with their folders on machine B (ShareListResponse); never refused.</summary>
+    ExplorerSysShares = 0x1406,
     /// <summary>Creates a file or directory (M3).</summary>
     FsCreate = 0x0107,
     /// <summary>One block of an upload; the request payload is the bytes.</summary>

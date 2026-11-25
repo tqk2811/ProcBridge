@@ -18,6 +18,8 @@ namespace
     // Configuration variables handed down to every child (see ProcBridge.Spawn).
     constexpr const wchar_t* HookX64Variable = L"PROCBRIDGE_HOOK_X64";
     constexpr const wchar_t* HookX86Variable = L"PROCBRIDGE_HOOK_X86";
+    // Starting folder of the target, from ProcBridge.Spawn --cwd: it may be virtual, so only the hooked process can set it.
+    constexpr const wchar_t* WorkingDirectoryVariable = L"PROCBRIDGE_CWD";
 
     bool g_minHookInitialized = false;
     SRWLOCK g_initLock = SRWLOCK_INIT;
@@ -114,6 +116,16 @@ namespace
         return environment;
     }
 
+    /// Sets the folder ProcBridge.Spawn was given with --cwd, once the hooks can resolve a virtual one.
+    DWORD ApplyWorkingDirectory(const std::wstring& directory)
+    {
+        if (directory.empty() || SetCurrentDirectoryW(directory.c_str()))
+        {
+            return ERROR_SUCCESS;
+        }
+        return GetLastError();
+    }
+
     DWORD InitializeOnce(const InitData& data)
     {
         DWORD result = ApplyEnvironment(data);
@@ -121,6 +133,9 @@ namespace
         {
             return result;
         }
+        // For this process only: removed at once so that children do not change folder again.
+        const std::wstring workingDirectory = GetVariable(WorkingDirectoryVariable);
+        SetEnvironmentVariableW(WorkingDirectoryVariable, nullptr);
         // Set by the parent's hook for this process only (a process started from the backing copy of a virtual image):
         // removed at once so the children of this process do not inherit it.
         const std::wstring image = GetVariable(ProcBridge::Hook::ImageRedirect::ImageVariable);
@@ -146,7 +161,7 @@ namespace
         }
         if (resolver == nullptr)
         {
-            return ERROR_SUCCESS; // nothing to redirect, stay passive
+            return ApplyWorkingDirectory(workingDirectory); // nothing to redirect, stay passive
         }
         ProcBridge::Inject::HookPaths hooks;
         const std::wstring childEnvironment = CaptureChildEnvironment(hooks);
@@ -181,7 +196,7 @@ namespace
         {
             ProcBridge::Hook::RestoreVirtualImageNames(image.substr(0, separator), image.substr(separator + 1));
         }
-        return ERROR_SUCCESS;
+        return ApplyWorkingDirectory(workingDirectory);
     }
 
     DWORD InitializeGuarded(const InitData& data) noexcept

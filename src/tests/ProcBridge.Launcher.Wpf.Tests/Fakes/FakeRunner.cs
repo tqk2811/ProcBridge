@@ -19,9 +19,14 @@ internal sealed class FakeRunner : ILaunchRunner
 
     public bool WasCancelled { get; private set; }
 
+    /// <summary>Thrown by the run instead of an exit code (a failed preflight of LaunchSession).</summary>
+    public Exception? Failure { get; set; }
+
     public async Task<int> RunAsync(LauncherOptions options, Action<string> outputLine, CancellationToken cancellationToken)
     {
         Options = options;
+        if (Failure is not null)
+            throw Failure;
         foreach (string line in Lines)
             outputLine(line);
         Started.TrySetResult();

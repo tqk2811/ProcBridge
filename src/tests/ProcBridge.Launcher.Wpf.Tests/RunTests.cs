@@ -1,3 +1,4 @@
+using ProcBridge.Launcher.Enums;
 using ProcBridge.Launcher.Wpf.Enums;
 using ProcBridge.Launcher.Wpf.Models;
 using ProcBridge.Launcher.Wpf.Services;
@@ -89,5 +90,22 @@ public sealed class RunTests
 
         Assert.AreEqual(MachineB.Fingerprint, runner.Options!.AgentFingerprint);
         Assert.AreEqual(RunState.Exited, profiles.Run.State);
+    }
+
+    [TestMethod]
+    [DataRow(LaunchFailureReason.AgentUnreachable, "Không kết nối được máy B")]
+    [DataRow(LaunchFailureReason.ShareUnknown, "không có chia sẻ")]
+    [DataRow(LaunchFailureReason.WorkingDirectoryMissing, "Thư mục làm việc")]
+    public async Task Run_StoppedBeforeTheTarget_ShowsTheReasonInVietnamese(LaunchFailureReason reason, string expected)
+    {
+        var runner = new FakeRunner { Failure = new LaunchFailedException(reason, "target", "refused", "english text") };
+        var run = new RunViewModel(runner, new LaunchOptionsFactory(@"C:\pb"));
+
+        await run.RunAsync(Profile, MachineB);
+
+        Assert.AreEqual(RunState.Failed, run.State);
+        StringAssert.Contains(run.StatusText, expected);
+        StringAssert.Contains(run.StatusText, "target");
+        Assert.DoesNotContain("english text", run.StatusText);
     }
 }

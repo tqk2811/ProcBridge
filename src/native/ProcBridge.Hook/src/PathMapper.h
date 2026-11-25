@@ -13,6 +13,8 @@ namespace ProcBridge::Hook
         UNICODE_STRING RealVolumeRelative;    // \Cache\real
         UNICODE_STRING VirtualDevicePath;     // \Device\HarddiskVolume3\Work\virtual (empty if unknown)
         UNICODE_STRING RealDevicePath;        // \Device\HarddiskVolume3\Cache\real
+        // True when the virtual drive letter does not exist (V:\): VirtualDevicePath then borrows the volume of RealNt.
+        bool VirtualDriveMissing;
     };
 
     /// Arguments of the open a path is resolved for (NtCreateFile semantics).

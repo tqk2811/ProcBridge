@@ -474,6 +474,10 @@ Ghép cặp qua relay (nhánh `feature/relay-pairing`, quyết định 2026-11-2
   `--pair --relay <url> [--code <mã>]`; app WPF của Launcher có ô "Máy B chỉ thấy qua relay" (URL relay + mã 8 số) và
   Remote Explorer đi qua relay cho máy ghép cặp kiểu này. Test: `PairingSlotTests` (relay e2e), `RelayPairingTests`
   (ghép cặp qua relay đầu cuối rồi mở phiên theo HostId).
+- Hồ sơ chạy của app WPF Launcher chọn máy ghép cặp qua relay (địa chỉ `relay <url>`) thì tự bật "Kết nối qua relay"
+  với URL đó (giữ nguyên nếu hồ sơ đã có relay riêng); `LaunchOptionsFactory` dùng relay của máy khi hồ sơ không ghi
+  relay. App WPF của Agent nghe `IAgentHost.RelayStatusChanged` (từ `RelayHostLink.PairingCodeChanged` và
+  `ConnectionChanged`) nên mã mời mới hiện ngay, không chờ lượt làm mới 1 giây của cửa sổ.
 
 ```mermaid
 sequenceDiagram
@@ -687,6 +691,19 @@ Làm song song với M2, chưa có Broker: cấu hình là `PROCBRIDGE_MAP` cụ
 - **Launcher**: Spawn chỉ thoát khi Job hết process, nên Launcher chờ Spawn là chờ cả cây; Broker chỉ dừng sau
   đó. `--no-build-servers` (`LauncherOptions.DisableBuildServers`) đặt `DOTNET_CLI_USE_MSBUILD_SERVER=0`,
   `MSBUILDDISABLENODEREUSE=1`, `UseSharedCompilation=false` (MSBuild đọc biến môi trường thành property) cho cả cây.
+- **Launcher dùng hằng ngày** (2026-11-26): `--config <file.json>` đọc các tuỳ chọn từ file JSON (`LauncherConfigFile`,
+  tên khoá trùng tên tuỳ chọn: `agent`, `share`, `maps` [`virtual`, `remote`], `cwd`, `command`…; khoá lạ bị từ chối),
+  tuỳ chọn gõ sau `--config` đè lên file, `--map` thêm ánh xạ, đường dẫn tương đối tính từ thư mục của file. Trước khi
+  chạy Spawn, `LaunchSession` mở một kết nối của pool Broker (Hello kèm share): Agent không kết nối được hoặc không có
+  share thì dừng bằng `LaunchFailedException` (`LaunchFailureReason`) với lý do rõ ràng, thay cho `inject failed` của
+  Spawn; app WPF hiện lý do bằng tiếng Việt. Agent từ chối bắt tay (máy này bị thu hồi) là lý do riêng `NotPaired`
+  để gợi ý ghép cặp lại. Khoá bool trong file là `bool?` (`false` ghi đè `true` của file trước) và có cờ phủ định
+  `--build-servers`, `--no-plaintext`, `--no-write-through`; file bật `plaintext` thì in cảnh báo ra stderr, nhiều file
+  cùng ghi `command` cũng cảnh báo. `remote` (cả `--map`) không được tuyệt đối, có ổ đĩa (`V:Proj`) hay bước `..`.
+- **Thư mục làm việc trong thư mục ảo**: Spawn không bị hook nên không vào được thư mục ảo. `LaunchSession` thấy
+  `--cwd` nằm trong một ánh xạ thì kiểm thư mục đó trên máy B (`FsStat`, thiếu thì `WorkingDirectoryMissing`) rồi
+  truyền `Spawn --cwd <dir>`; Spawn chuyển nó vào khối init (`PROCBRIDGE_CWD`), Hook gỡ biến ngay (con không đổi thư mục
+  lần nữa) và gọi `SetCurrentDirectoryW` sau khi bật hook. Thư mục cục bộ vẫn đi qua `lpCurrentDirectory` như cũ.
 - Kiểm (`src/tests/ProcBridge.Tests/Native/RemoteProcessTreeTests.cs`, Agent loopback): `cmd /c cmd /c type`,
   con khác kiến trúc sau khi cha xoá `PROCBRIDGE_SESSION`, handle stdin kế thừa báo đúng file ID và thời gian
   của máy B (đỏ khi bỏ bản ghi extra), `dotnet build` một project nằm trên Agent với `BaseOutputPath`/
@@ -873,6 +890,73 @@ Nhận xét:
 - Ở loopback vẫn ~2,5 ms mỗi file nhỏ và ~6 ms mỗi lần đóng ghi: chi phí đĩa (file tạm, đổi tên, hàng đợi ghi), chưa
   đáng tối ưu so với RTT thật.
 
+### Hook: đường dẫn và handle ngoài thư mục ảo (2026-11-26)
+
+- **Gốc ảo trong thư mục cha**: gốc ảo không có trên volume nên liệt kê thư mục cha thật (`FindFirstFile("D:\Work\virtual")`
+  không wildcard, `dir D:\Work`, `GetLongPathNameW`) không thấy nó. Hook `NtQueryDirectoryFile[Ex]` để hàm gốc chạy trước
+  trên handle thật; khi lượt quét hết mục thật (`STATUS_NO_MORE_FILES`, hoặc `STATUS_NO_SUCH_FILE` khi pattern không khớp mục
+  thật nào) mà thư mục của handle (tên thiết bị qua `NtQueryObject`, cache theo handle) là thư mục cha của gốc ảo, Hook trả
+  thêm mục của các gốc ảo khớp pattern, mỗi gốc một lần mỗi lượt quét. Pattern chỉ đi theo lời gọi đầu nên được nhớ theo
+  handle (`ParentScans`, dọn khi `NtClose`, nhân bản kèm đóng nguồn, hoặc lần mở mới trả cùng giá trị); lượt quét không có
+  pattern (.NET) khớp mọi tên; restart bắt đầu lại. Chỉ chèn khi lời gọi đồng bộ hoàn toàn: không event, không APC, handle mở
+  đồng bộ (`FileModeInformation`); handle overlapped giữ nguyên câu trả lời của hệ thống. Thư mục thật đã có tên đó thì không chèn (hàm gốc đã liệt kê). Metadata
+  của mục: `Stat` của máy B (Broker) hoặc thư mục thật phía sau (cục bộ). Cách dựng mục theo class dùng chung với liệt kê
+  thư mục ảo (`DirectoryEntryFormat`). Kiểm (`ParentListingTests.cs`, x64 và Win32, cục bộ và qua Agent): tìm đúng tên, tên
+  viết hoa, `*`, `NtQueryDirectoryFile` không pattern, single entry, restart, `GetLongPathNameW`, `cmd dir /ad`; đỏ khi bỏ
+  phần chèn. Phần chưa phủ ở Backlog.
+- **Đường dẫn dạng khác**: tên tuyệt đối không khớp gốc nào thì thử thêm dạng chuẩn: `\DosDevices\` và `\GLOBAL??\` đổi
+  thành `\??\`; thành phần có `~` (tên 8.3, không wildcard) được đổi sang tên dài bằng một lần
+  `NtQueryDirectoryFile` (class Both, pattern khớp cả tên ngắn) trên thư mục cha thật, dừng ở thành phần đầu tiên không có
+  thật (phần thư mục ảo giữ nguyên). Chỉ mở rộng khi đường dẫn có tên lá của một gốc ảo: gốc ảo không có trên volume nên
+  không có tên 8.3, đường dẫn thiếu tên dài của nó không bao giờ tới được gốc, nhờ vậy đường dẫn thật có `~` (vd
+  `%TEMP%` dạng `RUNNER~1` trên CI) không tốn thêm truy vấn. Gốc khai báo (`PROCBRIDGE_MAP`, gốc từ Broker) cũng được
+  đổi sang tên dài phần có thật (`GetLongPathNameW`) khi nạp.
+- **Mở theo file ID** (`FILE_OPEN_BY_FILE_ID`): tên là ID chứ không phải đường dẫn nên không ghép với thư mục. Dưới handle
+  ảo của ánh xạ cục bộ, handle mới được ghi như handle gốc (thư mục thật cùng volume); qua Broker trả
+  `STATUS_NOT_SUPPORTED` vì process chỉ biết ID của máy B, mở trên volume cache sẽ trúng file khác. Dưới handle thật thì
+  để nguyên.
+- Kiểm (`PathSpellingTests.cs`, x64 và Win32): mở bằng `\DosDevices\`, `\GLOBAL??\`; đường dẫn và gốc khai báo bằng tên
+  8.3 (thư mục tên dài trong `%TEMP%`); `OpenFileById` dưới thư mục ảo và thư mục thật, và qua Agent. Ba bài đỏ trên Hook cũ.
+- **Handle nhân bản sang process khác** (`DuplicateHandle` với process đích khác, vd cha truyền handle cho con qua pipe):
+  thay cho ý "bên nhận hỏi Broker theo `(pid nguồn, handle)`". Chọn hộp thư bộ nhớ chung cho cả hai chế độ thay vì đi qua
+  Broker ở chế độ Broker, vì bên nhận không tin gì trong mục ngoài giá trị handle: mọi thứ khác được dựng lại từ chính handle
+  và từ Broker, nên mục giả chỉ làm bên nhận coi một handle *thật sự* nằm dưới thư mục phía sau là handle ảo (đúng như process
+  đó tự mở qua đường ảo). Đi qua Broker cần thêm lệnh IPC, bảng theo pid ở Broker và gắn token theo pid mà không thêm được kiểm
+  tra nào mạnh hơn.
+  - Hộp thư (`HandleInbox`, 16 ô): section `Local\ProcBridge-HandleInbox-<pid>` mỗi process có hook tạo lúc khởi động. DACL chỉ
+    cho user của process và SYSTEM, nhãn bắt buộc bằng integrity level của process, cờ no-write-up: process integrity thấp
+    hơn không ghi vào được. Tên đã có sẵn (bị chiếm trước, hoặc còn của process chết cùng pid) thì **tắt** tính năng cho
+    process đó. Header mang magic, phiên bản, thời điểm tạo của process chủ; bên gửi so với `GetProcessTimes` của handle
+    process đích (handle giữ process đó sống nên không lẫn pid dùng lại). Bố cục cố định 32 byte mỗi ô, giống nhau x64/x86
+    (`static_assert`). Ô kẹt ở trạng thái đang ghi quá 5 giây (bên gửi chết) được thu hồi. Section không bao giờ unmap.
+  - Bên gửi: ngay khi `NtDuplicateObject` thành công, trước khi trả về cho bên gọi (nên trước khi giá trị handle kịp tới bên
+    nhận), ghi giá trị handle, pid bên gửi, chỉ số ánh xạ kèm hash của gốc ảo, range id (M8), rồi tăng số thứ tự.
+  - Bên nhận: đầu mọi hook tra handle đọc số thứ tự (`ReadAcquire`), đổi thì nhận các ô: hash gốc phải khớp ánh xạ cùng chỉ
+    số; handle phải là file đĩa và tên thật (`NtQueryObject`) nằm dưới thư mục phía sau của ánh xạ; đường dẫn ảo suy từ tên
+    đó; qua Broker thì metadata lấy bằng `Stat`. Không đạt thì bỏ mục.
+  - Write token **không** chuyển sang bên nhận: thứ bên nhận ghi được ghi ngược khi bên gửi đóng bản cuối cùng của nó; kèm
+    `DUPLICATE_CLOSE_SOURCE` thì bên gửi `CloseWrite` ngay khi đó như `NtClose`. Nhờ vậy không có token treo khi hộp thư đầy
+    hay mục bị bỏ, và Broker không phải tin pid nào.
+  - Kiểm (`HandleDuplicationTests.cs`): con chỉ kế thừa handle chuẩn, cha nhân bản handle ảo vào con rồi gửi giá trị qua
+    stdin; con thấy tên ảo, file ID và thời gian giống cha (qua Agent là của máy B), x64 và Win32, cục bộ và qua Agent, có và
+    không `DUPLICATE_CLOSE_SOURCE`, con khác kiến trúc; tên hộp thư bị chiếm trước (DACL rỗng, ai cũng ghi được) thì con không
+    dùng nó. Bài cơ bản và bài chiếm tên đỏ trên Hook cũ; các bài còn lại là phủ thêm (Hook cũ cũng qua).
+- **Ký tự ổ giả (`V:\`), thiết kế, chưa làm**: hiện gốc `V:\dir` chạy được nhờ mượn volume của thư mục thật làm
+  `VirtualDevicePath` (`VirtualDriveMissing`), nên `GetFinalPathNameByHandle` ra sai ổ, còn gốc ổ `V:\` bị từ chối và
+  `GetVolumeInformation`/`GetDriveType`/`GetLogicalDrives` không biết `V:`. Đủ cho ổ giả cần một volume giả trọn vẹn:
+  1. Mỗi ổ giả có tên thiết bị riêng `\Device\ProcBridgeVolumeV` làm `VirtualDevicePath`; `NtQueryObject` đổi tên ra thiết
+     bị này thay cho volume thật.
+  2. Hook `NtOpenSymbolicLinkObject`/`NtQuerySymbolicLinkObject` cho `\??\V:` (`QueryDosDeviceW`) trả tên thiết bị trên.
+  3. Hook `NtDeviceIoControlFile` trên handle của `\Device\MountPointManager`: `IOCTL_MOUNTMGR_QUERY_DOS_VOLUME_PATH(S)` với
+     tên thiết bị giả trả `V:\` (kernelbase dùng nó cho `VOLUME_NAME_DOS`); `VOLUME_NAME_GUID` báo lỗi như ổ không có GUID.
+  4. Cho phép gốc ổ `V:\` làm thư mục ảo khi ổ không tồn tại (gốc ổ thật vẫn bị từ chối); mở `\??\V:\` vào thư mục phía sau.
+     `NtQueryVolumeInformationFile` trên handle của ổ giả (`FileFsVolumeInformation`, `FileFsAttributeInformation`,
+     `FileFsSizeInformation`, `FileFsFullSizeInformation`, `FileFsDeviceInformation`) trả nhãn, serial, hệ thống file, dung
+     lượng của máy B (Agent cần lệnh mới) hoặc của volume thật ở chế độ cục bộ; `GetDriveType` đọc `FileFsDeviceInformation`.
+  5. `GetLogicalDrives` đọc device map của process (`NtQueryInformationProcess(ProcessDeviceMap)`): hook thêm bit của ổ giả.
+  6. Liệt kê thư mục cha (mục trên) không áp cho gốc ổ. Test: NativeProbe so `V:\` với thư mục thật như `HookComparisonTests`
+     (tên cuối, volume, kiểu ổ), cục bộ và qua Agent, x64 và Win32.
+
 ---
 
 ## 14. Duyệt tài nguyên máy B (Remote Explorer)
@@ -912,6 +996,14 @@ Service / Hệ thống). Chỗ đặt UI là câu hỏi mở số 5.
 số), hồ sơ chạy (ánh xạ thư mục chọn trong cây Remote Explorer tải lười, hiện rõ PermissionDenied/OutOfScope; chạy
 qua `LaunchSession` dùng chung với CLI, log trực tiếp, Dừng kill cả cây) và tab Remote Explorer. A đọc hồ sơ quyền
 của mình bằng `ExplorerSysPolicy` (0x1405) để chỉ hiện thao tác ghi được cấp; mọi thao tác ghi hỏi xác nhận.
+A lấy danh sách chia sẻ của Agent (tên, thư mục gốc trên B, có cho ghi không) bằng `ExplorerSysShares` (0x1406,
+`ShareListResponse`). Quyết định (2026-11-26, sau review): tên và cờ ghi luôn trả (chia sẻ vốn mở được bằng `Hello`),
+nhưng thư mục gốc tuyệt đối trên B chỉ trả khi hồ sơ Explorer của máy A có `FileRead` và gốc nằm trong một `FileRoots`,
+tức máy A vốn đã duyệt được thư mục đó; ngoài ra `RootPath` rỗng để không lộ cấu trúc ổ đĩa của B. Mỗi lần hỏi ghi một
+mục audit `ListShares`. Vẫn giữ `RootPath` vì ánh xạ WPF chọn thư mục bằng Remote Explorer (đường dẫn tuyệt đối) rồi đổi
+sang tương đối theo gốc. Hồ sơ chạy chọn chia sẻ trong ComboBox ("Lấy từ máy B"), gốc được điền khi B có trả; thư mục
+đích chọn ngoài chia sẻ bị từ chối ngay lúc chọn. Đổi máy B thì danh sách cũ bị xoá, câu trả lời về muộn của máy cũ bị
+bỏ. Agent cũ trả `NotImplemented` thì hồ sơ quay về nhập tay tên chia sẻ và gốc.
 
 Lộ trình: duyệt file và ổ đĩa đi kèm M2 và M3; process, registry, service, thông tin hệ thống là M9.
 

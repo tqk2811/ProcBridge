@@ -32,6 +32,31 @@ internal sealed class FakeRemoteExplorer : IRemoteExplorer
 
     public Task<ExplorerPolicyResponse> GetPolicyAsync(CancellationToken cancellationToken) => Log("policy", Policy);
 
+    public ShareEntry[] Shares { get; set; } = [];
+
+    /// <summary>Thrown by <see cref="ListSharesAsync"/> (an old Agent, a lost connection).</summary>
+    public Exception? SharesFailure { get; set; }
+
+    /// <summary>When set, <see cref="ListSharesAsync"/> answers only once it completes (a slow machine B).</summary>
+    public TaskCompletionSource? SharesGate { get; set; }
+
+    public async Task<ShareListResponse> ListSharesAsync(CancellationToken cancellationToken)
+    {
+        if (SharesGate is not null)
+            await SharesGate.Task;
+        return await ListSharesNowAsync();
+    }
+
+    private Task<ShareListResponse> ListSharesNowAsync()
+    {
+        if (SharesFailure is not null)
+        {
+            Calls.Enqueue("shares");
+            return Task.FromException<ShareListResponse>(SharesFailure);
+        }
+        return Log("shares", new ShareListResponse { Shares = Shares });
+    }
+
     public Task<DrivesResponse> ListDrivesAsync(CancellationToken cancellationToken) => Log("drives", Drives);
 
     public Task<DirectoryListResponse> ListDirectoryAsync(string path, CancellationToken cancellationToken)

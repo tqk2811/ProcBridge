@@ -38,8 +38,9 @@ namespace ProcBridge::Hook::Nt
     constexpr ULONG FileDispositionDelete = 0x1;
     constexpr ULONG FileDispositionOnClose = 0x8;
 
-    // NtCreateFile create option.
+    // NtCreateFile create options.
     constexpr ULONG FileDeleteOnCloseOption = 0x00001000;
+    constexpr ULONG FileOpenByFileIdOption = 0x00002000;
 
     // OBJECT_INFORMATION_CLASS.
     constexpr ULONG ObjectNameInformation = 1;
@@ -136,6 +137,7 @@ namespace ProcBridge::Hook::Nt
 extern "C"
 {
     NTSYSAPI WCHAR NTAPI RtlUpcaseUnicodeChar(WCHAR sourceCharacter);
+    NTSYSAPI BOOLEAN NTAPI RtlIsNameInExpression(PUNICODE_STRING expression, PUNICODE_STRING name, BOOLEAN ignoreCase, PWCH upcaseTable);
     NTSYSAPI BOOLEAN NTAPI RtlDosPathNameToNtPathName_U(PCWSTR dosFileName, PUNICODE_STRING ntFileName,
         PWSTR* filePart, PVOID relativeName);
 }

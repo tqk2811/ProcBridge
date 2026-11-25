@@ -2,33 +2,39 @@
 
 Việc còn treo, chưa thuộc mốc đang làm. Xử lý xong mục nào thì xoá mục đó trong cùng commit.
 
-## [Vừa] Thư mục gốc ảo không hiện trong thư mục cha
+## [Thấp] Thư mục gốc ảo trong thư mục cha: các ca chưa phủ
 
-Hook chỉ dịch đường dẫn nằm *trong* thư mục ảo. Liệt kê thư mục cha (`FindFirstFile("D:\Work\virtual")`
-không wildcard, `GetLongPathNameW` trên đường dẫn ảo) mở thư mục cha thật nên không thấy thư mục ảo và trả
-`ERROR_FILE_NOT_FOUND`. Cần chèn mục giả cho thư mục gốc ảo khi liệt kê thư mục cha (hook
-`NtQueryDirectoryFile[Ex]` trên handle của thư mục cha). NativeProbe hiện cố ý không gọi hai API này.
+Mục của gốc ảo được chèn vào cuối lượt liệt kê thư mục cha thật (Plan mục 13, "Hook: đường dẫn và handle ngoài thư mục ảo"). Chưa phủ: thư mục cha không có thật (mở
+thư mục cha đã lỗi); gốc ảo nằm trong gốc ảo khác; mục
+chèn ở cuối chứ không theo thứ tự tên; `SL_INDEX_SPECIFIED`; quá 64 lượt quét thư mục cha cùng lúc; handle overlapped hay lời gọi có event/APC (cố ý không chèn); ở chế độ cục bộ
+(`PROCBRIDGE_MAP`) mục không có file ID. Ghi 2026-11-26.
 
 ## [Vừa] Ký tự ổ giả (V:\) làm thư mục ảo
 
 Plan 4.3 cho phép thư mục ảo nằm trên ổ không tồn tại. M1 chưa thử: `QueryDosDeviceW` của ổ ảo thất bại nên
 `NtQueryObject` trả tên theo volume của thư mục thật (`GetFinalPathNameByHandle` ra sai ổ), và
-`GetVolumeInformation("V:\")`, `GetDriveType` chưa được giả lập.
+`GetVolumeInformation("V:\")`, `GetDriveType` chưa được giả lập. Thiết kế volume giả (thiết bị riêng, symbolic link, mount
+manager, thông tin volume, device map) ở Plan mục 13 ("Hook: đường dẫn và handle ngoài thư mục ảo"); chưa làm. Gốc ảo trên ổ giả không được chèn vào liệt kê thư mục cha.
 
-## [Vừa] Đường dẫn dạng khác chưa nhận diện
+## [Thấp] Đường dẫn dạng khác: phần còn thiếu
 
-- `\DosDevices\...`, `\GLOBAL??\...` chưa được đưa về dạng `\??\` trước khi so. `\Device\HarddiskVolumeN\...` tuyệt đối
-  được nhận khi mở (M3, advapi32 mở thư mục cha qua dạng này khi áp ACE kế thừa), các hàm khác theo đường dẫn
-  (`NtQueryAttributesFile`, `NtDeleteFile`...) cũng đi qua cùng lối dịch.
-- Tên ngắn 8.3 (`RUNNER~1`) trong đường dẫn ảo hoặc thật: so tiền tố theo chuỗi nên không khớp với dạng tên
-  dài, và tên trả về từ `FileNameInformation` có thể không đổi ngược được.
-- Mở theo file ID (`FILE_OPEN_BY_FILE_ID`) không qua đường dẫn nên không được ghi vào bảng handle.
+`\DosDevices\`, `\GLOBAL??\`, tên 8.3 nằm ngoài thư mục ảo và mở theo file ID đã xử lý (Plan mục 13, "Hook: đường dẫn và handle ngoài thư mục ảo"). Còn thiếu:
+- Tên 8.3 *bên trong* thư mục ảo: qua Broker, máy B không trả tên ngắn (`ShortName` rỗng) nên `SUB~1` không mở được; chế độ
+  cục bộ để hệ thống file của thư mục thật tự giải.
+- `\??\GLOBALROOT\...` và đường dẫn tương đối theo handle thư mục thật được mở bằng tên 8.3 (`NtQueryObject` trả đúng dạng
+  lúc mở) chưa được mở rộng.
+- Mở theo file ID dưới handle ảo qua Broker trả `STATUS_NOT_SUPPORTED`: cần Agent tra file theo ID của máy B.
+- Test tên 8.3 báo Inconclusive khi volume của `%TEMP%` tắt tên 8.3. Ghi 2026-11-26.
 
-## [Vừa] Handle nhân bản sang process khác không được theo dõi
+## [Thấp] Handle nhân bản sang process khác: các ca chưa phủ
 
-M4 theo dõi `NtDuplicateObject` trong cùng process và handle kế thừa khi tạo con. Nhân bản handle ảo sang
-process khác (`DuplicateHandle` với process đích là con, vd truyền handle qua IPC) chưa được chuyển bảng nên
-bên nhận thấy tên thật. Cần bên nhận hỏi Broker theo `(pid nguồn, handle)` ở M2. Ghi 2026-11-25.
+Process có hook nhân bản handle ảo vào process khác có hook thì bên nhận theo dõi bản sao qua hộp thư chung (Plan mục 13,
+"Hook: đường dẫn và handle ngoài thư mục ảo"). Chưa phủ: bên nhận tự kéo handle về (`DuplicateHandle(nguồn khác, ...,
+chính nó)`, bên gửi không chạy hook); handle process đích thiếu quyền query; hộp thư đầy (16 ô chưa đọc); tên hộp thư bị
+chiếm trước (tính năng tắt cho process đó); bên nhận không giữ write token nên thứ nó ghi chỉ về máy B khi bên gửi đóng bản
+cuối (kèm `DUPLICATE_CLOSE_SOURCE` thì là lúc nhân bản); delete-on-close không chuyển; range id trong mục được tin (mục giả
+chỉ làm Broker tải thừa). Process cùng user, cùng integrity level vẫn ghi được vào hộp thư, chặn bằng kiểm tra phía nhận.
+Ghi 2026-11-26.
 
 ## [Vừa] Inject con: các đường chưa phủ
 
@@ -93,8 +99,8 @@ vào) vẫn có thể dùng tên cũ. Ghi 2026-11-25.
 Khi con kế thừa handle thư mục ảo (chế độ Broker), khối khởi tạo chỉ mang metadata máy B và đường dẫn ảo; con
 dựng lại danh sách từ `List` và bắt đầu từ đầu. Trên hệ thống file thật, cha và con dùng chung file object nên
 chung con trỏ liệt kê. Ca cha đang liệt kê dở rồi giao handle cho con đọc tiếp rất hiếm. Nếu cần: chuyển con trỏ
-(và pattern) qua bản ghi extra, chấp nhận lệch khi hai bên cùng đọc. Handle nhân bản sang process khác
-(`DuplicateHandle` vào process khác) vẫn không mang mục `RemoteHandleTable`. Ghi 2026-11-25.
+(và pattern) qua bản ghi extra, chấp nhận lệch khi hai bên cùng đọc. Handle nhân bản sang process khác cũng bắt đầu lượt
+liệt kê mới. Ghi 2026-11-25.
 
 ## [Vừa] Liệt kê thư mục ảo trên handle bất đồng bộ
 
@@ -210,28 +216,6 @@ mở khoá với Key khác vẫn thành công, khác hành vi NTFS. Ít chương
 `cdb`/`dotnet-dump` (máy test không cài), debug bằng Visual Studio và VS Code, mở DB SQLite trên Agent. Hiện thay bằng
 DbgHelp đọc pdb qua thư mục ảo và kịch bản khoá vùng của NativeProbe.
 
-## [Vừa] Launcher chưa đủ cho người dùng
-
-- CLI chưa đọc cấu hình từ file.
-- Broker hay Agent không kết nối được lúc khởi động thì Spawn báo `inject failed` và không chạy
-  process đích; chưa có thông báo dễ hiểu hơn.
-
-## [Vừa] Launcher WPF: phía A không biết danh sách chia sẻ và thư mục gốc của chúng
-
-- Vị trí: `src/client/ProcBridge.Launcher.Wpf/Models/LaunchProfile.cs` (`ShareRoot`), `Services/LaunchOptionsFactory.cs`.
-- Giao thức `Fs.*` dùng đường dẫn tương đối trong chia sẻ, còn Remote Explorer trả đường dẫn tuyệt đối trên máy B.
-  Hồ sơ WPF vì vậy bắt người dùng tự nhập tên chia sẻ và chọn "gốc chia sẻ trên B" (thư mục chọn đầu tiên được
-  gợi ý làm gốc), rồi đổi đường dẫn chọn được sang tương đối. Gõ sai gốc thì chỉ lộ lúc chạy (đọc sai thư mục).
-- Hướng: thêm message cho A liệt kê chia sẻ (tên + gốc) mà máy B cho phép, để chọn chia sẻ bằng ComboBox và
-  kiểm thư mục chọn nằm trong gốc ngay khi chọn.
-
-## [Thấp] Launcher WPF: thư mục làm việc không được nằm trong thư mục ảo
-
-- Vị trí: `src/client/ProcBridge.Launcher/LaunchSession.cs` (kiểm `Directory.Exists(WorkingDirectory)`).
-- Spawn được tạo với thư mục làm việc của target, mà Spawn không bị hook nên thư mục ảo không tồn tại với nó.
-  Cần Spawn nhận `--cwd` và truyền `lpCurrentDirectory` cho process đích sau khi hook đã nạp (hoặc đặt thư mục
-  qua hook lúc khởi động).
-
 ## [Thấp] Launcher WPF: Remote Explorer còn thiếu thao tác và test giao diện
 
 - Vị trí: `src/client/ProcBridge.Launcher.Wpf/ViewModels/RemoteExplorerViewModel.cs`, `RegistryViewModel.cs`.
@@ -261,6 +245,9 @@ theo đường dẫn trên Agent cho commit, set-info, rename, delete.
   dưới 2000 ms, tức các request xếp hàng trên một kết nối 300 ms/lượt chạm sát ngưỡng khi máy đang tải nặng. Chạy riêng
   3 lần đều xanh. Ngưỡng 2000 ms quá sát (10 request × 300 ms chia trên một kết nối sống); nên đo theo số request phải
   chờ kết nối chậm thay vì theo thời gian tuyệt đối.
+- `RemoteWriteTests.WriteScenario_ThroughAgent_MatchesRealFolder` (x64): đỏ một lần trên CI (2026-11-26, nhánh
+  `feature/launcher-ux`, không đụng tới đường ghi của Hook): ở bước "share writer denied" mong `err=32` (sharing
+  violation) nhưng nhận `err=5` (access denied). Chạy lại job thì xanh, local đều xanh.
 
 ## [Thấp] Review độc lập cho M2
 
@@ -304,7 +291,8 @@ Hook đã phục vụ thông báo thay đổi trên thư mục ảo (`DirectoryW
 
 Số đo Broker ↔ Agent qua proxy trễ đã có (Plan 13.7). Điều kiện xong M7 còn thiếu: chạy build thật (vd `dotnet build`
 một solution mẫu) qua Hook nối Broker qua `LatencyProxy` và so với chạy cục bộ. Read-ahead (mặc định 8 tải song song
-cho toàn cache) chưa có ưu tiên so với request tiền cảnh (liên quan mục cửa sổ tín dụng) và không bị huỷ khi
+cho toàn cache) chưa có ưu tiên so với request tiền cảnh (cửa sổ tín dụng ở Plan mục 7 chỉ chặn tổng dữ liệu đang bay, không xếp
+read-ahead sau tải tiền cảnh) và không bị huỷ khi
 `BrokerHost` dừng.
 
 ## [Vừa] Bớt round trip khi mở ghi và ghi ngược file nhỏ
@@ -440,11 +428,8 @@ Ghi 2026-11-25 (M6).
 
 Ghép cặp qua relay bằng mã mời đã chạy (Plan 9, "Ghép cặp qua relay"). Còn lại:
 
-- Hồ sơ chạy của app WPF Launcher không tự điền URL relay và bật "Kết nối qua relay" cho máy ghép cặp qua relay
-  (địa chỉ lưu dạng `relay <url>`); hiện chỉ báo lỗi để người dùng tự bật.
 - Chưa chạy thử giao diện thật (UIA) của ô mã mời ở hai app WPF, chỉ test tầng ViewModel; chưa thử với relay thật trên
   internet.
-- Mã mời đổi sau mỗi lần dùng và mỗi 5 phút; app WPF của Agent chỉ thấy mã mới ở lượt làm mới định kỳ của cửa sổ.
 
 Ghi 2026-11-26.
 

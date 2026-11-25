@@ -106,6 +106,13 @@ public sealed class ExplorerClient : IAsyncDisposable
     public Task<ExplorerPolicyResponse> GetPolicyAsync(CancellationToken cancellationToken)
         => CallAsync<ExplorerPolicyRequest, ExplorerPolicyResponse>(MessageType.ExplorerSysPolicy, new ExplorerPolicyRequest(), true, cancellationToken);
 
+    /// <summary>
+    /// The shares of the Agent (name and folder on machine B), for picking the share of a run. An Agent older than this
+    /// message throws <see cref="ProtocolStatusException"/> with <see cref="NtStatus.NotImplemented"/>.
+    /// </summary>
+    public Task<ShareListResponse> ListSharesAsync(CancellationToken cancellationToken)
+        => CallAsync<ShareListRequest, ShareListResponse>(MessageType.ExplorerSysShares, new ShareListRequest(), true, cancellationToken);
+
     /// <param name="idempotent">Reads may be resent after a broken connection; write operations never are.</param>
     private async Task<TResponse> CallAsync<TRequest, TResponse>(MessageType type, TRequest request, bool idempotent, CancellationToken cancellationToken)
     {

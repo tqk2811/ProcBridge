@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using ProcBridge.Agent.Explorer;
+using ProcBridge.Agent.Explorer.Models;
 using ProcBridge.Agent.Models;
 using ProcBridge.Protocol.Interfaces;
 using ProcBridge.Protocol.Transport;
@@ -22,6 +23,7 @@ namespace ProcBridge.Agent;
 public sealed class AgentServer : IAsyncDisposable
 {
     private readonly IReadOnlyDictionary<string, AgentShare> _shares;
+    private readonly IReadOnlyList<ShareEntry> _shareList;
     private readonly AgentOptions _options;
     private readonly TcpListener _listener;
     private readonly CancellationTokenSource _stopping = new();
@@ -43,6 +45,7 @@ public sealed class AgentServer : IAsyncDisposable
         if (security is null && options.Relay is not null)
             throw new ArgumentException("Serving through a relay needs the encrypted transport (AgentSecurity).", nameof(security));
         _shares = shares.ToDictionary(x => x.Name, StringComparer.OrdinalIgnoreCase);
+        _shareList = shares.Select(x => new ShareEntry { Name = x.Name, RootPath = x.RootPath, Writable = x.IsWritable }).ToArray();
         _options = options;
         _listener = new TcpListener(options.BindAddress, options.Port);
         _security = security;
@@ -229,7 +232,7 @@ public sealed class AgentServer : IAsyncDisposable
                 }
                 channel = secure;
                 // The Explorer acts for the authenticated machine A only, within the profile machine B set for it.
-                explorer = new ExplorerDispatcher(new ExplorerSession(_security!.ExplorerPolicies.Get(secure.PeerFingerprint), secure.PeerFingerprint, _security.ExplorerAudit));
+                explorer = new ExplorerDispatcher(new ExplorerSession(_security!.ExplorerPolicies.Get(secure.PeerFingerprint), secure.PeerFingerprint, _security.ExplorerAudit), _shareList);
             }
             var session = new AgentSession(channel, connection.Owner, _shares, _options, GetWatcher, explorer);
             await session.RunAsync(_stopping.Token).ConfigureAwait(false);

@@ -11,12 +11,15 @@ public sealed class ProfilesViewModel : ObservableObject
     private readonly IProfileStore _store;
     private readonly IUserDialogs _dialogs;
     private readonly MachinesViewModel _machines;
+    private readonly IRemoteExplorerFactory? _explorers;
     private ProfileViewModel? _selectedProfile;
     private string? _statusText;
 
-    public ProfilesViewModel(IProfileStore store, IUserDialogs dialogs, MachinesViewModel machines, RunViewModel run)
+    /// <param name="explorers">Lets each profile list the shares of its machine B; null in tests that do not need it.</param>
+    public ProfilesViewModel(IProfileStore store, IUserDialogs dialogs, MachinesViewModel machines, RunViewModel run, IRemoteExplorerFactory? explorers = null)
     {
         _store = store;
+        _explorers = explorers;
         _dialogs = dialogs;
         _machines = machines;
         Run = run;
@@ -98,7 +101,7 @@ public sealed class ProfilesViewModel : ObservableObject
         SelectedProfile = Profiles.FirstOrDefault();
     }
 
-    private ProfileViewModel Create(LaunchProfile profile) => new(profile, _dialogs, _machines.Find);
+    private ProfileViewModel Create(LaunchProfile profile) => new(profile, _dialogs, _machines.Find, _explorers);
 
     private void Add()
     {

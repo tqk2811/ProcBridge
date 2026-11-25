@@ -10,6 +10,8 @@
 //   ProcBridge.Spawn.<arch>.exe [--hook <dll>] [--hook-x64 <dll>] [--hook-x86 <dll>]
 //                               --broker <session id> <broker pid> -- <command line>
 //   ProcBridge.Spawn.<arch>.exe --inject <injector pid> <process handle> --init-section <section handle> <bytes> --hook <dll>
+// --cwd <dir> (with --map or --broker) starts the target in <dir>, which may lie in a virtual folder: this launcher is not
+// hooked, so the folder is handed to the hook in the init block (PROCBRIDGE_CWD) and set by it once its hooks are on.
 // --map (M1) backs virtual folders by local folders; --broker (M2) hands the hook a Broker session, whose
 // pipe must be owned by <broker pid> (PROCBRIDGE_IPC_TIMEOUT_MS of this process is passed on too).
 // Everything after the "--" argument of the raw command line is passed to CreateProcessW verbatim.
@@ -166,8 +168,8 @@ namespace
     int Usage()
     {
         std::fwprintf(stderr,
-            L"Usage: ProcBridge.Spawn [--hook <dll>] [--hook-x64 <dll>] [--hook-x86 <dll>] --map <virtual dir> <real dir> [--map ...] -- <command line>\n"
-            L"       ProcBridge.Spawn [--hook <dll>] [--hook-x64 <dll>] [--hook-x86 <dll>] --broker <session id> <broker pid> -- <command line>\n");
+            L"Usage: ProcBridge.Spawn [--hook <dll>] [--hook-x64 <dll>] [--hook-x86 <dll>] [--cwd <dir>] --map <virtual dir> <real dir> [--map ...] -- <command line>\n"
+            L"       ProcBridge.Spawn [--hook <dll>] [--hook-x64 <dll>] [--hook-x86 <dll>] [--cwd <dir>] --broker <session id> <broker pid> -- <command line>\n");
         return SpawnFailure;
     }
 
@@ -336,6 +338,7 @@ int wmain(int argc, wchar_t** argv)
     std::vector<Mapping> mappings;
     std::wstring brokerSession;
     std::wstring brokerProcessId;
+    std::wstring workingDirectory;
     int separatorIndex = 0;
     for (int i = 1; i < argc; ++i)
     {
@@ -361,6 +364,10 @@ int wmain(int argc, wchar_t** argv)
         {
             mappings.push_back({ GetFullPath(argv[i + 1]), GetFullPath(argv[i + 2]) });
             i += 2;
+        }
+        else if (arg == L"--cwd" && i + 1 < argc)
+        {
+            workingDirectory = GetFullPath(argv[++i]);
         }
         else if (arg == L"--broker" && i + 2 < argc)
         {
@@ -450,6 +457,8 @@ int wmain(int argc, wchar_t** argv)
     environment += L"PROCBRIDGE_HOOK_X86=" + hooks.X86 + L'\0';
     // Only the hook sets it, for a child started from the backing copy of a virtual image.
     environment += std::wstring(L"PROCBRIDGE_IMAGE=") + L'\0';
+    // Only for the target: the hook sets it as the current directory and removes the variable (empty: keep this one's).
+    environment += L"PROCBRIDGE_CWD=" + workingDirectory + L'\0';
     const std::vector<BYTE> initBlock = ProcBridge::Inject::BuildInitBlock(environment, {});
 
     TreeJob job;
@@ -477,6 +486,14 @@ int wmain(int argc, wchar_t** argv)
         if (injectError == ERROR_EXE_MACHINE_TYPE_MISMATCH)
         {
             return Fail(L"no hook DLL for the target architecture (use --hook-x64 / --hook-x86)", injectError);
+        }
+        if (!workingDirectory.empty() && (injectError == ERROR_PATH_NOT_FOUND || injectError == ERROR_FILE_NOT_FOUND
+            || injectError == ERROR_DIRECTORY || injectError == ERROR_ACCESS_DENIED || injectError == ERROR_INVALID_NAME))
+        {
+            // The hook sets the --cwd folder last: these errors are most likely that folder.
+            std::fwprintf(stderr, L"ProcBridge.Spawn: cannot enter the working directory (--cwd) %ls (error %lu)\n",
+                workingDirectory.c_str(), injectError);
+            return SpawnFailure;
         }
         return Fail(L"inject failed", injectError);
     }
