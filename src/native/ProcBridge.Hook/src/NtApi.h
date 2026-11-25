@@ -119,6 +119,17 @@ namespace ProcBridge::Hook::Nt
 
     // FILE_INFORMATION_CLASS FilePositionInformation and NtReadFile's "use the file pointer" offset.
     constexpr ULONG FilePositionInformation = 14;
+
+    // FILE_INFORMATION_CLASS FileStandardInformation and FILE_STANDARD_INFORMATION.
+    constexpr ULONG FileStandardInformation = 5;
+    struct FileStandardInfo
+    {
+        LARGE_INTEGER AllocationSize;
+        LARGE_INTEGER EndOfFile;
+        ULONG NumberOfLinks;
+        BOOLEAN DeletePending;
+        BOOLEAN Directory;
+    };
     constexpr ULONG FileUseFilePointerPosition = 0xFFFFFFFE;
 }
 

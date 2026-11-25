@@ -6,7 +6,7 @@
 //        ProcBridge.NativeProbe.<arch>.exe --<command> <arguments>   (single checks, see RunCommand)
 //        ProcBridge.NativeProbe.<arch>.exe --write <new folder>     (M3 write scenario, see WriteScenario)
 //        ProcBridge.NativeProbe.<arch>.exe --notify <watched> <real> (M7 change notifications, see NotifyScenario)
-//        ProcBridge.NativeProbe.<arch>.exe --read-at|--map-hash|--load|--symbols|--lock ... (M8, see ReadAt and below)
+//        ProcBridge.NativeProbe.<arch>.exe --read-at|--map-hash|--load|--symbols|--lock|--lock-async ... (M8, see ReadAt and below)
 // Expected tree under <root> (created by the test): a.txt, sub\b.txt, sub\deep\c.bin, empty\,
 // ro.txt (read-only), unicode file name. Last access times are never printed (they drift), nor the times
 // of ".." entries (the parent of a virtual root is not part of the virtual folder).
@@ -2440,6 +2440,56 @@ namespace
         return 0;
     }
 
+    /// --lock-async <virtual file> (M8): an overlapped lock on a handle bound to an I/O completion port completes through
+    /// the port (with the binding's key), and not with FILE_SKIP_COMPLETION_PORT_ON_SUCCESS.
+    int LockAsyncScenario(const wchar_t* virtualFile)
+    {
+        const HANDLE file = CreateFileW(virtualFile, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+            FILE_FLAG_OVERLAPPED, nullptr);
+        if (file == INVALID_HANDLE_VALUE)
+        {
+            WriteLine(L"open: " + Error(GetLastError()));
+            return 1;
+        }
+        const HANDLE port = CreateIoCompletionPort(file, nullptr, 7, 0);
+        if (port == nullptr)
+        {
+            WriteLine(L"port: " + Error(GetLastError()));
+            CloseHandle(file);
+            return 1;
+        }
+        auto lockAt = [file](OVERLAPPED& range) {
+            const BOOL ok = LockFileEx(file, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 10, 0, &range);
+            return ok || GetLastError() == ERROR_IO_PENDING ? std::wstring(L"ok") : Error(GetLastError());
+        };
+        auto packet = [port](DWORD timeout) {
+            DWORD bytes = 0;
+            ULONG_PTR key = 0;
+            OVERLAPPED* overlapped = nullptr;
+            if (!GetQueuedCompletionStatus(port, &bytes, &key, &overlapped, timeout))
+            {
+                return Error(GetLastError());
+            }
+            return L"key=" + std::to_wstring(key);
+        };
+
+        OVERLAPPED first{};
+        first.Offset = 100;
+        WriteLine(L"lock: " + lockAt(first));
+        WriteLine(L"packet: " + packet(5000));
+        UnlockFileEx(file, 0, 10, 0, &first);
+
+        SetFileCompletionNotificationModes(file, FILE_SKIP_COMPLETION_PORT_ON_SUCCESS);
+        OVERLAPPED second{};
+        second.Offset = 200;
+        WriteLine(L"lock skipping the port: " + lockAt(second));
+        WriteLine(L"packet: " + packet(500));
+        UnlockFileEx(file, 0, 10, 0, &second);
+        CloseHandle(port);
+        CloseHandle(file);
+        return 0;
+    }
+
     int RunCommand(int argc, wchar_t** argv)
     {
         const std::wstring command = argv[1];
@@ -2546,6 +2596,10 @@ namespace
         if (command == L"--symbols" && argc == 3)
         {
             return Symbols(argv[2]);
+        }
+        if (command == L"--lock-async" && argc == 3)
+        {
+            return LockAsyncScenario(argv[2]);
         }
         if (command == L"--lock" && argc == 4)
         {

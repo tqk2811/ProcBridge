@@ -156,6 +156,26 @@ public sealed class RemotePurposeTests
     }
 
     [TestMethod]
+    [DataRow("x64")]
+    [DataRow("Win32")]
+    public async Task OverlappedLockOnACompletionPort_CompletesThroughThePort(string platform)
+    {
+        using HookSandbox sandbox = new(platform);
+        File.WriteAllBytes(Path.Combine(sandbox.RealRoot, "async.db"), new byte[1000]);
+        await using RemoteSession session = RemoteSession.Start(sandbox, writable: true);
+
+        ProcessResult result = session.Run($"\"{sandbox.Binaries.Probe}\" --lock-async \"{sandbox.VirtualRoot}\\async.db\"");
+
+        Assert.AreEqual(0, result.ExitCode, Lines(result));
+        string expected = string.Join("\n",
+            "lock: ok",
+            "packet: key=7", // the lock granted on machine B is reported on the port, like a local one
+            "lock skipping the port: ok",
+            "packet: err=258") + "\n"; // FILE_SKIP_COMPLETION_PORT_ON_SUCCESS: no packet (WAIT_TIMEOUT)
+        Assert.AreEqual(expected, result.StandardOutput.Replace("\r\n", "\n"), Lines(result));
+    }
+
+    [TestMethod]
     public async Task Git_StatusAndLog_OnRepositoryOfMachineB()
     {
         string? git = FindGit();

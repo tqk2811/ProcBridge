@@ -452,9 +452,35 @@ namespace ProcBridge::Hook
             return shareAccess | FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
         }
 
+        /// Largest range one FetchRange request asks for: each request gets the ordinary IPC time limit, so a large read or
+        /// a whole file (a mapping) goes in pieces instead of one request with a longer limit.
+        constexpr int64_t FetchRangeChunk = 16LL * 1024 * 1024;
+
+        /// Brings [start, start + length) of ranged copy rangeId in, FetchRangeChunk at a time; complete tells whether the
+        /// copy is complete afterwards.
+        NTSTATUS FetchRangeInChunks(uint32_t rangeId, int64_t start, int64_t length, bool& complete) noexcept
+        {
+            complete = false;
+            int64_t done = 0;
+            do
+            {
+                const int64_t piece = length - done < FetchRangeChunk ? length - done : FetchRangeChunk;
+                const NTSTATUS status = g_resolver->FetchRange(rangeId, start + done, piece, false, complete);
+                if (!NT_SUCCESS(status))
+                {
+                    return status;
+                }
+                done += piece;
+            } while (done < length && !complete);
+            return STATUS_SUCCESS;
+        }
+
         /// Ranged cache copy of handle (M8): brings [offset, offset + length) in before a read (offset nullptr = the file
-        /// pointer), or the whole file. Untracked or complete handles return at once.
-        NTSTATUS EnsureRange(HANDLE fileHandle, const LARGE_INTEGER* offset, ULONG length, bool whole) noexcept
+        /// pointer), or the whole file. Untracked or complete handles return at once. A read at the file pointer of a
+        /// synchronous handle gets the position it was fetched for in filePointer (otherwise left alone): the caller reads
+        /// at that offset, so another thread moving the pointer meanwhile cannot make it read a range not fetched.
+        NTSTATUS EnsureRange(HANDLE fileHandle, const LARGE_INTEGER* offset, ULONG length, bool whole,
+            LARGE_INTEGER* filePointer = nullptr) noexcept
         {
             HookIpc::FileInfo info{};
             if (g_remoteHandles.IsEmpty() || !g_remoteHandles.GetInfo(fileHandle, info) || info.RangeId == 0)
@@ -462,6 +488,7 @@ namespace ProcBridge::Hook
                 return STATUS_SUCCESS;
             }
             int64_t start = 0;
+            int64_t size = length;
             if (!whole)
             {
                 if (offset != nullptr)
@@ -472,9 +499,17 @@ namespace ProcBridge::Hook
                 {
                     LARGE_INTEGER position{};
                     IO_STATUS_BLOCK io{};
+                    ULONG mode = 0;
+                    IO_STATUS_BLOCK modeStatus{};
                     if (NT_SUCCESS(g_ntQueryInformationFile(fileHandle, &io, &position, sizeof(position), FilePositionInformation)))
                     {
                         start = position.QuadPart;
+                        if (filePointer != nullptr
+                            && NT_SUCCESS(g_ntQueryInformationFile(fileHandle, &modeStatus, &mode, sizeof(mode), FileModeInformation))
+                            && (mode & (FileSynchronousIoAlert | FileSynchronousIoNonAlert)) != 0)
+                        {
+                            *filePointer = position;
+                        }
                     }
                     else
                     {
@@ -482,8 +517,21 @@ namespace ProcBridge::Hook
                     }
                 }
             }
+            if (whole)
+            {
+                // The whole file in pieces of the ordinary time limit each; without its size, one request as before.
+                FileStandardInfo standard{};
+                IO_STATUS_BLOCK io{};
+                if (NT_SUCCESS(g_ntQueryInformationFile(fileHandle, &io, &standard, sizeof(standard), FileStandardInformation)))
+                {
+                    whole = false;
+                    start = 0;
+                    size = standard.EndOfFile.QuadPart;
+                }
+            }
             bool complete = false;
-            const NTSTATUS status = g_resolver->FetchRange(info.RangeId, start, length, whole, complete);
+            const NTSTATUS status = whole ? g_resolver->FetchRange(info.RangeId, 0, 0, true, complete)
+                                          : FetchRangeInChunks(info.RangeId, start, size, complete);
             if (NT_SUCCESS(status) && complete)
             {
                 g_remoteHandles.ClearRange(fileHandle);
@@ -511,10 +559,15 @@ namespace ProcBridge::Hook
                 {
                     LARGE_INTEGER offset{};
                     const bool explicitOffset = ReadOffset(byteOffset, offset);
-                    const NTSTATUS fetched = EnsureRange(fileHandle, explicitOffset ? &offset : nullptr, length, false);
+                    LARGE_INTEGER fetchedAt{ { 0, -1 } };
+                    const NTSTATUS fetched = EnsureRange(fileHandle, explicitOffset ? &offset : nullptr, length, false, &fetchedAt);
                     if (!NT_SUCCESS(fetched))
                     {
                         return fetched;
+                    }
+                    if (!explicitOffset && fetchedAt.QuadPart >= 0)
+                    {
+                        return g_ntReadFile(fileHandle, event, apcRoutine, apcContext, ioStatusBlock, buffer, length, &fetchedAt, key);
                     }
                 }
             }
@@ -531,10 +584,16 @@ namespace ProcBridge::Hook
                 {
                     LARGE_INTEGER offset{};
                     const bool explicitOffset = ReadOffset(byteOffset, offset);
-                    const NTSTATUS fetched = EnsureRange(fileHandle, explicitOffset ? &offset : nullptr, length, false);
+                    LARGE_INTEGER fetchedAt{ { 0, -1 } };
+                    const NTSTATUS fetched = EnsureRange(fileHandle, explicitOffset ? &offset : nullptr, length, false, &fetchedAt);
                     if (!NT_SUCCESS(fetched))
                     {
                         return fetched;
+                    }
+                    if (!explicitOffset && fetchedAt.QuadPart >= 0)
+                    {
+                        return g_ntReadFileScatter(fileHandle, event, apcRoutine, apcContext, ioStatusBlock, segments, length, &fetchedAt,
+                            key);
                     }
                 }
             }
@@ -600,10 +659,30 @@ namespace ProcBridge::Hook
             return status;
         }
 
+        /// A lock granted on machine B completes like a real one: the I/O manager does it for a zero length lock taken
+        /// (and dropped at once) on the cache copy with the caller's event, APC, completion port binding and skip
+        /// notification modes, which the hook cannot see on a file handle. A zero length lock blocks nobody, so the
+        /// Broker still reads the whole copy. Falls back to completing synchronously when that lock fails.
+        NTSTATUS CompleteGrantedLock(HANDLE fileHandle, HANDLE event, PIO_APC_ROUTINE apcRoutine, PVOID apcContext,
+            PIO_STATUS_BLOCK ioStatusBlock, const LARGE_INTEGER& offset, ULONG key) noexcept
+        {
+            LARGE_INTEGER at = offset;
+            LARGE_INTEGER zero{};
+            const NTSTATUS status = g_ntLockFile(fileHandle, event, apcRoutine, apcContext, ioStatusBlock, &at, &zero, key, TRUE, FALSE);
+            if (!NT_SUCCESS(status))
+            {
+                return CompleteLockCall(ioStatusBlock, event, STATUS_SUCCESS);
+            }
+            IO_STATUS_BLOCK unlockStatus{};
+            g_ntUnlockFile(fileHandle, &unlockStatus, &at, &zero, key);
+            return status;
+        }
+
         /// NtLockFile on a virtual handle that may write (M8): the lock is taken on machine B only, where the Agent holds a
         /// handle for every such open (of any process of this machine too), so machine B arbitrates between all of them.
         /// The cache copy is not locked: the Broker must be able to read all of it for a write-back while locks are held.
-        /// Answered synchronously (no completion port packet, no APC).
+        /// The Broker is asked synchronously; a granted lock then completes through the I/O manager (CompleteGrantedLock),
+        /// a refused one fails at once like a lock refused before it could pend.
         NTSTATUS NTAPI HookNtLockFile(HANDLE fileHandle, HANDLE event, PIO_APC_ROUTINE apcRoutine, PVOID apcContext,
             PIO_STATUS_BLOCK ioStatusBlock, PLARGE_INTEGER byteOffset, PLARGE_INTEGER length, ULONG key, BOOLEAN failImmediately,
             BOOLEAN exclusiveLock)
@@ -619,7 +698,12 @@ namespace ProcBridge::Hook
             }
             const uint16_t flags = static_cast<uint16_t>((exclusiveLock ? HookIpc::LockFlagExclusive : 0)
                 | (failImmediately ? HookIpc::LockFlagFailImmediately : 0));
-            return CompleteLockCall(ioStatusBlock, event, g_resolver->LockRange(true, token, offset.QuadPart, size.QuadPart, key, flags));
+            const NTSTATUS status = g_resolver->LockRange(true, token, offset.QuadPart, size.QuadPart, key, flags);
+            if (!NT_SUCCESS(status))
+            {
+                return CompleteLockCall(ioStatusBlock, event, status);
+            }
+            return CompleteGrantedLock(fileHandle, event, apcRoutine, apcContext, ioStatusBlock, offset, key);
         }
 
         NTSTATUS NTAPI HookNtUnlockFile(HANDLE fileHandle, PIO_STATUS_BLOCK ioStatusBlock, PLARGE_INTEGER byteOffset, PLARGE_INTEGER length,
