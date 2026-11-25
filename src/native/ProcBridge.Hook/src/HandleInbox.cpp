@@ -46,6 +46,17 @@ namespace ProcBridge::Hook
             swprintf_s(name, L"Local\\ProcBridge-HandleInbox-%lu", processId);
         }
 
+        /// Debug output for a duplicate the receiver will not track (the copy itself still works, only untracked).
+        void LogSendFailure(const wchar_t* reason, DWORD processId, DWORD error) noexcept
+        {
+            wchar_t message[256];
+            if (swprintf_s(message, L"ProcBridge.Hook: handle inbox of process %lu not used: %s (error %lu)\n",
+                processId, reason, error) > 0)
+            {
+                OutputDebugStringW(message);
+            }
+        }
+
         uint64_t CreationTime(HANDLE process) noexcept
         {
             FILETIME created{};
@@ -203,6 +214,7 @@ namespace ProcBridge::Hook
         const uint64_t created = CreationTime(targetProcess);
         if (processId == 0 || created == 0)
         {
+            LogSendFailure(L"cannot query the target process", processId, GetLastError());
             return false;
         }
         wchar_t name[64];
@@ -210,11 +222,21 @@ namespace ProcBridge::Hook
         const HANDLE section = OpenFileMappingW(FILE_MAP_WRITE | FILE_MAP_READ, FALSE, name);
         if (section == nullptr)
         {
+            // Not found: no inbox (not hooked, or its name was squatted). Access denied: integrity label, AppContainer.
+            LogSendFailure(L"cannot open the inbox", processId, GetLastError());
             return false;
         }
         auto* view = static_cast<Header*>(MapViewOfFile(section, FILE_MAP_WRITE | FILE_MAP_READ, 0, 0, sizeof(Header)));
         bool sent = false;
-        if (view != nullptr && view->Magic == InboxMagic && view->Version == InboxVersion && view->OwnerCreationTime == created)
+        if (view == nullptr)
+        {
+            LogSendFailure(L"cannot map the inbox", processId, GetLastError());
+        }
+        else if (view->Magic != InboxMagic || view->Version != InboxVersion || view->OwnerCreationTime != created)
+        {
+            LogSendFailure(L"inbox of another version or an earlier process with the same id", processId, ERROR_SUCCESS);
+        }
+        else
         {
             for (ULONG i = 0; i < SlotCount && !sent; ++i)
             {
@@ -239,6 +261,10 @@ namespace ProcBridge::Hook
                 }
                 InterlockedIncrement(&view->Sequence);
                 sent = true;
+            }
+            if (!sent)
+            {
+                LogSendFailure(L"inbox full", processId, ERROR_SUCCESS);
             }
         }
         if (view != nullptr)
