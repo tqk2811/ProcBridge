@@ -54,6 +54,14 @@ Ghi 2026-11-26.
 - Khối khởi tạo không còn biến cấu hình khi process đặt `PROCBRIDGE_MAP` khác đi giữa chừng: Hook dùng giá
   trị lúc khởi tạo, cố ý. Ghi 2026-11-25.
 
+## [Thấp] Keepalive coi kết nối rất chậm là chết khi đang nhận một khung lớn
+
+`ProtocolConnection` chỉ cập nhật `_lastReceived` khi đọc xong trọn một khung (`src/shared/ProcBridge.Protocol/Transport/ProtocolConnection.cs`,
+vòng `ReadLoopAsync`). Trên đường dưới khoảng 13 KB/s, một khung 256 KB mất hơn `KeepAliveInterval` + `KeepAliveTimeout`
+(35 s) mới về đủ nên probe kết luận chết dù byte vẫn đang tới, rồi pool kết nối lại và lặp lại. Cách sửa: tính sống theo
+từng lần đọc byte của kênh; cần thêm tín hiệu tiến độ vào `IFrameChannel` cho cả `StreamFrameChannel` và
+`SecureFrameChannel`, nên chưa làm trong đợt review keepalive. Ghi 2026-11-26.
+
 ## [Thấp] Build server dùng chung nằm ngoài cây process
 
 `VBCSCompiler`, node MSBuild tái sử dụng và MSBuild server sống lâu hơn lệnh build: Spawn chờ cả Job nên sẽ

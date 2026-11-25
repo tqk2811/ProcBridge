@@ -42,7 +42,19 @@ internal sealed class FrameSendGate
             node = (urgent ? _urgent : _bulk).AddLast(new Waiter());
         }
         if (cancellationToken.CanBeCanceled)
-            node.Value.Registration = cancellationToken.Register(() => Cancel(node, cancellationToken));
+        {
+            CancellationTokenRegistration registration = cancellationToken.Register(() => Cancel(node, cancellationToken));
+            bool stillWaiting;
+            lock (_lock)
+            {
+                // Release may have granted the node before the registration existed; it unregistered nothing then.
+                stillWaiting = node.List is not null;
+                if (stillWaiting)
+                    node.Value.Registration = registration;
+            }
+            if (!stillWaiting)
+                registration.Unregister();
+        }
         return node.Value.Completion.Task;
     }
 
