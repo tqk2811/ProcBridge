@@ -1470,7 +1470,8 @@ namespace
 
     /// Number of process and section handles held by processId (types found from this process's own
     /// handles in the same snapshot). -1 when the snapshot fails.
-    int CountProcessAndSectionHandles(DWORD processId, HANDLE ownProcess, HANDLE ownSection, std::vector<BYTE>& buffer)
+    int CountProcessAndSectionHandles(DWORD processId, HANDLE ownProcess, HANDLE ownSection, std::vector<BYTE>& buffer,
+        std::vector<ULONG_PTR>* baseline)
     {
         constexpr SYSTEM_INFORMATION_CLASS SystemExtendedHandleInformation = static_cast<SYSTEM_INFORMATION_CLASS>(64);
         NTSTATUS status = STATUS_INFO_LENGTH_MISMATCH;
@@ -1503,14 +1504,40 @@ namespace
                 sectionType = entry.ObjectTypeIndex;
             }
         }
+        // processId 0: list this process's own inheritable process and section handles into baseline (they reach
+        // every child created with bInheritHandles, whoever opened them: the parent chain hands them down).
+        constexpr ULONG ObjInherit = 0x2;
         int count = 0;
         for (ULONG_PTR i = 0; i < info->NumberOfHandles; ++i)
         {
             const SystemHandleEntryEx& entry = info->Handles[i];
-            if (entry.UniqueProcessId == processId && (entry.ObjectTypeIndex == processType || entry.ObjectTypeIndex == sectionType))
+            if (entry.ObjectTypeIndex != processType && entry.ObjectTypeIndex != sectionType)
             {
-                ++count;
+                continue;
             }
+            const wchar_t* kind = entry.ObjectTypeIndex == processType ? L"process" : L"section";
+            if (processId == 0)
+            {
+                if (entry.UniqueProcessId == self && (entry.HandleAttributes & ObjInherit) != 0)
+                {
+                    baseline->push_back(entry.HandleValue);
+                    std::fwprintf(stderr, L"inheritable before the run: %s handle=0x%llx access=0x%lx\n", kind,
+                        static_cast<unsigned long long>(entry.HandleValue), entry.GrantedAccess);
+                }
+                continue;
+            }
+            if (entry.UniqueProcessId != processId)
+            {
+                continue;
+            }
+            // Same value as a handle inheritable here before the run: inherited from the parent chain, not the helper.
+            if (std::find(baseline->begin(), baseline->end(), entry.HandleValue) != baseline->end())
+            {
+                continue;
+            }
+            ++count;
+            std::fwprintf(stderr, L"leak: %s handle=0x%llx access=0x%lx attributes=0x%lx\n", kind,
+                static_cast<unsigned long long>(entry.HandleValue), entry.GrantedAccess, entry.HandleAttributes);
         }
         return count;
     }
@@ -1547,6 +1574,12 @@ namespace
         const HANDLE ownProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, GetCurrentProcessId());
         const HANDLE ownSection = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, 1, nullptr);
         std::vector<BYTE> buffer(1 << 20);
+        std::vector<ULONG_PTR> baseline;
+        if (CountProcessAndSectionHandles(0, ownProcess, ownSection, buffer, &baseline) < 0)
+        {
+            WriteLine(L"snapshot failed");
+            return 1;
+        }
         OtherArchitectureRun run{ otherProbe, virtualFile, 0 };
         const HANDLE worker = CreateThread(nullptr, 0, OtherArchitectureWorker, &run, 0, nullptr);
         int leaked = 0;
@@ -1558,7 +1591,7 @@ namespace
             {
                 break;
             }
-            const int count = CountProcessAndSectionHandles(child.ProcessId, ownProcess, ownSection, buffer);
+            const int count = CountProcessAndSectionHandles(child.ProcessId, ownProcess, ownSection, buffer, &baseline);
             if (count < 0)
             {
                 WriteLine(L"snapshot failed");
