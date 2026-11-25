@@ -1,6 +1,7 @@
 # ProcBridge — Kế hoạch thiết kế
 
-> Trạng thái: bản nháp thiết kế, chưa có code. Ngày lập: 2026-11-25.
+> Trạng thái: đã xong M0 (bộ khung) và M1 (spike hook cục bộ, mục 13.1). Ngày lập: 2026-11-25.
+> Việc còn treo: xem [Backlog-vi.md](Backlog-vi.md).
 > Thuật ngữ: xem [Glossary-vi.md](Glossary-vi.md).
 
 ## Mục lục
@@ -116,6 +117,7 @@ src/
 ├── native/
 │   ├── ProcBridge.Hook/                  # Hook.dll (C++, MinHook), build x64 + Win32
 │   ├── ProcBridge.Inject/                # thư viện inject dùng chung (C++), kể cả inject khác kiến trúc
+│   ├── ProcBridge.Spawn/                 # launcher native: tạo process suspended + inject (M1); helper inject cùng kiến trúc (mục 5)
 │   └── tests/ProcBridge.NativeProbe/     # exe gọi đủ bộ API file để test so sánh (mục 12)
 ├── shared/
 │   ├── ProcBridge.Protocol/              # định nghĩa message, framing, mã lỗi (C#)
@@ -404,6 +406,25 @@ Mỗi mốc là một nhánh riêng, xong mốc nào build, test và commit mố
 
 Phần Remote Explorer **duyệt file/thư mục và ổ đĩa** đi kèm M2 (chỉ đọc) và M3 (thao tác file), vì
 người dùng cần nó để chọn thư mục máy B trước khi mở phiên.
+
+### 13.1 Kết quả M1 (2026-11-25)
+
+- `ProcBridge.Hook` chặn `NtCreateFile`, `NtOpenFile`, `NtQueryAttributesFile`,
+  `NtQueryFullAttributesFile`, `NtQueryInformationFile` (tên: class 9, 18, 48), `NtSetInformationFile`
+  (chỉ dịch đường dẫn đích của đổi tên/tạo link), `NtQueryObject` (`ObjectNameInformation`), `NtClose`.
+- Theo mô hình 4.4 rút gọn: thư mục thật đóng vai "cache", mở đường dẫn ảo là mở file thật, trả handle
+  thật và ghi vào bảng `handle → ánh xạ`. Đọc, map bộ nhớ, overlapped I/O và liệt kê thư mục chạy trên
+  handle thật nên **không** chặn `NtReadFile`/`NtQueryDirectoryFile` ở M1 (liệt kê chỉ trả tên lá).
+  M2 sẽ chặn `NtQueryDirectoryFile[Ex]` để dựng danh sách từ máy B.
+- Cấu hình: biến môi trường `PROCBRIDGE_MAP` (`ảo*thật|ảo*thật`), đọc sau giao diện `IPathResolver`;
+  M2 thay bằng client Broker cùng giao diện.
+- Khởi động: `DllMain` không làm gì nặng; injector gọi export `ProcBridgeHookInitialize` bằng thread từ
+  xa sau `LoadLibraryW`, trước khi resume thread chính.
+- Launcher M1 là `ProcBridge.Spawn` (native, dùng `ProcBridge.Inject`); Launcher C# dùng nó từ M2.
+- Kiểm: `cmd /c type`, `dir`, `cd` vào thư mục ảo, .NET Framework `File.ReadAllText` (qua PowerShell 5.1),
+  test so sánh `NativeProbe` thật/ảo giống từng dòng, cả x64 và Win32
+  (`src/tests/ProcBridge.Tests/Native`). Notepad **chưa kiểm**: Notepad trên Windows 11 là app packaged,
+  `notepad.exe` chỉ kích hoạt app nằm ngoài cây process (giới hạn đã nêu ở mục 1).
 
 ---
 
