@@ -28,7 +28,9 @@ internal static class Program
         @"  --explorer replaces the whole profile; flags: " + "FileRead, FileWrite, ProcessRead, ProcessKill, RegistryRead, RegistryWrite, ServiceRead, ServiceControl, SystemInfo." + "\n" +
         @"  --plaintext serves unencrypted frames to anyone on the network (development only)." + "\n" +
         @"  --relay also serves machines A through a relay (internet, no account): machines A reach this Agent by its" + "\n" +
-        @"  fingerprint (HostId), which the relay checks against the identity key.";
+        @"  fingerprint (HostId), which the relay checks against the identity key. With --allow-pairing as well, the Agent" + "\n" +
+        @"  shows an 8-digit relay pairing code: machines A that only reach it through the relay pair with" + "\n" +
+        @"  'ProcBridge.Launcher --pair --relay <url> --code <code>'.";
 
     private static async Task<int> Main(string[] args)
     {
@@ -174,6 +176,11 @@ internal static class Program
             relay.ConnectionChanged += connected => Console.WriteLine(connected
                 ? $"  relay {options.Relay.Endpoint}: online."
                 : $"  relay {options.Relay.Endpoint}: disconnected ({relay.LastError ?? "no reason"}), retrying.");
+            relay.PairingCodeChanged += () =>
+            {
+                if (relay.PairingCode is { } code)
+                    Console.WriteLine($"  relay pairing code: {code} (valid until {relay.PairingCodeExpiresAt:HH:mm:ss} UTC, single use)");
+            };
         }
 
         var stop = new TaskCompletionSource();
