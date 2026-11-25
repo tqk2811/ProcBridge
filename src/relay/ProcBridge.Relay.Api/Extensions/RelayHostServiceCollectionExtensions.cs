@@ -56,6 +56,7 @@ public static class RelayHostServiceCollectionExtensions
             AddPerAddressPolicy(o, RelayRateLimitOptions.TunnelSessionPolicyName, limits.TunnelSessionPermitLimit, limits.Window);
             AddPerAddressPolicy(o, RelayRateLimitOptions.ControlPolicyName, limits.ControlPermitLimit, limits.Window);
             AddPerAddressPolicy(o, RelayRateLimitOptions.LanePolicyName, limits.LanePermitLimit, limits.Window);
+            AddPerAddressPolicy(o, RelayRateLimitOptions.PairingPolicyName, limits.PairingPermitLimit, limits.Window);
             o.OnRejected = async (context, cancellationToken) =>
             {
                 var response = context.HttpContext.Response;

@@ -73,18 +73,37 @@ internal sealed class TunnelControlChannel
         }
     }
 
-    /// <summary>Reads (and ignores) incoming frames until the host closes; answers the close handshake.</summary>
-    public async Task RunAsync(CancellationToken cancellationToken)
+    /// <summary>Most bytes of one text message from the host: its messages are tiny JSON lines.</summary>
+    public const int MaxHostMessageBytes = 4096;
+
+    /// <summary>
+    /// Reads incoming frames until the host closes and answers the close handshake. Each whole text message goes to
+    /// <paramref name="onText"/> (binary frames are ignored); a message over <see cref="MaxHostMessageBytes"/> closes the
+    /// channel.
+    /// </summary>
+    public async Task RunAsync(Func<string, Task> onText, CancellationToken cancellationToken)
     {
-        var buffer = new byte[4096];
+        var buffer = new byte[MaxHostMessageBytes];
+        int length = 0;
         while (_socket.State == WebSocketState.Open)
         {
-            var result = await _socket.ReceiveAsync(buffer, cancellationToken);
+            if (length == buffer.Length)
+            {
+                await _socket.CloseOutputAsync(WebSocketCloseStatus.MessageTooBig, "control message too large", cancellationToken);
+                return;
+            }
+            var result = await _socket.ReceiveAsync(buffer.AsMemory(length), cancellationToken);
             if (result.MessageType == WebSocketMessageType.Close)
             {
                 await _socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, null, cancellationToken);
                 return;
             }
+            length += result.Count;
+            if (!result.EndOfMessage)
+                continue;
+            if (result.MessageType == WebSocketMessageType.Text)
+                await onText(Encoding.UTF8.GetString(buffer, 0, length));
+            length = 0;
         }
     }
 

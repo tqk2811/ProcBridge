@@ -40,4 +40,10 @@ public sealed class TunnelOptions
 
     /// <summary>Open or reserved lanes per client address (both ends count).</summary>
     public int MaxLanesPerAddress { get; set; } = 256;
+
+    /// <summary>
+    /// How long a pairing slot (host waiting to be found by its invite code) stays open. Short on purpose: the code is
+    /// only 8 digits. The host opens a new slot with a new code when it expires.
+    /// </summary>
+    public TimeSpan PairingSlotLifetime { get; set; } = TimeSpan.FromMinutes(5);
 }

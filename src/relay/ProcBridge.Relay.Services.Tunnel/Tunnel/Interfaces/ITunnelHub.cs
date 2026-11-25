@@ -25,6 +25,12 @@ public interface ITunnelHub
     /// <summary>Opens a session to the host registered as <paramref name="hostId"/> and notifies it.</summary>
     Task<TunnelSessionVM> OpenSessionAsync(string hostId, string clientAddress, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Takes the pairing slot registered under <paramref name="lookupKey"/> (single use; 404 when none or expired), opens
+    /// a session to its host and tells the host its slot was claimed.
+    /// </summary>
+    Task<TunnelPairingSessionVM> OpenPairingSessionAsync(string lookupKey, string clientAddress, CancellationToken cancellationToken);
+
     /// <summary>Validates ticket and lane and reserves the slot; throws <c>ServiceException</c> when not allowed.</summary>
     TunnelLaneReservation ReserveLane(Guid sessionId, string ticket, int lane, string clientAddress);
 
