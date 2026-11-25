@@ -271,10 +271,6 @@ theo đường dẫn trên Agent cho commit, set-info, rename, delete.
   20 lần xanh, chạy 4 tiến trình song song 40 lần xanh. Probe mặc định chỉ đọc gốc thật (lượt ghi duy nhất ra file tạm
   ngoài gốc), nên nghi phần preload/cache thư mục của Broker chụp mtime trước khi NTFS cập nhật xong sau `CreateTree`.
   Lần đỏ sau: giữ nguyên dòng khác nhau và thời điểm tạo cây để so.
-- `ChildCreationTests.CrossArchitectureInjection_DoesNotLeakHandlesToSiblings`: từng đỏ ngẫu nhiên ở máy local.
-  Đã đọc lại: helper khác kiến trúc nhận handle process/section qua `DuplicateHandle` trong helper, không có handle nào
-  kế thừa được (`Inject.cpp`, `InjectWithHelper`). Ngày 2026-11-25: chạy riêng 20 lần xanh, song song 40 lần xanh. Probe chỉ
-  in tổng `leaked: N`; lần đỏ sau cần NativeProbe in thêm loại object, giá trị handle và PID con để biết handle lọt từ đâu.
 
 ## [Thấp] Review độc lập cho M2
 
