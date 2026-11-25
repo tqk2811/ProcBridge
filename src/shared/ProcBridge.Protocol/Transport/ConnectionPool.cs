@@ -89,9 +89,16 @@ public sealed class ConnectionPool : IAsyncDisposable
         if (bestConnection is not null && (bestConnection.PendingCount == 0 || empty is null))
             return (best!, bestConnection);
 
+        // From here a slot is free. With a live connection to fall back on, growing the pool is optional: do not
+        // queue behind another request's connect and do not hammer a slot that just failed.
+        bool optional = bestConnection is not null;
+        if (optional && empty!.IsResting(_options.ConnectBackoff))
+            return (best!, bestConnection!);
+
         try
         {
-            return (empty!, await ConnectSlotAsync(empty!, cancellationToken).ConfigureAwait(false));
+            ProtocolConnection? opened = await ConnectSlotAsync(empty!, optional, cancellationToken).ConfigureAwait(false);
+            return opened is null ? (best!, bestConnection!) : (empty!, opened);
         }
         catch (ProtocolStatusException) when (bestConnection is { IsAlive: true })
         {
@@ -99,9 +106,19 @@ public sealed class ConnectionPool : IAsyncDisposable
         }
     }
 
-    private async Task<ProtocolConnection> ConnectSlotAsync(Slot slot, CancellationToken cancellationToken)
+    /// <summary>Opens the connection of <paramref name="slot"/>; null when <paramref name="optional"/> and another request holds the slot.</summary>
+    private async Task<ProtocolConnection?> ConnectSlotAsync(Slot slot, bool optional, CancellationToken cancellationToken)
     {
-        await slot.Lock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        if (optional)
+        {
+            if (!slot.Lock.Wait(0, CancellationToken.None))
+                return null;
+        }
+        else
+        {
+            await slot.Lock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         try
         {
             ProtocolConnection? current = slot.Connection;
@@ -111,9 +128,26 @@ public sealed class ConnectionPool : IAsyncDisposable
             if (current is not null)
                 await current.DisposeAsync().ConfigureAwait(false);
 
-            ProtocolConnection connection = await ProtocolConnection.OpenAsync(_factory, _hello, _options, cancellationToken).ConfigureAwait(false);
+            ProtocolConnection connection;
+            try
+            {
+                connection = await ProtocolConnection.OpenAsync(_factory, _hello, _options, cancellationToken).ConfigureAwait(false);
+            }
+            catch (ProtocolStatusException)
+            {
+                slot.MarkFailed();
+                throw;
+            }
             Interlocked.Increment(ref _connectCount);
             slot.Connection = connection;
+            slot.ClearFailure();
+            // Dispose may have walked the slots before the line above; then nobody else would close this one.
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                slot.Connection = null;
+                await connection.DisposeAsync().ConfigureAwait(false);
+                throw new ObjectDisposedException(nameof(ConnectionPool));
+            }
             return connection;
         }
         finally
@@ -139,5 +173,17 @@ public sealed class ConnectionPool : IAsyncDisposable
         public readonly SemaphoreSlim Lock = new(1, 1);
         public volatile ProtocolConnection? Connection;
         public long Requests;
+        private long _failedAt;
+
+        public void MarkFailed() => Volatile.Write(ref _failedAt, Environment.TickCount64 | 1);
+
+        public void ClearFailure() => Volatile.Write(ref _failedAt, 0);
+
+        /// <summary>True when the last connect failed less than <paramref name="backoff"/> ago.</summary>
+        public bool IsResting(TimeSpan backoff)
+        {
+            long failedAt = Volatile.Read(ref _failedAt);
+            return failedAt != 0 && Environment.TickCount64 - failedAt < backoff.TotalMilliseconds;
+        }
     }
 }

@@ -17,6 +17,9 @@ public sealed record TransportOptions
 
     public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(10);
 
+    /// <summary>After a failed connect, how long a busy pool leaves that slot alone while another connection is alive.</summary>
+    public TimeSpan ConnectBackoff { get; init; } = TimeSpan.FromSeconds(5);
+
     public TimeSpan RequestTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
     /// <summary>How many times an idempotent request is resent after its connection broke.</summary>
