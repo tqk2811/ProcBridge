@@ -172,6 +172,30 @@ public sealed class BrokerWatchTests
     }
 
     [TestMethod]
+    public async Task HookWatch_ChangeTooBigForOneReply_BecomesOverflow()
+    {
+        using var share = new TempFolder("bwatch");
+        Directory.CreateDirectory(share.Combine("proj"));
+        using var cacheDir = new TempFolder("cache");
+        await using AgentServer server = StartAgent(share);
+        await using AgentClient client = CreateClient(server.Port);
+        var cache = new FileCache(client, cacheDir.Path, LongTtl);
+        await using ChangeWatcher watcher = client.CreateWatcher(TimeSpan.FromMilliseconds(200));
+        cache.AttachWatcher(watcher);
+        watcher.Start();
+        await watcher.WaitActiveAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+        // A budget no change fits: the first queued change can never be delivered.
+        var registry = new HookWatchRegistry(cache, replyBudget: 4);
+        uint id = registry.Add(1, "proj", subtree: true);
+
+        share.WriteFile(@"proj\a.txt", [1]);
+        var reply = await registry.WaitAsync(1, id, TimeSpan.FromSeconds(5), CancellationToken.None);
+
+        Assert.IsTrue(reply.Overflow);
+        Assert.IsEmpty(reply.Changes);
+    }
+
+    [TestMethod]
     public async Task PreloadTree_FillsStatsAndListings_NoFurtherRequests()
     {
         using var share = new TempFolder("bwatch");

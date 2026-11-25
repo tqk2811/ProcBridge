@@ -268,4 +268,97 @@ public sealed class HookPipeEndToEndTests
         HookWaitChangesReply reply = await pending.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.IsEmpty(reply.Changes);
     }
+
+    private static async Task<BrokerHost> StartBrokerAsync(TempFolder share, TempFolder cacheDir, AgentServer agent, string session)
+    {
+        Directory.CreateDirectory(share.Combine("proj"));
+        await Task.CompletedTask;
+        return BrokerHost.Start(new BrokerOptions
+        {
+            SessionId = session,
+            AgentHost = "127.0.0.1",
+            AgentPort = agent.Port,
+            ShareName = "src",
+            Mappings = [new VirtualMapping(VirtualRoot, "proj")],
+            CacheRoot = cacheDir.Path,
+        });
+    }
+
+    private static async Task WaitForCountAsync(HookWatchRegistry registry, int expected)
+    {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        while (registry.Count != expected)
+        {
+            Assert.IsLessThan(5000, watch.ElapsedMilliseconds, $"Watch count stayed {registry.Count}, expected {expected}.");
+            await Task.Delay(10);
+        }
+    }
+
+    [TestMethod]
+    public async Task ClientClosesPipeDuringLongPoll_EndsTheWait_AndRemovesItsWatches()
+    {
+        using var share = new TempFolder("pipe");
+        using var cacheDir = new TempFolder("cache");
+        await using var agent = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
+        agent.Start();
+        string session = HookIpcProtocol.NewSessionId();
+        await using BrokerHost broker = await StartBrokerAsync(share, cacheDir, agent, session);
+        HookWatchRegistry registry = broker.Pipe.Handler.Watches;
+
+        FakeHook hook = await FakeHook.ConnectAsync(HookIpcProtocol.GetPipeName(session));
+        HookWatchReply watch = await hook.CallOkAsync(new HookWatchRequest { MappingIndex = 0, WatchSubtree = true, RelativePath = string.Empty }, HookWatchReply.Read);
+        Task pending = hook.CallAsync(new HookWaitChangesRequest { WatchId = watch.WatchId, TimeoutMilliseconds = HookIpcProtocol.InfiniteTimeout });
+        await Task.Delay(100);
+        Assert.AreEqual(1, registry.Count);
+
+        await hook.DisposeAsync();
+        await WaitForCountAsync(registry, 0);
+        try
+        {
+            await pending;
+        }
+        catch (Exception e) when (e is IOException or ObjectDisposedException or OperationCanceledException)
+        {
+        }
+    }
+
+    [TestMethod]
+    public async Task Watch_BelongsToItsProcess_AndSurvivesOtherConnectionsOfIt()
+    {
+        using var share = new TempFolder("pipe");
+        using var cacheDir = new TempFolder("cache");
+        await using var agent = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
+        agent.Start();
+        string session = HookIpcProtocol.NewSessionId();
+        await using BrokerHost broker = await StartBrokerAsync(share, cacheDir, agent, session);
+        HookRequestHandler handler = broker.Pipe.Handler;
+
+        await using FakeHook hook = await FakeHook.ConnectAsync(HookIpcProtocol.GetPipeName(session));
+        HookWatchReply watch = await hook.CallOkAsync(new HookWatchRequest { MappingIndex = 0, WatchSubtree = true, RelativePath = string.Empty }, HookWatchReply.Read);
+
+        // Another process (another client id) can neither wait on, remove nor drop the watch by disconnecting.
+        const long Stranger = 4242;
+        handler.ClientConnected(Stranger);
+        Assert.AreEqual((uint)NtStatus.InvalidHandle, await CallHandlerAsync(handler, Stranger, new HookWaitChangesRequest { WatchId = watch.WatchId, TimeoutMilliseconds = 0 }));
+        Assert.AreEqual((uint)NtStatus.InvalidHandle, await CallHandlerAsync(handler, Stranger, new HookUnwatchRequest { WatchId = watch.WatchId }));
+        handler.ClientDisconnected(Stranger);
+        Assert.AreEqual(1, handler.Watches.Count);
+
+        // A second pipe of the owning process closing leaves the watch alone as long as the first pipe is open.
+        FakeHook second = await FakeHook.ConnectAsync(HookIpcProtocol.GetPipeName(session));
+        await second.CallOkAsync(new HookHelloRequest { ProcessId = 1, Architecture = HookArchitecture.X64 }, HookHelloReply.Read);
+        await second.DisposeAsync();
+        await Task.Delay(100);
+        Assert.AreEqual(1, handler.Watches.Count);
+        await hook.CallOkAsync(new HookWaitChangesRequest { WatchId = watch.WatchId, TimeoutMilliseconds = 0 }, HookWaitChangesReply.Read);
+    }
+
+    private static async Task<uint> CallHandlerAsync(HookRequestHandler handler, long clientId, IHookIpcMessage request)
+    {
+        var requestBuffer = new byte[HookIpcProtocol.MaxMessageSize];
+        var reply = new byte[HookIpcProtocol.MaxMessageSize];
+        int size = HookIpcCodec.Encode(requestBuffer, 1, request);
+        int replySize = await handler.HandleAsync(clientId, requestBuffer.AsMemory(0, size), reply, CancellationToken.None);
+        return HookIpcCodec.ReadHeader(reply.AsSpan(0, replySize)).Status;
+    }
 }
