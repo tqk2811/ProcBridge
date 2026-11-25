@@ -31,6 +31,18 @@ namespace ProcBridge::Hook
         Device, // \Device\HarddiskVolume3\Work\virtual\a.txt, matched by FindMappingByDevicePath
     };
 
+    /// Changes of one WaitChanges reply: Count x (HookIpc::ChangeEntry, String Name) in Entries (see HookIpc.h).
+    struct ChangeBatch
+    {
+        const BYTE* Entries;
+        ULONG Bytes;
+        USHORT Count;
+        bool Overflow; // changes were lost: the notify completes with STATUS_NOTIFY_ENUM_DIR
+    };
+
+    /// Pipe instance of one directory watch, owned by the resolver (opaque to the hooks).
+    struct WatchChannel;
+
     /// One page of a directory listing: Count x (FileInfo, String Name) as in a HookIpc List reply.
     struct DirectoryPage
     {
@@ -137,6 +149,30 @@ namespace ProcBridge::Hook
         {
             return STATUS_NOT_SUPPORTED;
         }
+
+        // Directory watches of a remote resolver (M7, NtNotifyChangeDirectoryFile[Ex]).
+
+        /// Starts watching the virtual directory ntPath on machine B. channel receives the watch's own pipe instance,
+        /// which keeps the watch alive and carries its long polls; give it back with Unwatch.
+        virtual NTSTATUS Watch(int /*mapping*/, const UNICODE_STRING& /*ntPath*/, bool /*subtree*/, ULONG /*completionFilter*/,
+            WatchChannel*& channel, uint32_t& watchId) const noexcept
+        {
+            channel = nullptr;
+            watchId = 0;
+            return STATUS_NOT_SUPPORTED;
+        }
+
+        /// Waits until watch watchId has changes (long poll on channel; reopened when it was dropped). The changes
+        /// live in buffer (HookIpc::MaxMessageSize bytes). A signalled cancelEvent abandons the wait with
+        /// STATUS_CANCELLED (changes the Broker sent meanwhile are lost).
+        virtual NTSTATUS WaitChanges(WatchChannel*& /*channel*/, uint32_t /*watchId*/, HANDLE /*cancelEvent*/, BYTE* /*buffer*/,
+            ChangeBatch& /*batch*/) const noexcept
+        {
+            return STATUS_NOT_SUPPORTED;
+        }
+
+        /// Removes watch watchId on machine B, then closes its channel (may be null).
+        virtual void Unwatch(WatchChannel* /*channel*/, uint32_t /*watchId*/) const noexcept {}
     };
 
     /// Mappings read from the PROCBRIDGE_MAP environment variable:

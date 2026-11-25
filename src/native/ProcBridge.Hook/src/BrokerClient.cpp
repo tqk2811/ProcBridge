@@ -168,9 +168,15 @@ namespace ProcBridge::Hook
         _status = _client.Acquire(_connection, _pooled);
     }
 
+    BrokerClient::Call::Call(BrokerClient& client, HookIpc::MessageType type, Connection* channel) noexcept
+        : _client(client), _connection(channel), _type(type), _channel(true)
+    {
+        _status = channel != nullptr ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+    }
+
     BrokerClient::Call::~Call()
     {
-        if (_connection != nullptr)
+        if (_connection != nullptr && !_channel)
         {
             _client.Release(_connection, _healthy);
         }
@@ -203,7 +209,7 @@ namespace ProcBridge::Hook
         Put(text, bytes);
     }
 
-    NTSTATUS BrokerClient::Call::Send(BrokerReply& reply) noexcept
+    NTSTATUS BrokerClient::Call::Send(BrokerReply& reply, HANDLE cancelEvent, DWORD timeoutMs) noexcept
     {
         if (!NT_SUCCESS(_status))
         {
@@ -252,13 +258,15 @@ namespace ProcBridge::Hook
         }
         if (!done && GetLastError() == ERROR_IO_PENDING)
         {
-            if (WaitForSingleObject(_connection->Event, _client._timeoutMs) != WAIT_OBJECT_0)
+            const HANDLE events[2] = { _connection->Event, cancelEvent };
+            const DWORD waited = WaitForMultipleObjects(cancelEvent != nullptr ? 2 : 1, events, FALSE, timeoutMs);
+            if (waited != WAIT_OBJECT_0)
             {
                 // The instance is in an unknown state now: drop it.
                 CancelIoEx(_connection->Pipe, &overlapped);
                 GetOverlappedResult(_connection->Pipe, &overlapped, &received, TRUE);
                 _healthy = false;
-                return STATUS_IO_TIMEOUT;
+                return waited == WAIT_OBJECT_0 + 1 ? STATUS_CANCELLED : STATUS_IO_TIMEOUT;
             }
             done = GetOverlappedResult(_connection->Pipe, &overlapped, &received, FALSE);
         }

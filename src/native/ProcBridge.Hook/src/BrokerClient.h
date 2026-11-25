@@ -41,6 +41,8 @@ namespace ProcBridge::Hook
     {
     public:
         class Call;
+        /// A pipe instance. Pooled ones are hidden in Call; a channel (OpenChannel) belongs to one caller.
+        struct Connection;
 
         BrokerClient() noexcept = default;
         /// Lives as long as the process: its pipes are closed by the system at exit. Closing them from a global
@@ -55,8 +57,19 @@ namespace ProcBridge::Hook
         /// Changes the per-call timeout; only while no other thread uses the client (end of start-up).
         void SetTimeout(DWORD timeoutMs) noexcept { _timeoutMs = timeoutMs; }
 
+        /// Opens a pipe instance outside the pool for one caller (a directory watch and its WaitChanges long polls,
+        /// plan section 10): a long poll never holds an instance other requests wait for, and the open channel keeps
+        /// this process known to the Broker while the watch lives. Close it with CloseChannel.
+        NTSTATUS OpenChannel(Connection*& channel) noexcept { return Open(channel); }
+        static void CloseChannel(Connection* channel) noexcept
+        {
+            if (channel != nullptr)
+            {
+                Destroy(channel);
+            }
+        }
+
     private:
-        struct Connection;
 
         static constexpr int MaxIdle = 8;
 
@@ -83,6 +96,8 @@ namespace ProcBridge::Hook
     {
     public:
         Call(BrokerClient& client, HookIpc::MessageType type) noexcept;
+        /// Runs the exchange on channel (from OpenChannel), which stays with the caller afterwards.
+        Call(BrokerClient& client, HookIpc::MessageType type, Connection* channel) noexcept;
         ~Call();
         Call(const Call&) = delete;
         Call& operator=(const Call&) = delete;
@@ -93,7 +108,14 @@ namespace ProcBridge::Hook
 
         /// Returns the NTSTATUS of the exchange: the reply status, STATUS_IO_TIMEOUT when the Broker does not
         /// answer in time, or a network status when the pipe fails.
-        NTSTATUS Send(BrokerReply& reply) noexcept;
+        NTSTATUS Send(BrokerReply& reply) noexcept { return Send(reply, nullptr, _client._timeoutMs); }
+
+        /// Like Send, waiting at most timeoutMs (INFINITE allowed); a signalled cancelEvent (optional) abandons the
+        /// exchange with STATUS_CANCELLED. Either way the instance is then unusable (see Healthy).
+        NTSTATUS Send(BrokerReply& reply, HANDLE cancelEvent, DWORD timeoutMs) noexcept;
+
+        /// False when the pipe instance is in an unknown state after Send: a channel must then be closed.
+        bool Healthy() const noexcept { return _healthy; }
 
     private:
         BrokerClient& _client;
@@ -103,5 +125,6 @@ namespace ProcBridge::Hook
         ULONG _size = HookIpc::HeaderSize;
         bool _healthy = true;
         bool _pooled = false;
+        bool _channel = false;
     };
 }

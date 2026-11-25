@@ -344,4 +344,129 @@ namespace ProcBridge::Hook
         page.HasMore = (header.Flags & HookIpc::ListFlagHasMore) != 0;
         return STATUS_SUCCESS;
     }
+
+    namespace
+    {
+        BrokerClient::Connection* ToConnection(WatchChannel* channel) noexcept
+        {
+            return reinterpret_cast<BrokerClient::Connection*>(channel);
+        }
+    }
+
+    NTSTATUS BrokerResolver::Watch(int mapping, const UNICODE_STRING& ntPath, bool subtree, ULONG completionFilter,
+        WatchChannel*& channel, uint32_t& watchId) const noexcept
+    {
+        channel = nullptr;
+        watchId = 0;
+        BrokerClient::Connection* connection = nullptr;
+        NTSTATUS status = _client.OpenChannel(connection);
+        if (!NT_SUCCESS(status))
+        {
+            return status;
+        }
+        const UNICODE_STRING relative = RelativePath(mapping, ntPath, PathKind::Nt);
+        bool healthy = false;
+        {
+            BrokerClient::Call call(_client, HookIpc::MessageType::WatchDirectory, connection);
+            HookIpc::WatchRequest request{};
+            request.MappingIndex = static_cast<uint16_t>(mapping);
+            request.Flags = subtree ? HookIpc::WatchFlagSubtree : 0;
+            request.CompletionFilter = completionFilter;
+            call.Put(&request, sizeof(request));
+            call.PutString(relative.Buffer, relative.Length);
+            BrokerReply reply;
+            status = call.Send(reply);
+            healthy = call.Healthy();
+            if (NT_SUCCESS(status))
+            {
+                HookIpc::WatchReply answer{};
+                MessageReader reader(reply.Body, reply.BodySize);
+                if (reader.Read(&answer, sizeof(answer)) && answer.WatchId != 0)
+                {
+                    watchId = answer.WatchId;
+                }
+                else
+                {
+                    status = STATUS_INVALID_NETWORK_RESPONSE;
+                }
+            }
+        }
+        if (NT_SUCCESS(status) && healthy)
+        {
+            channel = reinterpret_cast<WatchChannel*>(connection);
+            return STATUS_SUCCESS;
+        }
+        // A failed exchange leaves the instance unusable; a registered watch gets a new channel with its first long poll.
+        BrokerClient::CloseChannel(connection);
+        return status;
+    }
+
+    NTSTATUS BrokerResolver::WaitChanges(WatchChannel*& channel, uint32_t watchId, HANDLE cancelEvent, BYTE* buffer,
+        ChangeBatch& batch) const noexcept
+    {
+        batch = ChangeBatch{};
+        BrokerClient::Connection* connection = ToConnection(channel);
+        if (connection == nullptr)
+        {
+            const NTSTATUS opened = _client.OpenChannel(connection);
+            if (!NT_SUCCESS(opened))
+            {
+                return opened;
+            }
+            channel = reinterpret_cast<WatchChannel*>(connection);
+        }
+        NTSTATUS status = STATUS_SUCCESS;
+        bool healthy = true;
+        {
+            BrokerClient::Call call(_client, HookIpc::MessageType::WaitChanges, connection);
+            HookIpc::WaitChangesRequest request{};
+            request.WatchId = watchId;
+            request.TimeoutMilliseconds = HookIpc::InfiniteTimeout;
+            call.Put(&request, sizeof(request));
+            BrokerReply reply;
+            status = call.Send(reply, cancelEvent, INFINITE);
+            healthy = call.Healthy();
+            if (NT_SUCCESS(status))
+            {
+                memcpy(buffer, reply.Body, reply.BodySize);
+                MessageReader reader(buffer, reply.BodySize);
+                HookIpc::WaitChangesReply answer{};
+                if (reader.Read(&answer, sizeof(answer)))
+                {
+                    batch.Entries = reader.Position();
+                    batch.Bytes = reader.Remaining();
+                    batch.Count = answer.Count;
+                    batch.Overflow = (answer.Flags & HookIpc::ChangesFlagOverflow) != 0;
+                }
+                else
+                {
+                    status = STATUS_INVALID_NETWORK_RESPONSE;
+                }
+            }
+        }
+        if (!healthy)
+        {
+            // An abandoned long poll leaves the instance unusable. Open the next one before closing it: the Broker
+            // drops the watches of this process once its last pipe closes.
+            BrokerClient::Connection* fresh = nullptr;
+            channel = NT_SUCCESS(_client.OpenChannel(fresh)) ? reinterpret_cast<WatchChannel*>(fresh) : nullptr;
+            BrokerClient::CloseChannel(connection);
+        }
+        return status;
+    }
+
+    void BrokerResolver::Unwatch(WatchChannel* channel, uint32_t watchId) const noexcept
+    {
+        if (watchId != 0)
+        {
+            BrokerClient::Call call(_client, HookIpc::MessageType::Unwatch);
+            HookIpc::UnwatchRequest request{};
+            request.WatchId = watchId;
+            call.Put(&request, sizeof(request));
+            BrokerReply reply;
+            call.Send(reply);
+        }
+        // After Unwatch: the channel kept the process known to the Broker until the watch was gone.
+        BrokerClient::CloseChannel(ToConnection(channel));
+    }
 }

@@ -5,6 +5,7 @@
 // Usage: ProcBridge.NativeProbe.<arch>.exe <root>
 //        ProcBridge.NativeProbe.<arch>.exe --<command> <arguments>   (single checks, see RunCommand)
 //        ProcBridge.NativeProbe.<arch>.exe --write <new folder>     (M3 write scenario, see WriteScenario)
+//        ProcBridge.NativeProbe.<arch>.exe --notify <watched> <real> (M7 change notifications, see NotifyScenario)
 // Expected tree under <root> (created by the test): a.txt, sub\b.txt, sub\deep\c.bin, empty\,
 // ro.txt (read-only), unicode file name. Last access times are never printed (they drift), nor the times
 // of ".." entries (the parent of a virtual root is not part of the virtual folder).
@@ -1866,6 +1867,350 @@ namespace
         ProbeOutput _output;
     };
 
+    // ---- Change notifications (M7): ReadDirectoryChangesW and NtNotifyChangeDirectoryFile on <watched>, while the
+    // files are made in <real> (machine B's folder behind the virtual one, or the same folder for the reference run).
+    // Only the first entry of a notification is printed: the file system may add more (a modification) later. ----
+
+    using NtNotifyChangeDirectoryFileFn = NTSTATUS(NTAPI*)(HANDLE, HANDLE, PIO_APC_ROUTINE, PVOID, PIO_STATUS_BLOCK, PVOID, ULONG,
+        ULONG, BOOLEAN);
+
+    constexpr DWORD NotifyTimeoutMs = 20000;
+    constexpr DWORD NotifyChangeDelayMs = 700;
+
+    struct DelayedCreate
+    {
+        std::wstring Path;
+        DWORD DelayMs;
+    };
+
+    DWORD WINAPI DelayedCreateThread(PVOID context)
+    {
+        const auto* job = static_cast<const DelayedCreate*>(context);
+        Sleep(job->DelayMs);
+        const HANDLE file = CreateFileW(job->Path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE)
+        {
+            CloseHandle(file);
+        }
+        return 0;
+    }
+
+    /// Creates path (an empty file) after delayMs on a thread of its own; Join waits for it.
+    class LaterCreate final
+    {
+    public:
+        LaterCreate(std::wstring path, DWORD delayMs) : _job{ std::move(path), delayMs }
+        {
+            _thread = CreateThread(nullptr, 0, &DelayedCreateThread, &_job, 0, nullptr);
+        }
+        ~LaterCreate() { Join(); }
+        LaterCreate(const LaterCreate&) = delete;
+        LaterCreate& operator=(const LaterCreate&) = delete;
+
+        void Join()
+        {
+            if (_thread != nullptr)
+            {
+                WaitForSingleObject(_thread, INFINITE);
+                CloseHandle(_thread);
+                _thread = nullptr;
+            }
+        }
+
+    private:
+        DelayedCreate _job;
+        HANDLE _thread = nullptr;
+    };
+
+    std::wstring FirstNotifyEntry(const BYTE* buffer, DWORD bytes, bool extended)
+    {
+        if (bytes == 0)
+        {
+            return L"entries=0";
+        }
+        DWORD action = 0;
+        DWORD nameBytes = 0;
+        const wchar_t* name = nullptr;
+        if (extended)
+        {
+            const auto* entry = reinterpret_cast<const FILE_NOTIFY_EXTENDED_INFORMATION*>(buffer);
+            action = entry->Action;
+            nameBytes = entry->FileNameLength;
+            name = entry->FileName;
+        }
+        else
+        {
+            const auto* entry = reinterpret_cast<const FILE_NOTIFY_INFORMATION*>(buffer);
+            action = entry->Action;
+            nameBytes = entry->FileNameLength;
+            name = entry->FileName;
+        }
+        return L"action=" + Num(action) + L" name=" + std::wstring(name, nameBytes / sizeof(wchar_t));
+    }
+
+    HANDLE OpenWatched(const std::wstring& directory, bool overlapped)
+    {
+        return CreateFileW(directory.c_str(), FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+            OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | (overlapped ? FILE_FLAG_OVERLAPPED : 0), nullptr);
+    }
+
+    constexpr DWORD NameFilter = FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME;
+
+    void NotifySync(const std::wstring& watched, const std::wstring& real)
+    {
+        Handle directory(OpenWatched(watched, false));
+        LaterCreate create(real + L"\\n-sync.txt", NotifyChangeDelayMs);
+        alignas(8) BYTE buffer[4096];
+        DWORD bytes = 0;
+        const BOOL ok = ReadDirectoryChangesW(directory.Get(), buffer, sizeof(buffer), FALSE, NameFilter, &bytes, nullptr, nullptr);
+        WriteLine(L"notify.sync: ok=" + Num(ok) + L" " + (ok ? FirstNotifyEntry(buffer, bytes, false) : Error(GetLastError())));
+    }
+
+    void NotifyEvent(const std::wstring& watched, const std::wstring& real, bool extended)
+    {
+        const std::wstring step = extended ? L"notify.ex" : L"notify.event";
+        Handle directory(OpenWatched(watched, true));
+        Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+        OVERLAPPED overlapped{};
+        overlapped.hEvent = event.Get();
+        alignas(8) BYTE buffer[4096];
+        const BOOL issued = extended
+            ? ReadDirectoryChangesExW(directory.Get(), buffer, sizeof(buffer), FALSE, NameFilter, nullptr, &overlapped, nullptr,
+                ReadDirectoryNotifyExtendedInformation)
+            : ReadDirectoryChangesW(directory.Get(), buffer, sizeof(buffer), FALSE, NameFilter, nullptr, &overlapped, nullptr);
+        if (!issued)
+        {
+            WriteLine(step + L": issue " + Error(GetLastError()));
+            return;
+        }
+        LaterCreate create(real + (extended ? L"\\n-ex.txt" : L"\\n-event.txt"), 0);
+        if (WaitForSingleObject(event.Get(), NotifyTimeoutMs) != WAIT_OBJECT_0)
+        {
+            WriteLine(step + L": timeout");
+            CancelIoEx(directory.Get(), &overlapped);
+            DWORD ignored = 0;
+            GetOverlappedResult(directory.Get(), &overlapped, &ignored, TRUE);
+            return;
+        }
+        DWORD bytes = 0;
+        const BOOL ok = GetOverlappedResult(directory.Get(), &overlapped, &bytes, FALSE);
+        WriteLine(step + L": ok=" + Num(ok) + L" " + (ok ? FirstNotifyEntry(buffer, bytes, extended) : Error(GetLastError())));
+    }
+
+    struct ApcResult
+    {
+        bool Done;
+        DWORD Error;
+        DWORD Bytes;
+    };
+    ApcResult g_apcResult{};
+
+    VOID CALLBACK NotifyCompletionRoutine(DWORD error, DWORD bytes, LPOVERLAPPED)
+    {
+        g_apcResult = { true, error, bytes };
+    }
+
+    void NotifyApc(const std::wstring& watched, const std::wstring& real)
+    {
+        Handle directory(OpenWatched(watched, true));
+        OVERLAPPED overlapped{};
+        alignas(8) BYTE buffer[4096];
+        g_apcResult = {};
+        if (!ReadDirectoryChangesW(directory.Get(), buffer, sizeof(buffer), FALSE, NameFilter, nullptr, &overlapped,
+                &NotifyCompletionRoutine))
+        {
+            WriteLine(L"notify.apc: issue " + Error(GetLastError()));
+            return;
+        }
+        LaterCreate create(real + L"\\n-apc.txt", 0);
+        const ULONGLONG deadline = GetTickCount64() + NotifyTimeoutMs;
+        while (!g_apcResult.Done && GetTickCount64() < deadline)
+        {
+            SleepEx(100, TRUE);
+        }
+        if (!g_apcResult.Done)
+        {
+            WriteLine(L"notify.apc: timeout");
+            CancelIoEx(directory.Get(), &overlapped);
+            SleepEx(1000, TRUE);
+            return;
+        }
+        WriteLine(L"notify.apc: error=" + Num(g_apcResult.Error) + L" " + FirstNotifyEntry(buffer, g_apcResult.Bytes, false));
+    }
+
+    void NotifyCompletionPort(const std::wstring& watched, const std::wstring& real)
+    {
+        constexpr ULONG_PTR Key = 0x1234;
+        Handle directory(OpenWatched(watched, true));
+        const HANDLE port = CreateIoCompletionPort(directory.Get(), nullptr, Key, 0);
+        if (port == nullptr)
+        {
+            WriteLine(L"notify.iocp: port " + Error(GetLastError()));
+            return;
+        }
+        OVERLAPPED overlapped{};
+        alignas(8) BYTE buffer[4096];
+        if (!ReadDirectoryChangesW(directory.Get(), buffer, sizeof(buffer), FALSE, NameFilter, nullptr, &overlapped, nullptr))
+        {
+            WriteLine(L"notify.iocp: issue " + Error(GetLastError()));
+            CloseHandle(port);
+            return;
+        }
+        LaterCreate create(real + L"\\n-iocp.txt", 0);
+        DWORD bytes = 0;
+        ULONG_PTR key = 0;
+        LPOVERLAPPED completed = nullptr;
+        const BOOL ok = GetQueuedCompletionStatus(port, &bytes, &key, &completed, NotifyTimeoutMs);
+        if (completed == nullptr)
+        {
+            WriteLine(L"notify.iocp: timeout");
+            CancelIoEx(directory.Get(), &overlapped);
+            GetQueuedCompletionStatus(port, &bytes, &key, &completed, NotifyTimeoutMs);
+        }
+        else
+        {
+            WriteLine(L"notify.iocp: ok=" + Num(ok) + L" key=" + Hex(key) + L" overlapped=" + Num(completed == &overlapped) + L" "
+                + FirstNotifyEntry(buffer, bytes, false));
+        }
+        create.Join();
+        directory.Reset();
+        CloseHandle(port);
+    }
+
+    /// NtNotifyChangeDirectoryFile with a 4 byte buffer: no entry fits.
+    void NotifySmallBuffer(const std::wstring& watched, const std::wstring& real)
+    {
+        const auto notify = reinterpret_cast<NtNotifyChangeDirectoryFileFn>(
+            GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtNotifyChangeDirectoryFile"));
+        Handle directory(OpenWatched(watched, true));
+        Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+        IO_STATUS_BLOCK io{};
+        DWORD buffer = 0;
+        const NTSTATUS issued = notify(directory.Get(), event.Get(), nullptr, nullptr, &io, &buffer, sizeof(buffer), NameFilter, FALSE);
+        LaterCreate create(real + L"\\n-small.txt", 0);
+        if (issued == STATUS_PENDING && WaitForSingleObject(event.Get(), NotifyTimeoutMs) != WAIT_OBJECT_0)
+        {
+            WriteLine(L"notify.small: timeout");
+            CancelIoEx(directory.Get(), nullptr);
+            return;
+        }
+        WriteLine(L"notify.small: issued=" + Status(issued) + L" " + Status(io.Status) + L" information=" + Num(static_cast<long long>(io.Information)));
+    }
+
+    /// cancelEx: CancelIoEx on the request; cancel: CancelIo; close: CloseHandle while the request waits.
+    void NotifyEnd(const std::wstring& watched, const std::wstring& how)
+    {
+        Handle directory(OpenWatched(watched, true));
+        Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+        OVERLAPPED overlapped{};
+        overlapped.hEvent = event.Get();
+        alignas(8) BYTE buffer[4096];
+        if (!ReadDirectoryChangesW(directory.Get(), buffer, sizeof(buffer), FALSE, NameFilter, nullptr, &overlapped, nullptr))
+        {
+            WriteLine(L"notify." + how + L": issue " + Error(GetLastError()));
+            return;
+        }
+        BOOL ended = TRUE;
+        if (how == L"cancelEx")
+        {
+            ended = CancelIoEx(directory.Get(), &overlapped);
+        }
+        else if (how == L"cancel")
+        {
+            ended = CancelIo(directory.Get());
+        }
+        else
+        {
+            directory.Reset();
+        }
+        const DWORD waited = WaitForSingleObject(event.Get(), NotifyTimeoutMs);
+        WriteLine(L"notify." + how + L": ended=" + Num(ended) + L" signalled=" + Num(waited == WAIT_OBJECT_0) + L" "
+            + Status(static_cast<NTSTATUS>(overlapped.Internal)));
+    }
+
+    struct SyncWait
+    {
+        HANDLE Directory;
+        BOOL Ok;
+        DWORD Error;
+    };
+
+    DWORD WINAPI SyncWaitThread(PVOID context)
+    {
+        auto* wait = static_cast<SyncWait*>(context);
+        alignas(8) BYTE buffer[4096];
+        DWORD bytes = 0;
+        wait->Ok = ReadDirectoryChangesW(wait->Directory, buffer, sizeof(buffer), FALSE, NameFilter, &bytes, nullptr, nullptr);
+        wait->Error = wait->Ok ? 0 : GetLastError();
+        return 0;
+    }
+
+    /// CancelSynchronousIo on a thread blocked in a synchronous ReadDirectoryChangesW.
+    void NotifySyncCancel(const std::wstring& watched)
+    {
+        Handle directory(OpenWatched(watched, false));
+        SyncWait wait{ directory.Get(), FALSE, 0 };
+        const HANDLE thread = CreateThread(nullptr, 0, &SyncWaitThread, &wait, 0, nullptr);
+        BOOL cancelled = FALSE;
+        // The thread may not have started its wait yet: retry until something was cancelled.
+        for (int i = 0; i < 100 && !cancelled; ++i)
+        {
+            Sleep(100);
+            cancelled = CancelSynchronousIo(thread);
+        }
+        const DWORD waited = WaitForSingleObject(thread, NotifyTimeoutMs);
+        WriteLine(L"notify.syncCancel: cancelled=" + Num(cancelled) + L" finished=" + Num(waited == WAIT_OBJECT_0) + L" ok="
+            + Num(wait.Ok) + L" " + Error(wait.Error));
+        if (waited != WAIT_OBJECT_0)
+        {
+            TerminateThread(thread, 1);
+        }
+        CloseHandle(thread);
+    }
+
+    void NotifyTree(const std::wstring& watched, const std::wstring& real)
+    {
+        Handle directory(OpenWatched(watched, true));
+        Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+        OVERLAPPED overlapped{};
+        overlapped.hEvent = event.Get();
+        alignas(8) BYTE buffer[4096];
+        if (!ReadDirectoryChangesW(directory.Get(), buffer, sizeof(buffer), TRUE, NameFilter, nullptr, &overlapped, nullptr))
+        {
+            WriteLine(L"notify.tree: issue " + Error(GetLastError()));
+            return;
+        }
+        LaterCreate create(real + L"\\sub\\n-tree.txt", 0);
+        if (WaitForSingleObject(event.Get(), NotifyTimeoutMs) != WAIT_OBJECT_0)
+        {
+            WriteLine(L"notify.tree: timeout");
+            CancelIoEx(directory.Get(), &overlapped);
+            return;
+        }
+        DWORD bytes = 0;
+        const BOOL ok = GetOverlappedResult(directory.Get(), &overlapped, &bytes, FALSE);
+        WriteLine(L"notify.tree: ok=" + Num(ok) + L" " + (ok ? FirstNotifyEntry(buffer, bytes, false) : Error(GetLastError())));
+    }
+
+    /// --notify <watched> <real>: every notify case in turn, one line each.
+    int NotifyScenario(const wchar_t* watchedArgument, const wchar_t* realArgument)
+    {
+        const std::wstring watched = watchedArgument;
+        const std::wstring real = realArgument;
+        NotifySync(watched, real);
+        NotifyEvent(watched, real, false);
+        NotifyEvent(watched, real, true);
+        NotifyApc(watched, real);
+        NotifyCompletionPort(watched, real);
+        NotifyTree(watched, real);
+        NotifySmallBuffer(watched, real);
+        NotifyEnd(watched, L"cancelEx");
+        NotifyEnd(watched, L"cancel");
+        NotifyEnd(watched, L"close");
+        NotifySyncCancel(watched);
+        return 0;
+    }
+
     int WriteScenarioCommand(const wchar_t* rootArgument)
     {
         wchar_t full[MAX_PATH];
@@ -1959,6 +2304,10 @@ namespace
         if (command == L"--write" && argc == 3)
         {
             return WriteScenarioCommand(argv[2]);
+        }
+        if (command == L"--notify" && argc == 4)
+        {
+            return NotifyScenario(argv[2], argv[3]);
         }
         if (command == L"--threads" && argc == 4)
         {

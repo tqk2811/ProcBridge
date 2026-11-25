@@ -14,8 +14,13 @@
 // hands out a write token for opens that may change content; the last close (or a flush) of a handle with a token
 // asks the Broker to write the cache copy back. Rename, delete (disposition, delete-on-close, NtDeleteFile) and
 // attribute/time changes on virtual handles go to machine B first, then to the cache copy.
+//
+// M7: change notifications (NtNotifyChangeDirectoryFile[Ex]) on virtual directories come from machine B through the
+// Broker (DirectoryWatches); closing or cancelling (NtCancelIoFile[Ex], NtCancelSynchronousIoFile) ends them.
 #include "FileHooks.h"
+#include "CallerMemory.h"
 #include "DirectoryNameCache.h"
+#include "DirectoryWatches.h"
 #include "HandleInheritance.h"
 #include "HandleTable.h"
 #include "HookGuard.h"
@@ -40,6 +45,7 @@ namespace ProcBridge::Hook
         HandleTable g_handles;
         DirectoryNameCache g_directoryNames;
         RemoteHandleTable g_remoteHandles;
+        DirectoryWatches g_watches;
 
         using NtQueryDirectoryFileFn = NTSTATUS(NTAPI*)(HANDLE, HANDLE, PIO_APC_ROUTINE, PVOID, PIO_STATUS_BLOCK, PVOID, ULONG,
             ULONG, BOOLEAN, PUNICODE_STRING, BOOLEAN);
@@ -66,38 +72,11 @@ namespace ProcBridge::Hook
         NtDuplicateObjectFn g_ntDuplicateObject = nullptr;
         NtFlushBuffersFileFn g_ntFlushBuffersFile = nullptr;
         NtWriteFileFn g_ntWriteFile = nullptr;
-
-        // Caller memory: hooks read and write pointers that the kernel would probe and answer with
-        // STATUS_ACCESS_VIOLATION. Every access to caller memory goes through these SEH-guarded copies
-        // (no C++ objects in them, so __try is allowed).
-        int AccessFilter(DWORD code) noexcept
-        {
-            return code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_DATATYPE_MISALIGNMENT || code == EXCEPTION_IN_PAGE_ERROR
-                ? EXCEPTION_EXECUTE_HANDLER
-                : EXCEPTION_CONTINUE_SEARCH;
-        }
-
-        bool SafeCopy(void* destination, const void* source, size_t bytes) noexcept
-        {
-            __try
-            {
-                memcpy(destination, source, bytes);
-                return true;
-            }
-            __except (AccessFilter(GetExceptionCode()))
-            {
-                return false;
-            }
-        }
-
-        /// Writes the IO_STATUS_BLOCK of a hook that answered by itself.
-        bool SafeSetIoStatus(PIO_STATUS_BLOCK ioStatusBlock, NTSTATUS status, ULONG_PTR information) noexcept
-        {
-            IO_STATUS_BLOCK value{};
-            value.Status = status;
-            value.Information = information;
-            return SafeCopy(ioStatusBlock, &value, sizeof(value));
-        }
+        NtNotifyChangeDirectoryFileFn g_ntNotifyChangeDirectoryFile = nullptr;
+        NtNotifyChangeDirectoryFileExFn g_ntNotifyChangeDirectoryFileEx = nullptr;
+        NtCancelIoFileFn g_ntCancelIoFile = nullptr;
+        NtCancelIoFileExFn g_ntCancelIoFileEx = nullptr;
+        NtCancelSynchronousIoFileFn g_ntCancelSynchronousIoFile = nullptr;
 
         /// Resolves OBJECT_ATTRIBUTES against the virtual roots and owns the rewritten name.
         /// The caller's structures are read once into a snapshot (SEH-guarded); an unreadable pointer
@@ -1148,6 +1127,26 @@ namespace ProcBridge::Hook
             return status;
         }
 
+        /// FileCompletionInformation (CreateIoCompletionPort) on a virtual directory: the hook completes its change
+        /// notifications itself, so it records the port; the binding is applied to the handle as well.
+        NTSTATUS SetCompletionPort(HANDLE fileHandle, PIO_STATUS_BLOCK ioStatusBlock, PVOID information, ULONG length,
+            ULONG informationClass)
+        {
+            FileCompletionInfo completion{};
+            const bool copied = length >= sizeof(completion) && SafeCopy(&completion, information, sizeof(completion));
+            const NTSTATUS status = g_ntSetInformationFile(fileHandle, ioStatusBlock, information, length, informationClass);
+            ULONG64 generation = 0;
+            int mapping = -1;
+            UNICODE_STRING path{};
+            if (NT_SUCCESS(status) && copied && g_resolver->IsRemote() && !g_remoteHandles.IsEmpty()
+                && g_remoteHandles.Find(fileHandle, generation) && g_remoteHandles.GetDirectoryPath(fileHandle, mapping, path))
+            {
+                FreeString(path);
+                g_watches.SetCompletionPort(fileHandle, generation, completion.Port, completion.Key);
+            }
+            return status;
+        }
+
         NTSTATUS NTAPI HookNtSetInformationFile(HANDLE fileHandle, PIO_STATUS_BLOCK ioStatusBlock, PVOID information,
             ULONG length, ULONG informationClass)
         {
@@ -1156,6 +1155,10 @@ namespace ProcBridge::Hook
             if (!guard.IsOutermost() || information == nullptr)
             {
                 return g_ntSetInformationFile(fileHandle, ioStatusBlock, information, length, informationClass);
+            }
+            if (informationClass == FileCompletionInformation || informationClass == FileReplaceCompletionInformation)
+            {
+                return SetCompletionPort(fileHandle, ioStatusBlock, information, length, informationClass);
             }
             if (g_resolver->IsRemote())
             {
@@ -1292,6 +1295,8 @@ namespace ProcBridge::Hook
                 {
                     RemovedRemoteHandle removed;
                     g_remoteHandles.Remove(handle, remoteGeneration, &removed);
+                    // A watched directory: Unwatch, and what waits completes with STATUS_NOTIFY_CLEANUP.
+                    g_watches.Closed(handle);
                     if (removed.DeleteOnClose)
                     {
                         // The system deleted the cache copy with the handle; machine B follows, unless another file
@@ -1453,6 +1458,7 @@ namespace ProcBridge::Hook
                 }
                 g_directoryNames.Remove(sourceHandle);
                 g_remoteHandles.Remove(sourceHandle);
+                g_watches.Closed(sourceHandle);
             }
             HANDLE copy = nullptr;
             if (targetHandle != nullptr && targetProcess != nullptr && SafeCopy(&copy, targetHandle, sizeof(copy))
@@ -1519,6 +1525,128 @@ namespace ProcBridge::Hook
             }
             return g_ntQueryDirectoryFileEx(fileHandle, event, apcRoutine, apcContext, ioStatusBlock, information, length,
                 informationClass, queryFlags, fileName);
+        }
+
+        /// NtNotifyChangeDirectoryFile[Ex] on a virtual directory of a remote resolver: changes come from machine B
+        /// (DirectoryWatches). Other handles, a virtual file included, go to the system.
+        NTSTATUS NotifyVirtualDirectory(HANDLE fileHandle, HANDLE event, PIO_APC_ROUTINE apcRoutine, PVOID apcContext,
+            PIO_STATUS_BLOCK ioStatusBlock, PVOID buffer, ULONG length, ULONG completionFilter, BOOLEAN watchTree,
+            ULONG informationClass, bool& handled)
+        {
+            handled = false;
+            ULONG64 generation = 0;
+            int mapping = -1;
+            UNICODE_STRING path{};
+            if (!g_resolver->IsRemote() || g_remoteHandles.IsEmpty() || !g_remoteHandles.Find(fileHandle, generation)
+                || !g_remoteHandles.GetDirectoryPath(fileHandle, mapping, path))
+            {
+                return STATUS_SUCCESS;
+            }
+            handled = true;
+            // Synchronous file object: the call itself waits for the change, like the I/O manager.
+            ULONG mode = 0;
+            IO_STATUS_BLOCK modeStatus{};
+            const NTSTATUS queried = g_ntQueryInformationFile(fileHandle, &modeStatus, &mode, sizeof(mode), FileModeInformation);
+            if (!NT_SUCCESS(queried))
+            {
+                FreeString(path);
+                return queried;
+            }
+            NotifyCall call{};
+            call.Handle = fileHandle;
+            call.Generation = generation;
+            call.Mapping = mapping;
+            call.Path = &path;
+            call.Event = event;
+            call.ApcRoutine = apcRoutine;
+            call.ApcContext = apcContext;
+            call.IoStatusBlock = ioStatusBlock;
+            call.Buffer = buffer;
+            call.Length = length;
+            call.CompletionFilter = completionFilter;
+            call.WatchTree = watchTree != FALSE;
+            call.InformationClass = informationClass;
+            call.Synchronous = (mode & (FileSynchronousIoAlert | FileSynchronousIoNonAlert)) != 0;
+            call.Alertable = (mode & FileSynchronousIoAlert) != 0;
+            const NTSTATUS status = g_watches.Notify(call);
+            FreeString(path);
+            return status;
+        }
+
+        NTSTATUS NTAPI HookNtNotifyChangeDirectoryFile(HANDLE fileHandle, HANDLE event, PIO_APC_ROUTINE apcRoutine, PVOID apcContext,
+            PIO_STATUS_BLOCK ioStatusBlock, PVOID buffer, ULONG length, ULONG completionFilter, BOOLEAN watchTree)
+        {
+            constexpr ULONG DirectoryNotifyInformation = 1;
+            ReentryGuard guard;
+            if (guard.IsOutermost())
+            {
+                bool handled = false;
+                const NTSTATUS status = NotifyVirtualDirectory(fileHandle, event, apcRoutine, apcContext, ioStatusBlock, buffer, length,
+                    completionFilter, watchTree, DirectoryNotifyInformation, handled);
+                if (handled)
+                {
+                    return status;
+                }
+            }
+            return g_ntNotifyChangeDirectoryFile(fileHandle, event, apcRoutine, apcContext, ioStatusBlock, buffer, length,
+                completionFilter, watchTree);
+        }
+
+        NTSTATUS NTAPI HookNtNotifyChangeDirectoryFileEx(HANDLE fileHandle, HANDLE event, PIO_APC_ROUTINE apcRoutine, PVOID apcContext,
+            PIO_STATUS_BLOCK ioStatusBlock, PVOID buffer, ULONG length, ULONG completionFilter, BOOLEAN watchTree,
+            ULONG informationClass)
+        {
+            ReentryGuard guard;
+            if (guard.IsOutermost())
+            {
+                bool handled = false;
+                const NTSTATUS status = NotifyVirtualDirectory(fileHandle, event, apcRoutine, apcContext, ioStatusBlock, buffer, length,
+                    completionFilter, watchTree, informationClass, handled);
+                if (handled)
+                {
+                    return status;
+                }
+            }
+            return g_ntNotifyChangeDirectoryFileEx(fileHandle, event, apcRoutine, apcContext, ioStatusBlock, buffer, length,
+                completionFilter, watchTree, informationClass);
+        }
+
+        /// CancelIo: the requests of this thread on the handle.
+        NTSTATUS NTAPI HookNtCancelIoFile(HANDLE fileHandle, PIO_STATUS_BLOCK ioStatusBlock)
+        {
+            const NTSTATUS status = g_ntCancelIoFile(fileHandle, ioStatusBlock);
+            ReentryGuard guard;
+            if (guard.IsOutermost() && !g_watches.IsEmpty() && g_watches.Cancel(fileHandle, GetCurrentThreadId(), nullptr, false) > 0)
+            {
+                return SafeSetIoStatus(ioStatusBlock, STATUS_SUCCESS, 0) ? STATUS_SUCCESS : STATUS_ACCESS_VIOLATION;
+            }
+            return status;
+        }
+
+        /// CancelIoEx: the request with that IO_STATUS_BLOCK (every request when none) on the handle, from any thread.
+        NTSTATUS NTAPI HookNtCancelIoFileEx(HANDLE fileHandle, PIO_STATUS_BLOCK ioRequestToCancel, PIO_STATUS_BLOCK ioStatusBlock)
+        {
+            const NTSTATUS status = g_ntCancelIoFileEx(fileHandle, ioRequestToCancel, ioStatusBlock);
+            ReentryGuard guard;
+            if (guard.IsOutermost() && !g_watches.IsEmpty() && g_watches.Cancel(fileHandle, 0, ioRequestToCancel, false) > 0)
+            {
+                return SafeSetIoStatus(ioStatusBlock, STATUS_SUCCESS, 0) ? STATUS_SUCCESS : STATUS_ACCESS_VIOLATION;
+            }
+            return status;
+        }
+
+        /// CancelSynchronousIo: the synchronous requests of that thread.
+        NTSTATUS NTAPI HookNtCancelSynchronousIoFile(HANDLE threadHandle, PIO_STATUS_BLOCK ioRequestToCancel, PIO_STATUS_BLOCK ioStatusBlock)
+        {
+            const NTSTATUS status = g_ntCancelSynchronousIoFile(threadHandle, ioRequestToCancel, ioStatusBlock);
+            ReentryGuard guard;
+            const DWORD threadId = GetThreadId(threadHandle);
+            if (guard.IsOutermost() && !g_watches.IsEmpty() && threadId != 0
+                && g_watches.Cancel(nullptr, threadId, ioRequestToCancel, true) > 0)
+            {
+                return SafeSetIoStatus(ioStatusBlock, STATUS_SUCCESS, 0) ? STATUS_SUCCESS : STATUS_ACCESS_VIOLATION;
+            }
+            return status;
         }
 
         /// Extra record of an inherited remote handle (init block): machine B's metadata and the Broker's write
@@ -1683,6 +1811,15 @@ namespace ProcBridge::Hook
         {
             return GetLastError();
         }
+        const bool remote = resolver.IsRemote();
+        if (remote)
+        {
+            const DWORD initialized = g_watches.Initialize(resolver);
+            if (initialized != ERROR_SUCCESS)
+            {
+                return initialized;
+            }
+        }
         const HookEntry hooks[] = {
             { "NtCreateFile", reinterpret_cast<void*>(&HookNtCreateFile), reinterpret_cast<void**>(&g_ntCreateFile) },
             { "NtOpenFile", reinterpret_cast<void*>(&HookNtOpenFile), reinterpret_cast<void**>(&g_ntOpenFile) },
@@ -1703,6 +1840,16 @@ namespace ProcBridge::Hook
             // Write-through only: NtWriteFile is the hottest call, leave it alone otherwise.
             { resolver.IsWriteThrough() ? "NtWriteFile" : nullptr, reinterpret_cast<void*>(&HookNtWriteFile),
                 reinterpret_cast<void**>(&g_ntWriteFile), true },
+            // Change notifications come from machine B only with the Broker.
+            { remote ? "NtNotifyChangeDirectoryFile" : nullptr, reinterpret_cast<void*>(&HookNtNotifyChangeDirectoryFile),
+                reinterpret_cast<void**>(&g_ntNotifyChangeDirectoryFile) },
+            { remote ? "NtNotifyChangeDirectoryFileEx" : nullptr, reinterpret_cast<void*>(&HookNtNotifyChangeDirectoryFileEx),
+                reinterpret_cast<void**>(&g_ntNotifyChangeDirectoryFileEx), true },
+            { remote ? "NtCancelIoFile" : nullptr, reinterpret_cast<void*>(&HookNtCancelIoFile), reinterpret_cast<void**>(&g_ntCancelIoFile) },
+            { remote ? "NtCancelIoFileEx" : nullptr, reinterpret_cast<void*>(&HookNtCancelIoFileEx),
+                reinterpret_cast<void**>(&g_ntCancelIoFileEx), true },
+            { remote ? "NtCancelSynchronousIoFile" : nullptr, reinterpret_cast<void*>(&HookNtCancelSynchronousIoFile),
+                reinterpret_cast<void**>(&g_ntCancelSynchronousIoFile), true },
         };
         for (const HookEntry& hook : hooks)
         {

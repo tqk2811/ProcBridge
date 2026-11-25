@@ -73,6 +73,7 @@
     <ClCompile Include="src\BrokerClient.cpp" />
     <ClCompile Include="src\BrokerResolver.cpp" />
     <ClCompile Include="src\DirectoryNameCache.cpp" />
+    <ClCompile Include="src\DirectoryWatches.cpp" />
     <ClCompile Include="src\FileHooks.cpp" />
     <ClCompile Include="src\HandleTable.cpp" />
     <ClCompile Include="src\PathMapper.cpp" />
@@ -110,7 +111,9 @@
     <ClInclude Include="..\..\shared\ProcBridge.HookIpc\native\ProcBridge\HookIpc.h" />
     <ClInclude Include="src\BrokerClient.h" />
     <ClInclude Include="src\BrokerResolver.h" />
+    <ClInclude Include="src\CallerMemory.h" />
     <ClInclude Include="src\DirectoryNameCache.h" />
+    <ClInclude Include="src\DirectoryWatches.h" />
     <ClInclude Include="src\FileHooks.h" />
     <ClInclude Include="src\HandleInheritance.h" />
     <ClInclude Include="src\HandleTable.h" />

@@ -212,28 +212,28 @@ chờ đủ `RequestTimeout`. Nên có ping/keepalive và đánh dấu kết n�
 review độc lập (READ-ONLY) cho Protocol/Agent/Broker/HookIpc và `BrokerClient`/`BrokerResolver`/`RemoteHandles`
 của Hook. Nên review trước khi merge vào `master`.
 
-## [Cao] Hook: NtNotifyChangeDirectoryFile[Ex] qua Broker (phần hook của M7)
+## [Vừa] Hook NtNotifyChangeDirectoryFile[Ex]: các ca chưa phủ
 
-Phần C# của M7 đã có message IPC `WatchDirectory` / `WaitChanges` / `Unwatch` (xem `HookIpc.h`, `HookWatchRegistry`).
-Hook C++ cần:
+Hook đã phục vụ thông báo thay đổi trên thư mục ảo (`DirectoryWatches`, test `RemoteNotifyTests`). Còn thiếu:
 
-- Hook `NtNotifyChangeDirectoryFile` và `NtNotifyChangeDirectoryFileEx` cho handle thư mục ảo: lần đầu trên một
-  handle gửi `WatchDirectory` (mapping, `WatchTree`, `CompletionFilter`, đường dẫn tương đối) rồi nhớ `WatchId` theo
-  handle; `NtClose` handle đó thì gửi `Unwatch`.
-- `WaitChanges` là long poll: chạy trên một pipe instance riêng (thread riêng hoặc thread pool), không giữ instance
-  mà các request khác đang dùng. Gọi đồng bộ thì chờ rồi trả; gọi bất đồng bộ (có `Event`/`ApcRoutine`/IOCP) thì
-  trả `STATUS_PENDING` và hoàn tất sau, đúng ngữ nghĩa của kernel.
-- Dựng `FILE_NOTIFY_INFORMATION` (hoặc `FILE_NOTIFY_EXTENDED_INFORMATION` cho bản Ex) từ danh sách thay đổi;
-  buffer của process không đủ chỗ hoặc reply có cờ `ChangesFlagOverflow` thì trả `STATUS_NOTIFY_ENUM_DIR`.
-- Trả nguyên `Status` lỗi của reply (vd `STATUS_INVALID_HANDLE` khi watch đã bị gỡ, `STATUS_NOT_A_DIRECTORY`).
-- Watch thuộc về process Hook (PID của client pipe): Broker gỡ hết watch của một process khi kết nối pipe CUỐI CÙNG của
-  nó đóng, và một long poll `WaitChanges` bị huỷ ngay khi pipe của nó đứt. Hook vì vậy phải giữ ít nhất một pipe mở
-  suốt thời gian còn handle đang watch; pipe pool đóng hết rồi mở lại thì mọi `WatchId` cũ báo `STATUS_INVALID_HANDLE`.
+- Handle bất đồng bộ gọi không kèm `Event`, `ApcRoutine` hay completion port (vd `ReadDirectoryChangesW` với
+  `OVERLAPPED.hEvent = NULL` rồi `GetOverlappedResult` chờ trên chính handle): hook không báo hiệu được file object
+  nên lời chờ đó treo.
+- `FILE_NOTIFY_EXTENDED_INFORMATION` chỉ có `Action` và tên; thời gian, kích thước, thuộc tính, file id để 0 (Broker
+  không gửi metadata kèm thay đổi). `DirectoryNotifyFullInformation` (lớp 3) trả `STATUS_INVALID_INFO_CLASS`.
+- `CompletionFilter` chỉ lọc theo loại hành động (tên / sửa đổi / stream), không biết thuộc tính nào đổi; filter của
+  lời gọi đầu tiên được giữ cho cả watch.
+- Handle nhân bản (`DuplicateHandle`) hay kế thừa sang con không dùng chung watch với handle gốc như file object thật;
+  bản sao gọi notify thì mở watch riêng.
+- Huỷ (`CancelIo*`, alert) một long poll đang chờ thì lô thay đổi Broker gửi đúng lúc đó bị mất (kernel giữ lại cho
+  lần gọi sau). Lời gọi đồng bộ trên handle `FILE_SYNCHRONOUS_IO_ALERT` bị APC cắt ngang thì trả `STATUS_USER_APC` và
+  huỷ yêu cầu.
+- Thread gọi thoát không huỷ các yêu cầu nó đã gửi (kernel huỷ IRP của thread khi thread thoát).
 
 ## [Vừa] Theo dõi thay đổi: phần còn thiếu sau M7 (C#)
 
 - `CompletionFilter` chưa được áp đúng: Agent dùng `FileSystemWatcher` nên không biết thuộc tính nào đổi, Broker
-  báo mọi thay đổi trong thư mục. Cân nhắc P/Invoke `ReadDirectoryChangesExW` với
+  báo mọi thay đổi trong thư mục (Hook chỉ lọc được theo loại hành động). Cân nhắc P/Invoke `ReadDirectoryChangesExW` với
   `ReadDirectoryNotifyExtendedInformation` để gửi kèm loại thay đổi.
 - `FsWatchRequest.Path` mới để dành: Agent luôn theo dõi cả share. Share rất lớn thì nên theo dõi đúng các thư mục
   được map.

@@ -64,6 +64,11 @@ namespace ProcBridge::Hook
         NTSTATUS Rename(int mapping, const UNICODE_STRING& ntPath, int newMapping, const UNICODE_STRING& newNtPath,
             bool replaceIfExists, HookIpc::FileInfo& info, UNICODE_STRING& newRealPath) const noexcept override;
         NTSTATUS Delete(int mapping, const UNICODE_STRING& ntPath, bool keepItem, uint64_t expectedFileId) const noexcept override;
+        NTSTATUS Watch(int mapping, const UNICODE_STRING& ntPath, bool subtree, ULONG completionFilter, WatchChannel*& channel,
+            uint32_t& watchId) const noexcept override;
+        NTSTATUS WaitChanges(WatchChannel*& channel, uint32_t watchId, HANDLE cancelEvent, BYTE* buffer,
+            ChangeBatch& batch) const noexcept override;
+        void Unwatch(WatchChannel* channel, uint32_t watchId) const noexcept override;
 
     private:
         /// View of path below the virtual root ('\' separated, no leading '\'; empty for the root itself).

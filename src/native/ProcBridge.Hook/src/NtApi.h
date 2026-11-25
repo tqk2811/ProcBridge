@@ -19,6 +19,20 @@ namespace ProcBridge::Hook::Nt
     constexpr ULONG FileBasicInformation = 4;
     constexpr ULONG FileDispositionInformation = 13;
     constexpr ULONG FileDispositionInformationEx = 64;
+    constexpr ULONG FileModeInformation = 16;
+    constexpr ULONG FileCompletionInformation = 30;
+    constexpr ULONG FileReplaceCompletionInformation = 61;
+
+    // FILE_MODE_INFORMATION.Mode bits.
+    constexpr ULONG FileSynchronousIoAlert = 0x00000010;
+    constexpr ULONG FileSynchronousIoNonAlert = 0x00000020;
+
+    // FILE_COMPLETION_INFORMATION.
+    struct FileCompletionInfo
+    {
+        HANDLE Port;
+        PVOID Key;
+    };
 
     // FILE_DISPOSITION_INFORMATION_EX flags.
     constexpr ULONG FileDispositionDelete = 0x1;
@@ -87,6 +101,13 @@ namespace ProcBridge::Hook::Nt
     using NtDeleteFileFn = NTSTATUS(NTAPI*)(POBJECT_ATTRIBUTES);
     using NtDuplicateObjectFn = NTSTATUS(NTAPI*)(HANDLE, HANDLE, HANDLE, PHANDLE, ACCESS_MASK, ULONG, ULONG);
     using NtFlushBuffersFileFn = NTSTATUS(NTAPI*)(HANDLE, PIO_STATUS_BLOCK);
+    using NtNotifyChangeDirectoryFileFn = NTSTATUS(NTAPI*)(HANDLE, HANDLE, PIO_APC_ROUTINE, PVOID, PIO_STATUS_BLOCK, PVOID, ULONG,
+        ULONG, BOOLEAN);
+    using NtNotifyChangeDirectoryFileExFn = NTSTATUS(NTAPI*)(HANDLE, HANDLE, PIO_APC_ROUTINE, PVOID, PIO_STATUS_BLOCK, PVOID, ULONG,
+        ULONG, BOOLEAN, ULONG);
+    using NtCancelIoFileFn = NTSTATUS(NTAPI*)(HANDLE, PIO_STATUS_BLOCK);
+    using NtCancelIoFileExFn = NTSTATUS(NTAPI*)(HANDLE, PIO_STATUS_BLOCK, PIO_STATUS_BLOCK);
+    using NtCancelSynchronousIoFileFn = NTSTATUS(NTAPI*)(HANDLE, PIO_STATUS_BLOCK, PIO_STATUS_BLOCK);
     using NtWriteFileFn = NTSTATUS(NTAPI*)(HANDLE, HANDLE, PIO_APC_ROUTINE, PVOID, PIO_STATUS_BLOCK, PVOID, ULONG, PLARGE_INTEGER, PULONG);
 }
 
