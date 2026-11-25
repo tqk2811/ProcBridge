@@ -22,11 +22,38 @@ Plan 4.3 cho phép thư mục ảo nằm trên ổ không tồn tại. M1 chưa 
   dài, và tên trả về từ `FileNameInformation` có thể không đổi ngược được.
 - Mở theo file ID (`FILE_OPEN_BY_FILE_ID`) không qua đường dẫn nên không được ghi vào bảng handle.
 
-## [Vừa] Handle nhân bản không được theo dõi
+## [Vừa] Handle nhân bản sang process khác không được theo dõi
 
-`DuplicateHandle`/`NtDuplicateObject` và handle kế thừa sang process con không vào bảng handle, nên tên trả
-về từ handle nhân bản là đường dẫn thật. Process con thuộc M4 (plan 5.5); `NtDuplicateObject` trong cùng
-process nên làm sớm hơn.
+M4 theo dõi `NtDuplicateObject` trong cùng process và handle kế thừa khi tạo con. Nhân bản handle ảo sang
+process khác (`DuplicateHandle` với process đích là con, vd truyền handle qua IPC) chưa được chuyển bảng nên
+bên nhận thấy tên thật. Cần bên nhận hỏi Broker theo `(pid nguồn, handle)` ở M2. Ghi 2026-11-25.
+
+## [Vừa] Inject con: các đường chưa phủ
+
+- Process con chỉ được inject khi thread chính của nó được resume qua `NtResumeThread`/`NtResumeProcess`
+  (hoặc tạo không treo). Bên gọi `CREATE_SUSPENDED` rồi chạy code trong con bằng thread từ xa trước khi
+  resume (debugger, công cụ inject khác) sẽ chạy phần đó trước khi có hook.
+- Con ARM64 (hoặc kiến trúc khác x64/x86) bị kết thúc vì chưa có `Hook.dll` ARM64.
+- Process con không thuộc Win32 (pico, minimal) chưa thử.
+- Bên gọi thẳng `NtCreateUserProcess` không xin thread treo được inject trước khi đăng ký csrss (giống hành
+  vi gốc của chúng), chưa có test.
+- Khối khởi tạo không còn biến cấu hình khi process đặt `PROCBRIDGE_MAP` khác đi giữa chừng: Hook dùng giá
+  trị lúc khởi tạo, cố ý. Ghi 2026-11-25.
+
+## [Thấp] Handle tạm của helper khác kiến trúc có thể lọt sang con khác
+
+`InjectWithHelper` (`src/native/ProcBridge.Inject/src/Inject.cpp`) tạo bản sao kế thừa được của handle
+process đích và section khối khởi tạo, chỉ cho helper kế thừa qua `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`. Một
+thread khác của cùng process tạo con với `bInheritHandles` và không có danh sách handle đúng lúc đó sẽ kế
+thừa luôn hai handle này (rò handle, không hỏng dữ liệu). Ghi 2026-11-25.
+
+## [Thấp] Build server dùng chung nằm ngoài cây process
+
+`VBCSCompiler`, node MSBuild tái sử dụng và MSBuild server sống lâu hơn lệnh build: Spawn chờ cả Job nên sẽ
+chờ tới khi chúng tự thoát, và nếu một server có sẵn từ trước (ngoài cây) nhận việc thì nó không có hook.
+Test M4 tắt chúng (`-nodeReuse:false`, `--disable-build-servers`, `UseSharedCompilation=false`,
+`DOTNET_CLI_USE_MSBUILD_SERVER=0`). Launcher M2 nên đặt sẵn các biến này hoặc có tuỳ chọn chờ chỉ process
+đầu. Ghi 2026-11-25.
 
 ## [Thấp] Bảng handle là mảng tìm tuần tự
 
@@ -53,9 +80,9 @@ test chỉ phủ được lớp kiểm của `ProcBridge.Spawn` (Spawn từ ch�
 `MaximumLength` không tràn `USHORT`. Chạm tới giới hạn cần đường dẫn gần 32767 ký tự nên chưa có test.
 Ghi 2026-11-25.
 
-## [Thấp] Cache tên thư mục gốc chỉ dọn qua NtClose và lần mở mới
+## [Thấp] Cache tên thư mục gốc chỉ dọn qua NtClose, NtDuplicateObject và lần mở mới
 
-`DirectoryNameCache` (`src/native/ProcBridge.Hook/src/DirectoryNameCache.h`) xoá mục khi `NtClose` hoặc khi
-`NtCreateFile`/`NtOpenFile` trả lại cùng giá trị handle. Handle thư mục đóng bằng đường khác rồi giá trị được
-cấp lại qua `NtDuplicateObject` (không bị hook) có thể dùng tên cũ. Gộp vào việc theo dõi
-`NtDuplicateObject` ở mục "Handle nhân bản". Ghi 2026-11-25.
+`DirectoryNameCache` (`src/native/ProcBridge.Hook/src/DirectoryNameCache.h`) xoá mục khi `NtClose`,
+`NtDuplicateObject` (đóng nguồn hoặc bản sao trong cùng process) hoặc khi `NtCreateFile`/`NtOpenFile` trả lại
+cùng giá trị handle. Giá trị handle được kernel cấp lại theo đường khác (vd handle do process khác nhân bản
+vào) vẫn có thể dùng tên cũ. Ghi 2026-11-25.

@@ -1,6 +1,7 @@
 # ProcBridge — Kế hoạch thiết kế
 
-> Trạng thái: đã xong M0 (bộ khung) và M1 (spike hook cục bộ, mục 13.1). Ngày lập: 2026-11-25.
+> Trạng thái: đã xong M0 (bộ khung), M1 (spike hook cục bộ, mục 13.1) và M4 bản cục bộ (cây process,
+> mục 13.2). Ngày lập: 2026-11-25.
 > Việc còn treo: xem [Backlog-vi.md](Backlog-vi.md).
 > Thuật ngữ: xem [Glossary-vi.md](Glossary-vi.md).
 
@@ -260,7 +261,8 @@ sequenceDiagram
    kiến trúc làm việc inject. Build cả `ProcBridge.Hook.x64.dll` và `ProcBridge.Hook.x86.dll`.
 5. Process con kế thừa handle ảo từ cha (handle thật của file cache): bảng `handle → đường dẫn ảo`
    phải được chuyển cho con. Cách làm: con hỏi Broker theo `(pid cha, giá trị handle)` khi gặp handle
-   lạ; Broker giữ bảng chung của cả phiên.
+   lạ; Broker giữ bảng chung của cả phiên. M4 chạy chưa có Broker nên dùng bản cục bộ sau giao diện
+   `IHandleInheritance` (mục 13.2); M2 thay bằng Broker.
 
 ---
 
@@ -434,6 +436,43 @@ người dùng cần nó để chọn thư mục máy B trước khi mở phiên
   test so sánh `NativeProbe` thật/ảo giống từng dòng, cả x64 và Win32
   (`src/tests/ProcBridge.Tests/Native`). Notepad **chưa kiểm**: Notepad trên Windows 11 là app packaged,
   `notepad.exe` chỉ kích hoạt app nằm ngoài cây process (giới hạn đã nêu ở mục 1).
+
+### 13.2 Kết quả M4 bản cục bộ (2026-11-25)
+
+Làm trước M2, chưa có Broker: cấu hình vẫn là `PROCBRIDGE_MAP` cục bộ.
+
+- **Inject con**: Hook chặn `NtCreateUserProcess`: thêm cờ tạo thread treo, bỏ cờ thoát Job
+  (`PROCESS_CREATE_FLAGS_BREAKAWAY`), ghi con vào danh sách chờ. Không inject ngay trong
+  `NtCreateUserProcess`: kernelbase chỉ đăng ký process mới với csrss *sau* khi hàm này trả về, inject lúc
+  đó làm loader và kernel32 của con khởi động quá sớm. kernelbase luôn tạo process treo rồi gọi
+  `NtResumeThread` khi xong việc đăng ký (hoặc để bên gọi `CREATE_SUSPENDED` tự resume), nên Hook inject ở
+  lần `NtResumeThread` đầu tiên trên thread chính của con (hoặc `NtResumeProcess`), chạy initializer xong
+  mới cho resume. Bên gọi thẳng `NtCreateUserProcess` không xin thread treo thì inject và resume ngay.
+  Không cần hook `CreateProcessInternalW`. Inject hỏng thì con bị kết thúc (mã `STATUS_DLL_INIT_FAILED`)
+  chứ không để chạy ngoài hook.
+- **Khác kiến trúc**: `ProcBridge.Inject::InjectHook` cùng kiến trúc thì inject trực tiếp; khác kiến trúc
+  thì chạy `ProcBridge.Spawn.<arch>.exe --inject` nằm cạnh `Hook.dll` của kiến trúc đích. Helper kế thừa
+  đúng hai handle (handle process đích, section chứa khối khởi tạo) qua `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`.
+  Đường dẫn `Hook.dll` hai kiến trúc đi xuống cây qua `PROCBRIDGE_HOOK_X64`/`PROCBRIDGE_HOOK_X86`. Spawn
+  cũng dùng đường này nên đích khác kiến trúc không còn bị từ chối.
+- **Biến môi trường**: injector chép một khối khởi tạo (`ProcBridge/InitBlock.h`) vào con và truyền địa chỉ
+  làm tham số của `ProcBridgeHookInitialize`. Khối mang các biến cấu hình (initializer đặt lại vào môi
+  trường của con) và các handle ảo kế thừa. Hook chụp cấu hình lúc khởi tạo, nên process xoá biến hoặc
+  truyền environment block riêng thì con vẫn được hook.
+- **Job Object**: Spawn tạo Job `KILL_ON_JOB_CLOSE`, gán process đầu trước khi inject; con cháu tự vào Job
+  (Hook bỏ cờ breakaway). Spawn chờ Job hết process (`JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO`) rồi trả mã thoát
+  của process đầu. Spawn chết thì Job đóng và cả cây bị kết thúc.
+- **Handle kế thừa**: chọn chuyển bảng qua khối khởi tạo thay vì để con tự hỏi `NtQueryObject` khi gặp
+  handle lạ. Lý do: tên thật của handle không cho biết handle đó được mở qua đường ảo hay đường thật (process
+  được phép mở thẳng thư mục thật), còn cha biết chắc. Cha lọc các handle ảo có cờ `HANDLE_FLAG_INHERIT`
+  khi tạo con với `bInheritHandles`; con nạp vào bảng trước khi bật hook. Không cần shared memory theo
+  phiên. Giao diện `IHandleInheritance` để M2 thay bằng Broker. Kèm theo: hook `NtDuplicateObject` để bản
+  sao handle trong cùng process (vd `cmd` nhân bản handle khi chuyển hướng `<`) vẫn là handle ảo.
+- Kiểm (`src/tests/ProcBridge.Tests/Native/ProcessTreeTests.cs`, `SpawnTests.cs`): `cmd /c cmd /c cmd /c type`
+  qua thư mục ảo, con x86 từ cha x64 và ngược lại (cả trực tiếp từ Spawn), con tạo sau khi cha xoá
+  `PROCBRIDGE_MAP`, handle stdin kế thừa giữ tên ảo, Spawn chờ cháu chạy nền, giết Spawn thì cháu chết,
+  `dotnet build` hai project trong thư mục ảo với `-m:2 -nodeReuse:false --disable-build-servers
+  -p:UseSharedCompilation=false` (dotnet, node MSBuild, csc là process riêng) rồi chạy được app vừa build.
 
 ---
 
