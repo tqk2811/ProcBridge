@@ -243,6 +243,50 @@ public sealed class FileExplorerProviderTests
     }
 
     [TestMethod]
+    public void CreateDirectory_Nested_CreatesMissingFolders()
+    {
+        var path = Path.Combine(_root, "n1", "n2", "n3");
+
+        var response = Session(ReadWrite).Files.CreateDirectory(new DirectoryCreateRequest { Path = path });
+
+        Assert.AreEqual(ExplorerStatus.Ok, response.Status, response.Error);
+        Assert.IsTrue(Directory.Exists(path));
+    }
+
+    [TestMethod]
+    public void Rename_OntoExistingEntry_IsAlreadyExistsAndKeepsBoth()
+    {
+        var files = Session(ReadWrite).Files;
+        File.WriteAllText(Path.Combine(_root, "b.txt"), "b");
+
+        var response = files.Rename(new FileRenameRequest { Path = Path.Combine(_root, "a.txt"), NewPath = Path.Combine(_root, "b.txt") });
+
+        Assert.AreEqual(ExplorerStatus.AlreadyExists, response.Status);
+        Assert.AreEqual("hello world", File.ReadAllText(Path.Combine(_root, "a.txt")));
+        Assert.AreEqual("b", File.ReadAllText(Path.Combine(_root, "b.txt")));
+    }
+
+    [TestMethod]
+    public void Stat_Directory_ReportsDirectory()
+    {
+        var response = Session(ExplorerPermissions.FileRead).Files.Stat(new FileStatRequest { Path = Path.Combine(_root, "sub") });
+
+        Assert.AreEqual(ExplorerStatus.Ok, response.Status, response.Error);
+        Assert.IsTrue(response.Entry!.IsDirectory);
+        Assert.AreEqual("sub", response.Entry.Name);
+        Assert.AreEqual(Path.Combine(_root, "sub"), response.Entry.FullPath);
+    }
+
+    [TestMethod]
+    public void ListDirectory_OnFile_IsNotFound_And_ReadFile_OnDirectory_IsNotFound()
+    {
+        var files = Session(ExplorerPermissions.FileRead).Files;
+
+        Assert.AreEqual(ExplorerStatus.NotFound, files.ListDirectory(new DirectoryListRequest { Path = Path.Combine(_root, "a.txt") }).Status);
+        Assert.AreEqual(ExplorerStatus.NotFound, files.ReadFile(new FileReadRequest { Path = Path.Combine(_root, "sub"), Count = 1 }).Status);
+    }
+
+    [TestMethod]
     public void ListDrives_ReturnsDriveOfRootAndRoots()
     {
         var response = Session(ExplorerPermissions.FileRead).Files.ListDrives(new DrivesRequest());

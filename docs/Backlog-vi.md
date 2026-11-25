@@ -2,13 +2,6 @@
 
 Việc còn treo và việc nên làm của ProcBridge. Mỗi mục: vấn đề, vị trí code, vì sao, ngày ghi.
 
-### [Cao] Explorer: kiểm phạm vi đường dẫn còn hở TOCTOU
-
-- Vị trí: `src/agent/ProcBridge.Agent.Explorer/PathScopeGuard.cs:82` (`CheckPhysical`), các hàm trong `FileExplorerProvider.cs`.
-- Vấn đề: đường dẫn được resolve (đi qua junction/symlink) rồi mới mở bằng tên, nên nếu ai đó trên máy B thay một thư mục trong cây chia sẻ bằng junction ra ngoài đúng giữa lúc kiểm và lúc dùng thì thao tác vẫn đi ra ngoài gốc.
-- Hướng: mở handle một lần (`CreateFile` với `FILE_FLAG_OPEN_REPARSE_POINT`/kiểm từng cấp), kiểm `GetFinalPathNameByHandle` trên chính handle đó rồi đọc/xoá/đổi tên qua handle (`SetFileInformationByHandle`).
-- Ghi ngày: 2026-11-25.
-
 ### [Vừa] Explorer: chưa nối transport và chưa có hồ sơ quyền lưu trên máy B
 
 - Vị trí: `src/agent/ProcBridge.Agent.Explorer/ExplorerSession.cs:12`.

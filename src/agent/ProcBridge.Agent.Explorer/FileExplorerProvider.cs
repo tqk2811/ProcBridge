@@ -1,6 +1,8 @@
+using Microsoft.Win32.SafeHandles;
 using ProcBridge.Agent.Explorer.Enums;
 using ProcBridge.Agent.Explorer.Interfaces;
 using ProcBridge.Agent.Explorer.Models;
+using ProcBridge.Agent.Explorer.Native;
 
 namespace ProcBridge.Agent.Explorer;
 
@@ -10,13 +12,6 @@ public sealed class FileExplorerProvider : ExplorerProviderBase
     /// <summary>Largest chunk one <see cref="FileReadRequest"/> returns.</summary>
     public const int MaxReadChunk = 256 * 1024;
 
-    private static readonly EnumerationOptions ListOptions = new()
-    {
-        IgnoreInaccessible = true,
-        AttributesToSkip = 0,
-        RecurseSubdirectories = false,
-    };
-
     private readonly PathScopeGuard _guard;
 
     internal FileExplorerProvider(ExplorerPolicy policy, string requesterId, IExplorerAuditLog audit)
@@ -24,6 +19,8 @@ public sealed class FileExplorerProvider : ExplorerProviderBase
     {
         _guard = new PathScopeGuard(policy.FileRoots);
     }
+
+    internal PathScopeGuard Guard => _guard;
 
     public DrivesResponse ListDrives(DrivesRequest request) => Read(ExplorerPermissions.FileRead, () =>
     {
@@ -50,34 +47,38 @@ public sealed class FileExplorerProvider : ExplorerProviderBase
 
     public DirectoryListResponse ListDirectory(DirectoryListRequest request) => Read(ExplorerPermissions.FileRead, () =>
     {
-        var path = _guard.ResolveForRead(request.Path);
-        var directory = new DirectoryInfo(path);
-        if (!directory.Exists)
+        using var handle = _guard.OpenForRead(request.Path, NativeMethods.FileListDirectory | NativeMethods.FileReadAttributes, out var path);
+        if (!NativeFile.IsDirectory(handle))
             throw new ExplorerDeniedException(ExplorerStatus.NotFound, "Directory not found.");
-        var entries = directory.EnumerateFileSystemInfos("*", ListOptions)
-            .Select(ToEntry)
+        var entries = NativeFile.Enumerate(handle)
+            .Select(e => ToEntry(path, e))
             .ToList();
         return new DirectoryListResponse { Path = path, Entries = entries };
     });
 
     public FileStatResponse Stat(FileStatRequest request) => Read(ExplorerPermissions.FileRead, () =>
     {
-        var path = _guard.ResolveForRead(request.Path);
-        FileSystemInfo info = Directory.Exists(path) ? new DirectoryInfo(path) : new FileInfo(path);
-        if (!info.Exists)
-            throw new ExplorerDeniedException(ExplorerStatus.NotFound, "Path not found.");
-        return new FileStatResponse { Entry = ToEntry(info) };
+        using var handle = _guard.OpenForRead(request.Path, NativeMethods.FileReadAttributes, out var path);
+        var basic = NativeFile.GetBasic(handle);
+        var standard = NativeFile.GetStandard(handle);
+        var name = Path.GetFileName(path);
+        var entry = new NativeDirectoryEntry(name.Length == 0 ? path : name, basic.FileAttributes, standard.EndOfFile, basic.CreationTime, basic.LastWriteTime);
+        return new FileStatResponse { Entry = ToEntry(Path.GetDirectoryName(path) ?? path, entry) };
     });
 
     public FileReadResponse ReadFile(FileReadRequest request) => Read(ExplorerPermissions.FileRead, () =>
     {
         if (request.Offset < 0 || request.Count < 0)
             throw new ExplorerDeniedException(ExplorerStatus.InvalidArgument, "Offset and count must not be negative.");
-        var path = _guard.ResolveForRead(request.Path);
-        if (!File.Exists(path))
+        var handle = _guard.OpenForRead(request.Path, NativeMethods.GenericRead, out _);
+        if (NativeFile.IsDirectory(handle))
+        {
+            handle.Dispose();
             throw new ExplorerDeniedException(ExplorerStatus.NotFound, "File not found.");
+        }
 
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var stream = new FileStream(handle, FileAccess.Read);
+
         var length = stream.Length;
         var count = (int)Math.Min(Math.Min(request.Count, MaxReadChunk), Math.Max(0, length - request.Offset));
         var data = new byte[count];
@@ -88,47 +89,55 @@ public sealed class FileExplorerProvider : ExplorerProviderBase
 
     public ExplorerAckResponse Delete(FileDeleteRequest request) => Write(ExplorerPermissions.FileWrite, "Fs.Delete", request.Path, () =>
     {
-        var path = _guard.ResolveForChange(request.Path);
-        var attributes = File.GetAttributes(path);
-        if (!attributes.HasFlag(FileAttributes.Directory))
-            File.Delete(path);
-        else if (attributes.HasFlag(FileAttributes.ReparsePoint))
-            Directory.Delete(path, false); // removes the junction/link only
-        else
-            Directory.Delete(path, request.Recursive);
+        using var handle = _guard.OpenEntryForChange(request.Path, NativeMethods.Delete | NativeMethods.FileReadAttributes, out _);
+        var tag = NativeFile.GetAttributeTag(handle);
+        var isDirectory = (tag.FileAttributes & NativeMethods.FileAttributeDirectory) != 0;
+        var isLink = (tag.FileAttributes & NativeMethods.FileAttributeReparsePoint) != 0;
+        if (isDirectory && !isLink && request.Recursive)
+            NativeFile.DeleteChildren(handle); // links inside are removed, never followed
+        NativeFile.MarkDeleted(handle); // a link is removed itself, its target stays
     });
 
     public ExplorerAckResponse Rename(FileRenameRequest request) => Write(ExplorerPermissions.FileWrite, "Fs.Rename", $"{request.Path} -> {request.NewPath}", () =>
     {
-        var source = _guard.ResolveForChange(request.Path);
-        var target = _guard.ResolveForChange(request.NewPath);
-        if (File.Exists(target) || Directory.Exists(target))
-            throw new ExplorerDeniedException(ExplorerStatus.AlreadyExists, "Target already exists.");
-        if (Directory.Exists(source))
-            Directory.Move(source, target);
-        else if (File.Exists(source))
-            File.Move(source, target, overwrite: false);
-        else
-            throw new ExplorerDeniedException(ExplorerStatus.NotFound, "Source not found.");
+        using var source = _guard.OpenEntryForChange(request.Path, NativeMethods.Delete | NativeMethods.FileReadAttributes, out _);
+        using var targetParent = _guard.OpenParentForChange(request.NewPath, out _, out var name);
+        NativeFile.Rename(source, targetParent, name); // fails with AlreadyExists, never replaces
     });
 
     public ExplorerAckResponse CreateDirectory(DirectoryCreateRequest request) => Write(ExplorerPermissions.FileWrite, "Fs.CreateDirectory", request.Path, () =>
     {
-        var path = _guard.ResolveForChange(request.Path);
-        if (File.Exists(path) || Directory.Exists(path))
-            throw new ExplorerDeniedException(ExplorerStatus.AlreadyExists, "Path already exists.");
-        Directory.CreateDirectory(path);
+        var handles = new List<SafeFileHandle> { _guard.OpenAncestorForCreate(request.Path, out _, out var missing) };
+        try
+        {
+            for (var i = 0; i < missing.Count; i++)
+            {
+                var last = i == missing.Count - 1;
+                var handle = NativeFile.OpenRelative(handles[^1], missing[i], NativeMethods.FileListDirectory | NativeMethods.FileTraverse | NativeMethods.FileReadAttributes,
+                    last ? NativeMethods.NtFileCreate : NativeMethods.NtFileOpenIf, NativeMethods.NtFileDirectoryFile,
+                    NativeMethods.FileShareRead | NativeMethods.FileShareWrite);
+                handles.Add(handle);
+                // An existing folder on the way that is a link (made between the check and now) is not walked through.
+                if (!last && (NativeFile.GetAttributeTag(handle).FileAttributes & NativeMethods.FileAttributeReparsePoint) != 0)
+                    throw new ExplorerDeniedException(ExplorerStatus.OutOfScope, "A folder on the way became a link.");
+            }
+        }
+        finally
+        {
+            foreach (var handle in handles)
+                handle.Dispose();
+        }
     });
 
-    private static FileEntry ToEntry(FileSystemInfo info) => new()
+    private static FileEntry ToEntry(string directory, NativeDirectoryEntry entry) => new()
     {
-        Name = info.Name,
-        FullPath = info.FullName.TrimEnd('\\').Length == 2 ? info.FullName : info.FullName.TrimEnd('\\'),
-        IsDirectory = info is DirectoryInfo,
-        IsReparsePoint = info.Attributes.HasFlag(FileAttributes.ReparsePoint),
-        Size = info is FileInfo file ? file.Length : 0,
-        Attributes = (int)info.Attributes,
-        CreationTimeUtc = info.CreationTimeUtc,
-        LastWriteTimeUtc = info.LastWriteTimeUtc,
+        Name = entry.Name,
+        FullPath = Path.Combine(directory, entry.Name),
+        IsDirectory = entry.IsDirectory,
+        IsReparsePoint = entry.IsReparsePoint,
+        Size = entry.IsDirectory ? 0 : entry.Size,
+        Attributes = (int)entry.Attributes,
+        CreationTimeUtc = DateTime.FromFileTimeUtc(entry.CreationTime),
+        LastWriteTimeUtc = DateTime.FromFileTimeUtc(entry.LastWriteTime),
     };
 }

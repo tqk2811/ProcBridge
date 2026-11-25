@@ -1,21 +1,28 @@
+using Microsoft.Win32.SafeHandles;
 using ProcBridge.Agent.Explorer.Enums;
 using ProcBridge.Agent.Explorer.Native;
 
 namespace ProcBridge.Agent.Explorer;
 
 /// <summary>
-/// Decides whether a path sent by machine A lies inside the folders the policy allows.
-/// Two checks: a lexical one on the normalized path (stops <c>..</c>, prefix tricks, UNC/device
-/// paths, alternate data streams) and a physical one on the final path Windows resolves for the
-/// deepest existing part of the path (stops junctions, symbolic links and mount points that lead
+/// Decides whether a path sent by machine A lies inside the folders the policy allows, and hands
+/// out the handle that was checked. Two checks: a lexical one on the normalized path (stops
+/// <c>..</c>, prefix tricks, UNC/device paths, alternate data streams) and a physical one on the
+/// final path of the opened handle (stops junctions, symbolic links and mount points that lead
 /// outside every root).
 /// </summary>
 /// <remarks>
-/// The physical check runs before the operation, so a link swapped in between check and use
-/// (TOCTOU) is not covered yet; see docs/Backlog-vi.md.
+/// The physical check runs on the very handle the caller then uses, so a folder swapped for a link
+/// after the check cannot redirect the operation (no check-then-use gap by name).
 /// </remarks>
 internal sealed class PathScopeGuard
 {
+    /// <summary>Access on a parent folder that new entries are created or moved into.</summary>
+    private const uint ParentAccess = NativeMethods.FileListDirectory | NativeMethods.FileTraverse | NativeMethods.FileReadAttributes;
+
+    /// <summary>Parent folders are opened without FILE_SHARE_DELETE so they cannot be moved while in use.</summary>
+    private const uint ParentShare = NativeMethods.FileShareRead | NativeMethods.FileShareWrite;
+
     private readonly string[] _roots;
     private readonly string[] _finalRoots;
 
@@ -29,7 +36,7 @@ internal sealed class PathScopeGuard
                 throw new ArgumentException($"File root must be a local absolute path: '{root}'", nameof(roots));
             var full = TrimEnd(Path.GetFullPath(root));
             lexical.Add(full);
-            physical.Add(Directory.Exists(full) ? GetFinalPath(full) ?? full : full);
+            physical.Add(GetFinalPath(full) ?? full);
         }
 
         _roots = [.. lexical];
@@ -38,27 +45,98 @@ internal sealed class PathScopeGuard
 
     public IReadOnlyList<string> Roots => _roots;
 
-    /// <summary>Resolves a path for reading: the path itself (and the link targets on it) must stay inside a root.</summary>
-    public string ResolveForRead(string? path)
+    /// <summary>Test seam: runs after a path passed the scope check and before it is used.</summary>
+    internal Action<string>? AfterScopeCheck { get; set; }
+
+    /// <summary>
+    /// Opens a path for reading, following links: the object reached (after every link on the way)
+    /// must lie inside a root. Returns the checked handle and the normalized path.
+    /// </summary>
+    public SafeFileHandle OpenForRead(string? path, uint access, out string full)
     {
-        var full = Normalize(path);
-        CheckPhysical(full);
-        return full;
+        full = Normalize(path);
+        var handle = NativeFile.Open(full, access, followLinks: true, NativeMethods.FileShareAll);
+        return Checked(handle, full, allowRoot: true);
     }
 
     /// <summary>
-    /// Resolves a path whose entry itself is changed (delete, rename source, create). Only the
-    /// parent is resolved physically, so deleting a link removes the link, never its target.
-    /// A root itself cannot be changed.
+    /// Opens the entry a path names for changing it (delete, rename source). The entry itself is
+    /// opened, not the target of a link, so deleting a link removes the link only. The entry must
+    /// lie strictly inside a root: a root itself cannot be changed.
     /// </summary>
-    public string ResolveForChange(string? path)
+    public SafeFileHandle OpenEntryForChange(string? path, uint access, out string full)
+    {
+        full = NormalizeForChange(path);
+        var handle = NativeFile.Open(full, access, followLinks: false, NativeMethods.FileShareAll);
+        return Checked(handle, full, allowRoot: false);
+    }
+
+    /// <summary>Opens the existing parent folder a new entry goes into (rename target) and returns the name of the entry.</summary>
+    public SafeFileHandle OpenParentForChange(string? path, out string full, out string name)
+    {
+        full = NormalizeForChange(path);
+        var parent = Path.GetDirectoryName(full)!;
+        name = Path.GetFileName(full);
+        var handle = NativeFile.Open(parent, ParentAccess, followLinks: true, ParentShare);
+        return Checked(handle, full, allowRoot: true);
+    }
+
+    /// <summary>
+    /// Opens the deepest existing folder on the way to a path that is to be created, and returns
+    /// the names still missing below it (outermost first, the new entry last).
+    /// </summary>
+    public SafeFileHandle OpenAncestorForCreate(string? path, out string full, out IReadOnlyList<string> missing)
+    {
+        full = NormalizeForChange(path);
+        var names = new List<string> { Path.GetFileName(full) };
+        var current = Path.GetDirectoryName(full)!;
+        while (true)
+        {
+            if (!_roots.Any(r => IsUnder(current, r)))
+                throw new ExplorerDeniedException(ExplorerStatus.NotFound, "The allowed folder does not exist.");
+            var handle = NativeFile.TryOpen(current, ParentAccess, followLinks: true, ParentShare, out var error);
+            if (handle is not null)
+            {
+                names.Reverse();
+                missing = names;
+                return Checked(handle, full, allowRoot: true);
+            }
+
+            if (error is not (2 or 3))
+                throw NativeFile.Error(error, current);
+            names.Add(Path.GetFileName(current));
+            current = Path.GetDirectoryName(current)!;
+        }
+    }
+
+    private SafeFileHandle Checked(SafeFileHandle handle, string full, bool allowRoot)
+    {
+        try
+        {
+            var final = GetFinalPath(handle)
+                ?? throw new ExplorerDeniedException(ExplorerStatus.OutOfScope, "Cannot resolve the real location of the path.");
+            var inside = allowRoot
+                ? _finalRoots.Any(r => IsUnder(final, r))
+                : _finalRoots.Any(r => IsUnder(final, r) && !string.Equals(final, r, StringComparison.OrdinalIgnoreCase));
+            if (!inside)
+                throw new ExplorerDeniedException(ExplorerStatus.OutOfScope, "Path leads outside the allowed folders through a link.");
+            AfterScopeCheck?.Invoke(full);
+            return handle;
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
+    }
+
+    private string NormalizeForChange(string? path)
     {
         var full = Normalize(path);
         if (_roots.Any(r => string.Equals(r, full, StringComparison.OrdinalIgnoreCase)))
             throw new ExplorerDeniedException(ExplorerStatus.OutOfScope, "An allowed root itself cannot be changed.");
-        var parent = Path.GetDirectoryName(full)
-            ?? throw new ExplorerDeniedException(ExplorerStatus.OutOfScope, "A drive root cannot be changed.");
-        CheckPhysical(parent);
+        if (Path.GetDirectoryName(full) is null)
+            throw new ExplorerDeniedException(ExplorerStatus.OutOfScope, "A drive root cannot be changed.");
         return full;
     }
 
@@ -79,28 +157,6 @@ internal sealed class PathScopeGuard
         return full;
     }
 
-    private void CheckPhysical(string full)
-    {
-        // Walk up to the deepest part that exists, resolve it, then re-append the missing tail.
-        var existing = full;
-        var tail = new Stack<string>();
-        while (!File.Exists(existing) && !Directory.Exists(existing))
-        {
-            var parent = Path.GetDirectoryName(existing);
-            if (parent is null)
-                return;
-            tail.Push(Path.GetFileName(existing));
-            existing = parent;
-        }
-
-        var final = GetFinalPath(existing)
-            ?? throw new ExplorerDeniedException(ExplorerStatus.OutOfScope, "Cannot resolve the real location of the path.");
-        while (tail.Count > 0)
-            final = Path.Combine(final, tail.Pop());
-        if (!_finalRoots.Any(r => IsUnder(final, r)))
-            throw new ExplorerDeniedException(ExplorerStatus.OutOfScope, "Path leads outside the allowed folders through a link.");
-    }
-
     private static bool IsUncOrDevice(string path)
         => path.StartsWith(@"\\", StringComparison.Ordinal) || path.StartsWith("//", StringComparison.Ordinal)
         || path.StartsWith(@"\/", StringComparison.Ordinal) || path.StartsWith(@"/\", StringComparison.Ordinal);
@@ -118,33 +174,13 @@ internal sealed class PathScopeGuard
         return full.Length > root.Length ? full.TrimEnd('\\', '/') : full;
     }
 
-    /// <summary>Final path of an existing file or directory with every link resolved, without the <c>\\?\</c> prefix.</summary>
-    private static unsafe string? GetFinalPath(string path)
+    private static string? GetFinalPath(SafeFileHandle handle)
+        => NativeFile.GetFinalPath(handle) is { } final ? TrimEnd(final) : null;
+
+    /// <summary>Final path of an existing root folder; null when it does not exist (yet).</summary>
+    private static string? GetFinalPath(string path)
     {
-        using var handle = NativeMethods.CreateFile(path, NativeMethods.FileReadAttributes, NativeMethods.FileShareAll, 0,
-            NativeMethods.OpenExisting, NativeMethods.FileFlagBackupSemantics, 0);
-        if (handle.IsInvalid)
-            return null;
-
-        var buffer = new char[1024];
-        while (true)
-        {
-            uint length;
-            fixed (char* p = buffer)
-                length = NativeMethods.GetFinalPathNameByHandle(handle, p, (uint)buffer.Length, 0);
-            if (length == 0)
-                return null;
-            if (length < buffer.Length)
-            {
-                var result = new string(buffer, 0, (int)length);
-                if (result.StartsWith(@"\\?\UNC\", StringComparison.Ordinal))
-                    return @"\\" + result[8..];
-                if (result.StartsWith(@"\\?\", StringComparison.Ordinal))
-                    return TrimEnd(result[4..]);
-                return TrimEnd(result);
-            }
-
-            buffer = new char[length];
-        }
+        using var handle = NativeFile.TryOpen(path, NativeMethods.FileReadAttributes, followLinks: true, NativeMethods.FileShareAll, out _);
+        return handle is null ? null : GetFinalPath(handle);
     }
 }
