@@ -155,11 +155,16 @@ Plan 13.7. Ghi 2026-11-26.
 - Tên do kernel giữ vẫn là bản sao: `NtQueryInformationProcess(ProcessImageFileName)`, `QueryFullProcessImageName`,
   `GetMappedFileName` trên vùng image. Tên trong danh sách module của PEB (và `GetModuleFileNameEx` từ process khác) đã là
   tên ảo.
-- Mỗi lần tạo process từ exe ảo, mỗi tên DLL import (trừ API set) hỏi Broker một `Resolve`; tên DLL hệ thống (kernel32...)
-  thành một lần hỏi máy B không thấy. Có thể nhớ kết quả theo exe hoặc bỏ qua tên trong `KnownDLLs`.
+- Chi phí mỗi lần tạo process từ exe ảo: mỗi tên DLL import (trừ API set) hỏi Broker một `Resolve`, tên DLL hệ thống
+  (kernel32...) thành một lần hỏi máy B không thấy; exe và DLL lớn hơn ngưỡng tải theo vùng thêm một `FetchRange` trọn file
+  (lần đầu tải hết, các lần sau Broker trả ngay vì đã đủ khối). Tất cả chạy tuần tự trên thread tạo process. Có thể nhớ kết
+  quả theo exe (theo version máy B) hoặc bỏ qua tên trong `KnownDLLs`.
+- Chưa có test cho: parameters dạng offset (bỏ dịch), tên import không phần mở rộng, optional header ngắn (cần PE dựng tay).
+- Bản cache cũ bị đổi tên khi exe còn chạy để lại file `*.pbdl-*.tmp` tới khi Broker dọn; chưa có bước dọn các file này
+  lúc process đó thoát.
 - Process đầu tiên (Spawn, Launcher) không chạy được exe nằm trong thư mục ảo: chỉ process đã có Hook mới dịch được.
-- `ImagePathName` chỉ được đổi khi process parameters ở dạng normalized (kernelbase luôn tạo dạng này); bên gọi thẳng
-  `NtCreateUserProcess` với parameters dạng offset thì con vẫn chạy nhưng loader tìm DLL theo tên ảo trước khi có Hook.
+- Bên gọi thẳng `NtCreateUserProcess` với parameters dạng offset (không normalized) không được dịch: exe ảo không chạy.
+  Có thể dựng một bản parameters normalized thay vì bỏ.
 
 ## [Vừa] Tải theo vùng (M8): phần còn thiếu
 

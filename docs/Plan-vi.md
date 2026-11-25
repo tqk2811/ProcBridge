@@ -719,23 +719,35 @@ tạo process trước `LoadLibraryW`). Nên exe nằm trong thư mục ảo đ�
 - **Đưa vào bản sao** (`ImageMaterializer`, chạy trong hook `NtCreateUserProcess` của cha): `Resolve` exe như một lần mở
   chỉ đọc; bản sparse (M8) được `FetchRange` trọn trước (kernel ánh xạ không qua hook). Cùng cách cho `<exe>.manifest` và
   các DLL trong bảng import của exe (đệ quy theo import của chúng, tối đa 128 module, bỏ tên API set) **có mặt cạnh exe**
-  trong thư mục ảo. Chế độ cục bộ (`PROCBRIDGE_MAP`) chỉ là dịch đường dẫn và kiểm file có thật. Exe không đưa vào được thì
-  việc tạo process trả lỗi của `Resolve` (vd `STATUS_OBJECT_NAME_NOT_FOUND`, lỗi mạng); DLL thiếu thì bỏ qua để loader
-  báo lỗi như khi chạy cục bộ.
+  trong thư mục ảo (tên import không có phần mở rộng được thêm `.dll` như loader; optional header ngắn hơn cấu trúc vẫn đọc
+  được). Chế độ cục bộ (`PROCBRIDGE_MAP`) chỉ là dịch đường dẫn và kiểm file có thật. Exe không đưa vào được (IPC, mạng, bộ
+  nhớ) thì **không dịch gì**, hàm gốc chạy với tham số của bên gọi; chỉ khi hàm gốc cũng lỗi vì không thấy đường dẫn ảo thì
+  trả lỗi của `Resolve` (vd lỗi mạng) thay cho `STATUS_OBJECT_NAME_NOT_FOUND`. DLL thiếu thì bỏ qua để loader báo lỗi như
+  khi chạy cục bộ.
 - **Dịch đường dẫn** (`ImageRedirect`): gọi hàm gốc với một bản chép của `PS_ATTRIBUTE_LIST` có tên image là đường dẫn NT
   của bản sao, và tạm trỏ `ImagePathName` của process parameters (dạng normalized) sang đường dẫn DOS của bản sao, để loader
   của con lấy thư mục của bản sao làm thư mục ứng dụng và thấy các DLL vừa đưa vào. Dòng lệnh giữ nguyên tên ảo. Gọi xong
-  thì trả lại `ImagePathName` cho bên gọi.
+  thì trả lại `ImagePathName` cho bên gọi. Khối parameters là của riêng lời gọi đó (kernelbase dựng cho mỗi lần
+  `CreateProcess`), nên đổi tại chỗ không ảnh hưởng thread khác. Parameters không ở dạng normalized (chỉ bên gọi thẳng
+  `NtCreateUserProcess`) thì bỏ hẳn việc dịch. Danh sách thuộc tính lớn hơn 64 KB không được chép.
 - **Trả lại tên ảo** (`LoaderNames`): khối khởi tạo của con mang `PROCBRIDGE_IMAGE=<thư mục bản sao>*<thư mục ảo>` (rỗng với
   con thường; Spawn cũng gửi rỗng). Initializer của con đọc rồi xoá biến này (cháu không thừa kế), bật hook xong thì dưới
   loader lock đổi `FullDllName`/`BaseDllName` của mọi module nằm trong thư mục bản sao và `ImagePathName` sang thư mục ảo.
+  Buffer tên mới lấy từ process heap, còn loader giải phóng tên module từ heap riêng của nó lúc gỡ DLL, nên các DLL được đổi
+  tên bị **ghim** trước (`LdrAddRefDll` cờ PIN): không bao giờ bị gỡ nên tên không bị giải phóng (exe vốn không bị gỡ).
+- **Bản cache thay mới khi exe đang chạy**: file đang được ánh xạ làm image không ghi đè được, nên Broker đổi tên bản cũ đi
+  (rồi thử xoá) trước khi đặt bản mới vào tên đó; process đang chạy giữ bản cũ, lần chạy sau dùng bản mới.
   Từ đó `GetModuleFileName` trả tên ảo, và thứ process tìm cạnh chính nó (apphost .NET tìm `app.dll`, `LoadLibrary` theo tên
   trần) đi qua thư mục ảo có hook.
 - Kiểm (`src/tests/ProcBridge.Tests/Native/VirtualImageTests.cs`, x64 và Win32): `cmd` chạy bản sao của NativeProbe
   (`--image`) nằm trong thư mục ảo, cạnh nó là bản sao `dbghelp.dll` (import tĩnh) và `pbdyn.dll` (bản sao `version.dll`, nạp
   sau theo tên trần): tên image, `dbghelp.dll` và `pbdyn.dll` đều là tên ảo trong thư mục ảo, ở chế độ cục bộ và qua Agent
   với ngưỡng tải theo vùng 16 KB (bản cache của exe trùng từng byte với máy B); apphost `ProcBridge.Launcher.exe` chạy từ
-  máy B. Cả năm bài đỏ khi bỏ bước dịch. Phần chưa phủ ở Backlog.
+  máy B. Cả năm bài đỏ khi bỏ bước dịch. Thêm: exe không có trên máy B nhưng có file thật đúng đường dẫn ảo thì vẫn chạy
+  (đỏ khi trả lỗi thay vì gọi hàm gốc); file trên máy B đổi khi một instance còn chạy từ bản cache thì lần chạy sau dùng bản
+  mới (đỏ khi Broker ghi đè thẳng); exe hỏng (chỉ có `MZ`, cắt cụt) báo lỗi mà bên tạo không chết; bốn lần chạy song song cùng
+  exe; file `.bat` trong thư mục ảo chạy qua `CreateProcess`; cháu của exe ảo không thừa kế `PROCBRIDGE_IMAGE`. Phần chưa
+  phủ ở Backlog.
 
 ---
 
