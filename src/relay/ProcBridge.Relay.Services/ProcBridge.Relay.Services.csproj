@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ProcBridge.Relay.Services.Common\ProcBridge.Relay.Services.Common.csproj" />
+    <ProjectReference Include="..\ProcBridge.Relay.Services.Accounts\ProcBridge.Relay.Services.Accounts.csproj" />
+    <ProjectReference Include="..\ProcBridge.Relay.Services.Devices\ProcBridge.Relay.Services.Devices.csproj" />
+    <ProjectReference Include="..\ProcBridge.Relay.Services.Shares\ProcBridge.Relay.Services.Shares.csproj" />
+    <ProjectReference Include="..\ProcBridge.Relay.Services.Tunnel\ProcBridge.Relay.Services.Tunnel.csproj" />
+  </ItemGroup>
+</Project>

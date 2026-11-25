@@ -1,0 +1,5 @@
+{
+  "ConnectionStrings": {
+    "Relay": "Host=localhost;Port=5432;Database=procbridge_relay;Username=postgres"
+  }
+}

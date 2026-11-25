@@ -138,8 +138,12 @@ src/
 │   ├── ProcBridge.Relay.Database.PostgreSql/
 │   ├── ProcBridge.Relay.Repositories.Abstractions/
 │   ├── ProcBridge.Relay.Repositories/
+│   ├── ProcBridge.Relay.Services.Common/ # lỗi, băm token/mật khẩu, luật quyền (Rules), IDevicePresence
 │   ├── ProcBridge.Relay.Services.*/      # Accounts, Devices, Shares, Tunnel
+│   ├── ProcBridge.Relay.Services/        # facade đăng ký mọi feature
+│   ├── ProcBridge.Relay.Integration.Api/ # client typed (interface dùng chung với controller)
 │   ├── ProcBridge.Relay.Api/             # REST quản lý + endpoint WebSocket /tunnel
+│   ├── ProcBridge.Relay.Cli/             # CLI quản lý (procbridge-relay)
 │   └── tests/
 └── tests/
     ├── ProcBridge.Tests/                 # test C# (protocol, crypto, broker, agent, end-to-end)
@@ -311,6 +315,15 @@ Broker kết nối TCP thẳng tới Agent (cổng cấu hình được). Tìm A
 - Relay: đăng nhập tài khoản, đăng ký máy (device), khai chia sẻ, cấp quyền máy A dùng chia sẻ nào
   của máy B, cấp token ngắn hạn cho kết nối tunnel, ghép cặp hai đầu và chuyển tiếp khung.
 - Relay chỉ nhìn thấy phần đầu định tuyến (id phiên, id đích); payload đã mã hoá đầu cuối.
+- Giao thức tunnel (M6):
+  - Máy B giữ kênh điều khiển `GET /tunnel/control` (WebSocket, token máy B).
+  - Máy A gọi `POST api/tunnel/sessions {shareId}` bằng token máy A. Relay kiểm quyền A dùng chia sẻ,
+    tạo phiên với hai vé ngắn hạn (một cho mỗi phía), trả vé của A và đẩy vé của B qua kênh điều khiển
+    (kèm khoá công khai hai bên để đối chiếu vân tay).
+  - Hai phía mở các lane dữ liệu `GET /tunnel?sessionId=..&ticket=..&lane=N` (WebSocket). Lane cùng số
+    của hai phía được ghép cặp; relay chép nguyên khung nhị phân giữa chúng, không đọc payload. Một phiên
+    có tối đa 16 lane song song (quyết định 1 ở mục 15). Đóng một đầu thì đóng đầu kia của cùng lane.
+  - Trạng thái phiên chỉ nằm trong bộ nhớ một tiến trình relay.
 - Lưu trữ: PostgreSQL (tài khoản, máy, khoá công khai của máy, chia sẻ, quyền, log phiên). Không lưu
   nội dung file.
 - Về sau có thể thử kết nối thẳng P2P (UDP hole punching) và chỉ dùng relay khi thất bại; không nằm
