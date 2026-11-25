@@ -269,6 +269,10 @@ theo đường dẫn trên Agent cho commit, set-info, rename, delete.
   20 lần xanh, chạy 4 tiến trình song song 40 lần xanh. Probe mặc định chỉ đọc gốc thật (lượt ghi duy nhất ra file tạm
   ngoài gốc), nên nghi phần preload/cache thư mục của Broker chụp mtime trước khi NTFS cập nhật xong sau `CreateTree`.
   Lần đỏ sau: giữ nguyên dòng khác nhau và thời điểm tạo cây để so.
+  Đỏ lại trên CI 2026-11-26 (run 45672199926, nhánh `feature/relay-pairing`, bản Win32): dòng
+  `FindFile[sub\*]: deep attr=0x10 size=0 written=...` lệch 1,5 ms (thật `134401038844902208`, qua relay
+  `134401038844917314`): thời gian ghi của thư mục con `sub\deep` nhích lên sau lượt probe thật, khớp giả thuyết NTFS
+  cập nhật mtime thư mục muộn (vd khi file tạm trong `deep` được đóng/xoá) chứ không phải lỗi dịch đường dẫn.
 - `ConnectionPoolTests.BusyConnection_IsNotBlockedByAnotherRequestOpeningASlot`: đỏ một lần khi chạy cả bộ test
   local (2026-11-26, nhánh `feature/relay-pairing`, không đụng tới pool): 9/10 request xong đúng mốc 2000 ms thay vì
   dưới 2000 ms, tức các request xếp hàng trên một kết nối 300 ms/lượt chạm sát ngưỡng khi máy đang tải nặng. Chạy riêng
