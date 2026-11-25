@@ -24,14 +24,17 @@ jobs:
       - name: Build C#
         run: dotnet build ProcBridge.slnx -c Release
 
-      - name: Test C#
-        run: dotnet test ProcBridge.slnx -c Release --no-build --logger trx --results-directory TestResults
-
       - name: Build native x64
         run: msbuild ProcBridge.Native.sln -m -p:Configuration=Release -p:Platform=x64
 
       - name: Build native x86
         run: msbuild ProcBridge.Native.sln -m -p:Configuration=Release -p:Platform=x86
+
+      # Hook tests (tests/ProcBridge.Tests/Native) run the native binaries built above.
+      - name: Test C#
+        env:
+          PROCBRIDGE_REQUIRE_NATIVE: '1'
+        run: dotnet test ProcBridge.slnx -c Release --no-build --logger trx --results-directory TestResults
 
       - name: Upload native binaries
         uses: actions/upload-artifact@v4
