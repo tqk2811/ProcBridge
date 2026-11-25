@@ -129,6 +129,22 @@ public sealed class ExplorerTransportTests
         Assert.IsEmpty(none.FileRoots);
     }
 
+    /// <summary>Machine A learns the shares and their folders on machine B, even with an Explorer profile that grants nothing.</summary>
+    [TestMethod]
+    public async Task Shares_AreListedWithTheirFolders_WithoutAnyExplorerPermission()
+    {
+        using var root = new TempFolder("exp");
+        await using var s = new Setup(root, policy: null);
+
+        ShareListResponse response = await s.Client.ListSharesAsync(CancellationToken.None);
+
+        Assert.AreEqual(ExplorerStatus.Ok, response.Status, response.Error);
+        ShareEntry share = response.Shares.Single();
+        Assert.AreEqual("src", share.Name);
+        Assert.AreEqual(Path.TrimEndingDirectorySeparator(root.Path), share.RootPath);
+        Assert.IsFalse(share.Writable);
+    }
+
     [TestMethod]
     public async Task ProfileChange_AppliesToNewConnections()
     {

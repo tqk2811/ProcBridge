@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using ProcBridge.Agent.Explorer.Models;
 using ProcBridge.Launcher.Wpf.Helpers;
 using ProcBridge.Launcher.Wpf.Interfaces;
 using ProcBridge.Launcher.Wpf.Models;
@@ -15,6 +16,8 @@ public sealed class ProfileViewModel : ObservableObject
 {
     private readonly IUserDialogs _dialogs;
     private readonly Func<string, PairedMachine?> _findMachine;
+    private readonly IRemoteExplorerFactory? _explorers;
+    private string? _shareStatusText;
     private string _name;
     private string _machineFingerprint;
     private string _shareName;
@@ -30,10 +33,12 @@ public sealed class ProfileViewModel : ObservableObject
     private string _relayUrl;
     private FolderMappingViewModel? _selectedMapping;
 
-    public ProfileViewModel(LaunchProfile profile, IUserDialogs dialogs, Func<string, PairedMachine?> findMachine)
+    /// <param name="explorers">Lists the shares of machine B (<see cref="LoadSharesCommand"/>); null hides that list.</param>
+    public ProfileViewModel(LaunchProfile profile, IUserDialogs dialogs, Func<string, PairedMachine?> findMachine, IRemoteExplorerFactory? explorers = null)
     {
         _dialogs = dialogs;
         _findMachine = findMachine;
+        _explorers = explorers;
         _name = profile.Name;
         _machineFingerprint = profile.MachineFingerprint;
         _shareName = profile.ShareName;
@@ -56,6 +61,33 @@ public sealed class ProfileViewModel : ObservableObject
         PickRemotePathCommand = new RelayCommand(PickRemotePath);
         PickShareRootCommand = new RelayCommand(PickShareRoot);
         PickWorkingDirectoryCommand = new RelayCommand(() => WorkingDirectory = _dialogs.PickLocalFolder(WorkingDirectory) ?? WorkingDirectory);
+        LoadSharesCommand = new AsyncRelayCommand(LoadSharesAsync, () => _explorers is not null);
+    }
+
+    /// <summary>Shares machine B serves (name and folder), filled by <see cref="LoadSharesCommand"/>.</summary>
+    public ObservableCollection<ShareEntry> Shares { get; } = [];
+
+    /// <summary>Asks machine B for its shares, so the share is picked instead of typed with its folder.</summary>
+    public AsyncRelayCommand LoadSharesCommand { get; }
+
+    /// <summary>Result of the last <see cref="LoadSharesCommand"/>; null before.</summary>
+    public string? ShareStatusText
+    {
+        get => _shareStatusText;
+        private set => SetProperty(ref _shareStatusText, value);
+    }
+
+    /// <summary>The entry of <see cref="Shares"/> named <see cref="ShareName"/>; setting it fills the name and the folder.</summary>
+    public ShareEntry? SelectedShare
+    {
+        get => Shares.FirstOrDefault(x => string.Equals(x.Name, ShareName.Trim(), StringComparison.OrdinalIgnoreCase));
+        set
+        {
+            if (value is null)
+                return;
+            ShareName = value.Name;
+            ShareRoot = value.RootPath;
+        }
     }
 
     public static IReadOnlyList<string> Architectures { get; } = ["x64", "x86"];
@@ -89,13 +121,21 @@ public sealed class ProfileViewModel : ObservableObject
     public string ShareName
     {
         get => _shareName;
-        set => SetProperty(ref _shareName, value);
+        set
+        {
+            if (!SetProperty(ref _shareName, value ?? string.Empty))
+                return;
+            OnPropertyChanged(nameof(SelectedShare));
+            // A share machine B reported: its folder is known, the user does not type it.
+            if (SelectedShare is { } share)
+                ShareRoot = share.RootPath;
+        }
     }
 
     public string ShareRoot
     {
         get => _shareRoot;
-        set => SetProperty(ref _shareRoot, value);
+        set => SetProperty(ref _shareRoot, value ?? string.Empty);
     }
 
     public string Program
@@ -195,12 +235,62 @@ public sealed class ProfileViewModel : ObservableObject
     {
         if (parameter is not FolderMappingViewModel mapping || RequireMachine() is not { } machine)
             return;
-        if (_dialogs.PickRemoteFolder(machine, string.IsNullOrEmpty(mapping.RemotePath) ? ShareRoot : mapping.RemotePath) is { } path)
+        if (_dialogs.PickRemoteFolder(machine, string.IsNullOrEmpty(mapping.RemotePath) ? ShareRoot : mapping.RemotePath) is not { } path)
+            return;
+        if (string.IsNullOrWhiteSpace(ShareRoot))
         {
-            mapping.RemotePath = path;
-            // First mapping and no share root yet: the picked folder is the natural root.
-            if (string.IsNullOrWhiteSpace(ShareRoot))
+            // No share yet: the share of machine B holding the folder, else the folder itself as the root.
+            ShareEntry? holder = Shares
+                .Where(x => RemotePathHelper.ToShareRelative(x.RootPath, path) is not null)
+                .MaxBy(x => x.RootPath.Length);
+            if (holder is not null)
+                SelectedShare = holder;
+            else if (Shares.Count == 0)
                 ShareRoot = path;
+        }
+        if (RemotePathHelper.ToShareRelative(ShareRoot, path) is null)
+        {
+            // Checked now rather than at run time, where a wrong root only shows as the wrong folder being read.
+            _dialogs.ShowError("Thư mục nằm ngoài chia sẻ",
+                string.IsNullOrWhiteSpace(ShareRoot)
+                    ? $"Thư mục '{path}' không nằm trong chia sẻ nào của máy B. Chọn thư mục trong một chia sẻ."
+                    : $"Thư mục '{path}' không nằm trong chia sẻ '{ShareName}' ({ShareRoot}) của máy B. Chọn thư mục trong chia sẻ đó, hoặc đổi chia sẻ.");
+            return;
+        }
+        mapping.RemotePath = path;
+    }
+
+    /// <summary>Fills <see cref="Shares"/> from the profile's machine; never throws.</summary>
+    public async Task LoadSharesAsync()
+    {
+        if (_explorers is null || RequireMachine() is not { } machine)
+            return;
+        ShareStatusText = $"Đang lấy danh sách chia sẻ của {machine.Name}…";
+        IRemoteExplorer explorer = _explorers.Create(machine);
+        try
+        {
+            ShareListResponse response = await explorer.ListSharesAsync(CancellationToken.None);
+            Shares.Clear();
+            foreach (ShareEntry share in response.Shares.OrderBy(x => x.Name, StringComparer.CurrentCultureIgnoreCase))
+                Shares.Add(share);
+            OnPropertyChanged(nameof(SelectedShare));
+            if (SelectedShare is { } current)
+                ShareRoot = current.RootPath;
+            else if (Shares.Count == 1 && string.IsNullOrWhiteSpace(ShareName))
+                SelectedShare = Shares[0];
+            ShareStatusText = Shares.Count == 0
+                ? $"{machine.Name} chưa chia sẻ thư mục nào."
+                : SelectedShare is null && !string.IsNullOrWhiteSpace(ShareName)
+                    ? $"{machine.Name} không có chia sẻ '{ShareName}'. Chọn một trong {Shares.Count} chia sẻ."
+                    : $"{machine.Name} có {Shares.Count} chia sẻ.";
+        }
+        catch (Exception e) when (e is not OutOfMemoryException)
+        {
+            ShareStatusText = $"Không lấy được danh sách chia sẻ ({e.Message}). Nhập tên chia sẻ và chọn thư mục gốc bằng tay.";
+        }
+        finally
+        {
+            await explorer.DisposeAsync();
         }
     }
 

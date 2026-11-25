@@ -884,6 +884,10 @@ Service / Hệ thống). Chỗ đặt UI là câu hỏi mở số 5.
 số), hồ sơ chạy (ánh xạ thư mục chọn trong cây Remote Explorer tải lười, hiện rõ PermissionDenied/OutOfScope; chạy
 qua `LaunchSession` dùng chung với CLI, log trực tiếp, Dừng kill cả cây) và tab Remote Explorer. A đọc hồ sơ quyền
 của mình bằng `ExplorerSysPolicy` (0x1405) để chỉ hiện thao tác ghi được cấp; mọi thao tác ghi hỏi xác nhận.
+A lấy danh sách chia sẻ của Agent (tên, thư mục gốc trên B, có cho ghi không) bằng `ExplorerSysShares` (0x1406,
+`ShareListResponse`), không cần quyền nào trong hồ sơ Explorer vì chia sẻ vốn mở được bằng `Hello`. Hồ sơ chạy chọn
+chia sẻ trong ComboBox ("Lấy từ máy B") và gốc chia sẻ được điền theo; thư mục đích chọn ngoài chia sẻ bị từ chối ngay
+lúc chọn. Agent cũ trả `NotImplemented` thì hồ sơ quay về nhập tay tên chia sẻ và gốc.
 
 Lộ trình: duyệt file và ổ đĩa đi kèm M2 và M3; process, registry, service, thông tin hệ thống là M9.
 

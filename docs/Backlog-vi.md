@@ -216,15 +216,6 @@ Hook chờ Broker tối đa `PROCBRIDGE_IPC_TIMEOUT_MS` (mặc định 60 giây)
 trọn file. File lớn qua mạng chậm sẽ quá hạn (`STATUS_IO_TIMEOUT`) dù Broker vẫn đang tải. Cần thời hạn riêng
 cho tải, hoặc Broker trả "đang tải" để Hook chờ tiếp.
 
-## [Vừa] Launcher WPF: phía A không biết danh sách chia sẻ và thư mục gốc của chúng
-
-- Vị trí: `src/client/ProcBridge.Launcher.Wpf/Models/LaunchProfile.cs` (`ShareRoot`), `Services/LaunchOptionsFactory.cs`.
-- Giao thức `Fs.*` dùng đường dẫn tương đối trong chia sẻ, còn Remote Explorer trả đường dẫn tuyệt đối trên máy B.
-  Hồ sơ WPF vì vậy bắt người dùng tự nhập tên chia sẻ và chọn "gốc chia sẻ trên B" (thư mục chọn đầu tiên được
-  gợi ý làm gốc), rồi đổi đường dẫn chọn được sang tương đối. Gõ sai gốc thì chỉ lộ lúc chạy (đọc sai thư mục).
-- Hướng: thêm message cho A liệt kê chia sẻ (tên + gốc) mà máy B cho phép, để chọn chia sẻ bằng ComboBox và
-  kiểm thư mục chọn nằm trong gốc ngay khi chọn.
-
 ## [Thấp] Launcher WPF: thư mục làm việc không được nằm trong thư mục ảo
 
 - Vị trí: `src/client/ProcBridge.Launcher/LaunchSession.cs` (kiểm `Directory.Exists(WorkingDirectory)`).

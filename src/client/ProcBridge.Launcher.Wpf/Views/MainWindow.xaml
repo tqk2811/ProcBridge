@@ -152,11 +152,32 @@
                             </ComboBox>
 
                             <TextBlock Grid.Row="2" Text="Tên chia sẻ (share)" />
-                            <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding ShareName, UpdateSourceTrigger=PropertyChanged}" />
+                            <ComboBox Grid.Row="2" Grid.Column="1" Margin="0,3" IsEditable="True" IsTextSearchEnabled="False"
+                                      ItemsSource="{Binding Shares}" SelectedItem="{Binding SelectedShare}"
+                                      Text="{Binding ShareName, UpdateSourceTrigger=PropertyChanged}"
+                                      ToolTip="Bấm &quot;Lấy từ máy B&quot; để chọn trong các chia sẻ máy B đang phục vụ (kèm thư mục gốc).">
+                                <ComboBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock>
+                                            <Run Text="{Binding Name, Mode=OneWay}" />
+                                            <Run Text="{Binding RootPath, Mode=OneWay, StringFormat=' ({0})'}" Foreground="Gray" />
+                                        </TextBlock>
+                                    </DataTemplate>
+                                </ComboBox.ItemTemplate>
+                                <ComboBox.ItemContainerStyle>
+                                    <Style TargetType="ComboBoxItem">
+                                        <Setter Property="TextSearch.Text" Value="{Binding Name}" />
+                                    </Style>
+                                </ComboBox.ItemContainerStyle>
+                            </ComboBox>
+                            <Button Grid.Row="2" Grid.Column="2" Content="Lấy từ máy B" Command="{Binding LoadSharesCommand}" Margin="6,3,0,3" />
 
                             <TextBlock Grid.Row="3" Text="Gốc chia sẻ trên B" />
-                            <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding ShareRoot, UpdateSourceTrigger=PropertyChanged}" />
-                            <Button Grid.Row="3" Grid.Column="2" Content="Duyệt máy B…" Command="{Binding PickShareRootCommand}" Margin="6,3,0,3" />
+                            <StackPanel Grid.Row="3" Grid.Column="1">
+                                <TextBox Text="{Binding ShareRoot, UpdateSourceTrigger=PropertyChanged}" />
+                                <TextBlock Text="{Binding ShareStatusText}" Foreground="Gray" TextWrapping="Wrap" Margin="0,0,0,3" />
+                            </StackPanel>
+                            <Button Grid.Row="3" Grid.Column="2" Content="Duyệt máy B…" Command="{Binding PickShareRootCommand}" Margin="6,3,0,3" VerticalAlignment="Top" />
 
                             <TextBlock Grid.Row="4" Text="Ánh xạ thư mục" VerticalAlignment="Top" Margin="0,6" />
                             <DataGrid Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" ItemsSource="{Binding Mappings}" SelectedItem="{Binding SelectedMapping}"

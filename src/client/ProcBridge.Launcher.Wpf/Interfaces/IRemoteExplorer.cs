@@ -8,6 +8,9 @@ public interface IRemoteExplorer : IAsyncDisposable
 {
     Task<ExplorerPolicyResponse> GetPolicyAsync(CancellationToken cancellationToken);
 
+    /// <summary>Shares of the Agent with their folders on machine B (throws on an Agent too old to know the message).</summary>
+    Task<ShareListResponse> ListSharesAsync(CancellationToken cancellationToken);
+
     Task<DrivesResponse> ListDrivesAsync(CancellationToken cancellationToken);
 
     Task<DirectoryListResponse> ListDirectoryAsync(string path, CancellationToken cancellationToken);
