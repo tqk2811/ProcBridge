@@ -269,6 +269,9 @@ theo đường dẫn trên Agent cho commit, set-info, rename, delete.
   20 lần xanh, chạy 4 tiến trình song song 40 lần xanh. Probe mặc định chỉ đọc gốc thật (lượt ghi duy nhất ra file tạm
   ngoài gốc), nên nghi phần preload/cache thư mục của Broker chụp mtime trước khi NTFS cập nhật xong sau `CreateTree`.
   Lần đỏ sau: giữ nguyên dòng khác nhau và thời điểm tạo cây để so.
+  Đỏ lại 2026-11-26 trên CI (x64, nhánh `feature/watch-perf`): `FindFile[sub\*]: deep attr=0x10 size=0`, thật
+  `written=134401048804569152`, qua relay `written=134401048804586061` (lệch 1,7 ms, đúng thư mục con `sub\deep`
+  vừa được tạo cùng cây). Code của nhánh không đụng tới listing hay preload.
 
 ## [Thấp] Review độc lập cho M2
 
