@@ -155,7 +155,7 @@ public sealed class VirtualImageTests
     {
         using HookSandbox sandbox = new("x64");
         CreateImageFolder(sandbox, "x64");
-        await using RemoteSession session = RemoteSession.Start(sandbox, configure: x => x with { MetadataTtl = TimeSpan.Zero });
+        await using RemoteSession session = RemoteSession.Start(sandbox, configure: x => x with { MetadataTtl = TimeSpan.Zero, WatchedMetadataTtl = TimeSpan.Zero });
         string started = Path.Combine(sandbox.BaseDirectory, "started");
         string go = Path.Combine(sandbox.BaseDirectory, "go");
         string virtualImage = $"{sandbox.VirtualRoot}\\{BinFolder}\\{ImageName}";
