@@ -91,6 +91,39 @@ public sealed class AgentWatchTreeTests
     }
 
     [TestMethod]
+    public void LostWatcher_TellsSubscribers_AndRestartsWithRescan()
+    {
+        using var share = new TempFolder("watch");
+        using var watcher = new ShareWatcher(share.Path, 64 * 1024, TimeSpan.FromMilliseconds(20), retryDelay: TimeSpan.FromMilliseconds(50));
+        var received = new BlockingCollection<FsChangeNotification>();
+        int lost = 0;
+        using IDisposable subscription = watcher.Subscribe(received.Add, () => Interlocked.Increment(ref lost));
+
+        // The root disappears and the watcher fails: it cannot be restarted until the root is back.
+        Directory.Delete(share.Path, recursive: true);
+        watcher.OnError(new IOException("The watcher stopped."));
+        WaitFor(received, x => x.Rescan, TimeSpan.FromSeconds(2));
+        Assert.AreEqual(1, Volatile.Read(ref lost));
+
+        Directory.CreateDirectory(share.Path);
+        // A successful retry reports a rescan (what happened meanwhile is unknown) and watching works again.
+        WaitFor(received, x => x.Rescan, TimeSpan.FromSeconds(5));
+        share.WriteFile("back.txt", [1]);
+        WaitFor(received, x => x.Changes.Any(c => c.Path == "back.txt"), TimeSpan.FromSeconds(2));
+    }
+
+    [TestMethod]
+    public void Watch_RootGone_FailsInsteadOfPretendingToWatch()
+    {
+        using var share = new TempFolder("watch");
+        Directory.Delete(share.Path, recursive: true);
+        using var watcher = new ShareWatcher(share.Path, 64 * 1024, TimeSpan.FromMilliseconds(20));
+        Assert.Throws<IOException>(() => watcher.Subscribe(_ => { }));
+        Directory.CreateDirectory(share.Path);
+        using IDisposable subscription = watcher.Subscribe(_ => { });
+    }
+
+    [TestMethod]
     public async Task Watch_TooManyChangesInOneBatch_BecomesRescan()
     {
         using var share = new TempFolder("watch");

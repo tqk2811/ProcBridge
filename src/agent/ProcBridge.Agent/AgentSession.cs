@@ -218,12 +218,24 @@ internal sealed class AgentSession
             });
             _notifications = queue;
             _notificationPump = Task.Run(() => PumpNotificationsAsync(queue.Reader));
-            _watchSubscription = _getWatcher(_share!).Subscribe(notification =>
+            try
             {
-                // Never block the watcher: a client that does not keep up loses the details and gets a rescan.
-                if (!queue.Writer.TryWrite(notification))
-                    Interlocked.Exchange(ref _lostNotifications, 1);
-            });
+                // onLost: the share's watcher broke and could not be restarted, so no more changes would reach this
+                // client while it still trusts its cache. Closing the connection makes it fall back to its TTL and resubscribe.
+                _watchSubscription = _getWatcher(_share!).Subscribe(notification =>
+                {
+                    // Never block the watcher: a client that does not keep up loses the details and gets a rescan.
+                    if (!queue.Writer.TryWrite(notification))
+                        Interlocked.Exchange(ref _lostNotifications, 1);
+                }, onLost: Abort);
+            }
+            catch
+            {
+                // Not subscribed (the share cannot be watched now): let a later FsWatch try again.
+                _notifications = null;
+                queue.Writer.TryComplete();
+                throw;
+            }
         }
     }
 

@@ -311,6 +311,34 @@ public sealed class BrokerWatchTests
     }
 
     [TestMethod]
+    public async Task AgentWatcherLost_BrokerFallsBackToTtl_AndRecoversWhenWatchingWorksAgain()
+    {
+        using var share = new TempFolder("bwatch");
+        share.WriteFile("a.txt", [1]);
+        using var cacheDir = new TempFolder("cache");
+        await using AgentServer server = StartAgent(share);
+        await using AgentClient client = CreateClient(server.Port);
+        (FileCache cache, ChangeWatcher watcher) = await WatchedCacheAsync(client, cacheDir.Path);
+        await using ChangeWatcher _ = watcher;
+        Assert.IsTrue(cache.IsWatchActive);
+
+        // The share root vanishes and the Agent's watcher dies: the Broker must stop trusting its cache.
+        string root = share.Path;
+        string moved = root + "-moved";
+        var readOnlyShare = new ReadOnlyShare("src", root);
+        Directory.Move(root, moved);
+        server.GetWatcher(readOnlyShare).OnError(new IOException("The watcher stopped."));
+        await WaitUntilAsync(() => Task.FromResult(!cache.IsWatchActive), TimeSpan.FromSeconds(3));
+
+        Directory.Move(moved, root);
+        await watcher.WaitActiveAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(10));
+        await WaitUntilAsync(() => Task.FromResult(cache.IsWatchActive), TimeSpan.FromSeconds(3));
+        await cache.StatAsync("a.txt", CancellationToken.None);
+        File.WriteAllBytes(share.Combine("a.txt"), [1, 2, 3]);
+        await WaitUntilAsync(async () => (await cache.StatAsync("a.txt", CancellationToken.None)).Size == 3, TimeSpan.FromSeconds(2));
+    }
+
+    [TestMethod]
     public async Task PreloadTree_FillsStatsAndListings_NoFurtherRequests()
     {
         using var share = new TempFolder("bwatch");

@@ -7,7 +7,9 @@ namespace ProcBridge.Agent;
 /// Watches one share with <c>ReadDirectoryChangesW</c> (through <see cref="FileSystemWatcher"/>) and hands batched
 /// changes to every subscriber (plan section 10, M7). The watcher runs only while someone is subscribed. When events
 /// are lost (the kernel buffer overflowed, the watcher failed, too many changes in one batch) subscribers get a
-/// notification with <see cref="FsChangeNotification.Rescan"/> instead of a partial list.
+/// notification with <see cref="FsChangeNotification.Rescan"/> instead of a partial list. When the watcher cannot be
+/// restarted (the root is gone or inaccessible) the subscribers are told it was lost (<c>onLost</c> of
+/// <see cref="Subscribe"/>) and the restart is retried with growing delays; every successful retry sends a rescan.
 /// Owns its <see cref="FileSystemWatcher"/>.
 /// </summary>
 public sealed class ShareWatcher : IDisposable
@@ -15,9 +17,13 @@ public sealed class ShareWatcher : IDisposable
     /// <summary>A batch with more changes than this is replaced by a rescan: cheaper for both ends.</summary>
     public const int MaxChangesPerBatch = 4096;
 
+    /// <summary>Longest wait between two attempts to restart a lost watcher.</summary>
+    public static readonly TimeSpan MaxRetryDelay = TimeSpan.FromSeconds(30);
+
     private readonly string _rootPath;
     private readonly int _bufferSize;
     private readonly TimeSpan _batchDelay;
+    private readonly TimeSpan _retryDelay;
     private readonly object _lock = new();
     // Snapshot and delivery of a batch happen under this, so subscribers see batches one at a time and in order.
     private readonly SemaphoreSlim _dispatch = new(1, 1);
@@ -26,13 +32,16 @@ public sealed class ShareWatcher : IDisposable
     private bool _rescan;
     private bool _flushScheduled;
     private FileSystemWatcher? _watcher;
+    private bool _retrying;
     private bool _disposed;
 
-    public ShareWatcher(string rootPath, int bufferSize, TimeSpan batchDelay)
+    /// <param name="retryDelay">First wait before restarting a lost watcher (doubles up to <see cref="MaxRetryDelay"/>); default 1 s.</param>
+    public ShareWatcher(string rootPath, int bufferSize, TimeSpan batchDelay, TimeSpan? retryDelay = null)
     {
         _rootPath = rootPath;
         _bufferSize = bufferSize;
         _batchDelay = batchDelay;
+        _retryDelay = retryDelay ?? TimeSpan.FromSeconds(1);
     }
 
     public TimeSpan BatchDelay => _batchDelay;
@@ -44,14 +53,26 @@ public sealed class ShareWatcher : IDisposable
     /// Adds <paramref name="handler"/>; the watcher is running when this returns. The handler runs on a thread pool
     /// thread, one batch at a time per watcher, and must not block. Dispose the result to unsubscribe.
     /// </summary>
-    public IDisposable Subscribe(Action<FsChangeNotification> handler)
+    /// <param name="onLost">
+    /// Called (on a thread pool thread) when the watcher broke and could not be restarted, so no changes are reported
+    /// until a retry succeeds. The subscriber should end its subscription so its client falls back to short-lived caching.
+    /// </param>
+    /// <exception cref="IOException">The watcher cannot be started now; the subscriber is not added.</exception>
+    public IDisposable Subscribe(Action<FsChangeNotification> handler, Action? onLost = null)
     {
-        var subscription = new Subscription(this, handler);
+        var subscription = new Subscription(this, handler, onLost);
         lock (_lock)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
+            try
+            {
+                _watcher ??= StartWatcher();
+            }
+            catch (Exception e) when (IsStartFailure(e) && e is not IOException)
+            {
+                throw new IOException($"Cannot watch '{_rootPath}': {e.Message}", e);
+            }
             _subscribers.Add(subscription);
-            _watcher ??= StartWatcher();
         }
         return subscription;
     }
@@ -65,14 +86,24 @@ public sealed class ShareWatcher : IDisposable
             NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.Size
                 | NotifyFilters.LastWrite | NotifyFilters.Attributes | NotifyFilters.CreationTime | NotifyFilters.Security,
         };
-        watcher.Created += (_, e) => Add(FsChangeAction.Added, e.Name);
-        watcher.Deleted += (_, e) => Add(FsChangeAction.Removed, e.Name);
-        watcher.Changed += (_, e) => Add(FsChangeAction.Modified, e.Name);
-        watcher.Renamed += (_, e) => AddRename(e.OldName, e.Name);
-        watcher.Error += (_, e) => OnError(e.GetException());
-        watcher.EnableRaisingEvents = true;
+        try
+        {
+            watcher.Created += (_, e) => Add(FsChangeAction.Added, e.Name);
+            watcher.Deleted += (_, e) => Add(FsChangeAction.Removed, e.Name);
+            watcher.Changed += (_, e) => Add(FsChangeAction.Modified, e.Name);
+            watcher.Renamed += (_, e) => AddRename(e.OldName, e.Name);
+            watcher.Error += (_, e) => OnError(e.GetException());
+            watcher.EnableRaisingEvents = true;
+        }
+        catch
+        {
+            watcher.Dispose();
+            throw;
+        }
         return watcher;
     }
+
+    private static bool IsStartFailure(Exception e) => e is IOException or ArgumentException or UnauthorizedAccessException;
 
     private void Unsubscribe(Subscription subscription)
     {
@@ -139,11 +170,13 @@ public sealed class ShareWatcher : IDisposable
 
     /// <summary>
     /// Watcher error: a buffer overflow (<see cref="InternalBufferOverflowException"/>) loses events, any other error
-    /// stops the watcher. Both become a rescan; a stopped watcher is restarted.
+    /// stops the watcher. Both become a rescan; a stopped watcher is restarted, and when that fails the subscribers
+    /// are told (<c>onLost</c>) and the restart is retried in the background.
     /// </summary>
     internal void OnError(Exception exception)
     {
         FileSystemWatcher? broken = null;
+        Action?[] lost = [];
         lock (_lock)
         {
             if (_watcher is null)
@@ -155,16 +188,67 @@ public sealed class ShareWatcher : IDisposable
                 {
                     _watcher = StartWatcher();
                 }
-                catch (Exception e) when (e is IOException or ArgumentException or UnauthorizedAccessException)
+                catch (Exception e) when (IsStartFailure(e))
                 {
-                    // Root gone or inaccessible: keep the dead watcher so subscribers stay counted; they learn of the
-                    // problem from the rescan and the requests that follow.
-                    broken = null;
+                    // Root gone or inaccessible: nothing is watched until a retry works.
+                    _watcher = null;
+                    lost = _subscribers.Select(x => x.OnLost).ToArray();
+                    BeginRetry();
                 }
             }
             MarkRescan();
         }
         broken?.Dispose();
+        foreach (Action? onLost in lost)
+        {
+            try
+            {
+                onLost?.Invoke();
+            }
+            catch (Exception e) when (e is not OutOfMemoryException)
+            {
+                // The callback of one subscriber must not keep the others from being told.
+            }
+        }
+    }
+
+    /// <summary>Starts the background restart of a lost watcher. Call with <see cref="_lock"/> held.</summary>
+    private void BeginRetry()
+    {
+        if (_retrying)
+            return;
+        _retrying = true;
+        _ = RetryAsync();
+    }
+
+    private async Task RetryAsync()
+    {
+        TimeSpan delay = _retryDelay;
+        while (true)
+        {
+            await Task.Delay(delay).ConfigureAwait(false);
+            lock (_lock)
+            {
+                // Someone else restarted it (a new subscriber), or nobody is left to tell.
+                if (_disposed || _watcher is not null || _subscribers.Count == 0)
+                {
+                    _retrying = false;
+                    return;
+                }
+                try
+                {
+                    _watcher = StartWatcher();
+                    _retrying = false;
+                    // Whatever happened while nothing was watched is unknown: the subscribers must re-list.
+                    MarkRescan();
+                    return;
+                }
+                catch (Exception e) when (IsStartFailure(e))
+                {
+                }
+            }
+            delay = TimeSpan.FromTicks(Math.Min(delay.Ticks * 2, MaxRetryDelay.Ticks));
+        }
     }
 
     private void MarkRescan()
@@ -235,11 +319,13 @@ public sealed class ShareWatcher : IDisposable
         watcher?.Dispose();
     }
 
-    private sealed class Subscription(ShareWatcher owner, Action<FsChangeNotification> handler) : IDisposable
+    private sealed class Subscription(ShareWatcher owner, Action<FsChangeNotification> handler, Action? onLost) : IDisposable
     {
         private int _disposed;
 
         public Action<FsChangeNotification> Handler { get; } = handler;
+
+        public Action? OnLost { get; } = onLost;
 
         public void Dispose()
         {
