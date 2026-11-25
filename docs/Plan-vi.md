@@ -449,15 +449,13 @@ Lộ trình: duyệt file và ổ đĩa đi kèm M2 và M3; process, registry, s
 | Ghi ngược trễ, mất điện máy A | Mất dữ liệu chưa gửi | Hàng đợi ghi lưu trên đĩa, gửi lại khi khởi động; có chế độ ghi xuyên |
 | Process ngoài cây (COM, ShellExecute) | Không thấy thư mục ảo | Ghi rõ là giới hạn; về sau cân nhắc hook `ShellExecute` để chạy qua Launcher |
 
-Câu hỏi mở cần chốt trước hoặc trong lúc làm:
+Câu hỏi mở đã chốt với user (2026-11-25):
 
-1. Tuần tự hoá: MessagePack hay protobuf (chốt ở M2).
-2. Mã ghép cặp hiển thị ở đâu trên máy B: console của Agent, tray icon, hay trang web cục bộ.
-3. Relay có cần giao diện web quản lý (Razor Pages) ngay ở M6 hay chỉ REST + CLI.
-4. Agent chạy dạng Windows Service (quyền cao, luôn chạy) hay app người dùng (quyền user hiện tại).
-   Ảnh hưởng tới quyền truy cập file trên máy B, và tới việc xem/kill process của user khác hoặc sửa
-   `HKLM` trong Remote Explorer.
-5. Giao diện Remote Explorer đặt ở đâu: app desktop trong Launcher (WPF), trang web trên Relay, hay cả
-   hai. Trang web trên Relay vẫn giữ mã hoá đầu cuối được nếu trình duyệt tự giữ khoá và tự giải mã,
-   nhưng phức tạp hơn nhiều.
-6. Phạm vi duyệt file mặc định khi mới ghép cặp: chỉ thư mục chia sẻ hay toàn máy.
+1. Truyền dữ liệu: chạy song song, chia nhiều kết nối càng tốt (nhiều TCP/WebSocket cho một phiên,
+   khối dữ liệu lớn chia ra nhiều kết nối). Định dạng tuần tự hoá (MessagePack/protobuf) vẫn chốt ở M2.
+2. Mã ghép cặp hiển thị trên giao diện WPF (C#) của Agent máy B.
+3. Relay ở M6 chỉ REST + CLI, không có giao diện web.
+4. Agent là app người dùng, không phải Windows Service; cần quyền cao thì user mở Agent bằng quyền
+   admin.
+5. Remote Explorer nằm trong bước chọn thư mục đích để "map" của Launcher (WPF).
+6. Phạm vi duyệt file do máy chia sẻ (máy B) cấp quyền.
