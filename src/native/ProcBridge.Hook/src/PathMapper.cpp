@@ -15,6 +15,12 @@ namespace ProcBridge::Hook
                 && path.Buffer[5] == L':';
         }
 
+        // "\??\X:\dir..." (trailing '\' already trimmed), not "\??\X:" or "\??\UNC\...".
+        bool IsFolderOnDrive(const UNICODE_STRING& path) noexcept
+        {
+            return IsDriveLetterNtPath(path) && path.Length > DriveRelativeStart * sizeof(wchar_t);
+        }
+
         // View into path after "\??\X:" (no allocation).
         UNICODE_STRING VolumeRelativeView(const UNICODE_STRING& path) noexcept
         {
@@ -137,6 +143,12 @@ namespace ProcBridge::Hook
         if (result == ERROR_SUCCESS)
         {
             result = ToNtPath(realDos, mapping.RealNt);
+        }
+        // Only folders on a drive letter, never a drive root: the name rewriting works on the
+        // volume-relative part, and a drive root would redirect the whole volume.
+        if (result == ERROR_SUCCESS && (!IsFolderOnDrive(mapping.VirtualNt) || !IsFolderOnDrive(mapping.RealNt)))
+        {
+            result = ERROR_BAD_PATHNAME;
         }
         if (result != ERROR_SUCCESS)
         {

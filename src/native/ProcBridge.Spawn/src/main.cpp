@@ -60,6 +60,13 @@ namespace
         return SpawnFailure;
     }
 
+    /// "X:\folder...": the hook only maps folders on a drive letter, never a drive root or a UNC path.
+    bool IsFolderOnDrive(const std::wstring& fullPath)
+    {
+        return fullPath.size() > 3 && iswalpha(fullPath[0]) && fullPath[1] == L':' && fullPath[2] == L'\\'
+            && fullPath.find_first_not_of(L'\\', 3) != std::wstring::npos;
+    }
+
     int Usage()
     {
         std::fwprintf(stderr,
@@ -140,6 +147,15 @@ int wmain(int argc, wchar_t** argv)
     if (commandLine.empty())
     {
         return Usage();
+    }
+    for (const Mapping& mapping : mappings)
+    {
+        if (!IsFolderOnDrive(mapping.VirtualDir) || !IsFolderOnDrive(mapping.RealDir))
+        {
+            std::fwprintf(stderr, L"ProcBridge.Spawn: --map folders must be on a drive letter, not a drive root or UNC path: %ls -> %ls\n",
+                mapping.VirtualDir.c_str(), mapping.RealDir.c_str());
+            return SpawnFailure;
+        }
     }
     if (hookPath.empty())
     {
