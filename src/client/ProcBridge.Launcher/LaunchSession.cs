@@ -59,7 +59,7 @@ public sealed class LaunchSession
     {
         if (!File.Exists(_options.SpawnPath))
             throw new FileNotFoundException("ProcBridge.Spawn not found.", _options.SpawnPath);
-        if (_options.WorkingDirectory is not null && !Directory.Exists(_options.WorkingDirectory))
+        if (_options.WorkingDirectory is not null && VirtualWorkingDirectory is null && !Directory.Exists(_options.WorkingDirectory))
         {
             throw new LaunchFailedException(LaunchFailureReason.WorkingDirectoryMissing, _options.WorkingDirectory, string.Empty,
                 $"Working directory {_options.WorkingDirectory} does not exist on this machine.");
@@ -84,6 +84,7 @@ public sealed class LaunchSession
         try
         {
             await CheckAgentAsync(broker, cancellationToken).ConfigureAwait(false);
+            await CheckVirtualWorkingDirectoryAsync(broker, cancellationToken).ConfigureAwait(false);
             return await RunSpawnAsync(cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -91,6 +92,61 @@ public sealed class LaunchSession
             // The last write-backs run while the Broker stops, so conflicts are complete only after that.
             await broker.DisposeAsync().ConfigureAwait(false);
             ReportConflicts(broker.WriteBack.Conflicts);
+        }
+    }
+
+    /// <summary>
+    /// Share-relative folder of <see cref="LauncherOptions.WorkingDirectory"/> when it lies in a virtual folder (it exists
+    /// on machine B only, so Spawn hands it to the hook instead of starting there); null otherwise.
+    /// </summary>
+    public string? VirtualWorkingDirectory => _options.WorkingDirectory is { } directory ? ToRemotePath(_options.Mappings, directory) : null;
+
+    /// <summary>
+    /// Share-relative path of <paramref name="localPath"/> under the innermost mapping holding it ('/' separated), or null
+    /// when no mapping holds it.
+    /// </summary>
+    public static string? ToRemotePath(IReadOnlyList<VirtualMapping> mappings, string localPath)
+    {
+        string full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(localPath));
+        VirtualMapping? holder = null;
+        string rest = string.Empty;
+        foreach (VirtualMapping mapping in mappings)
+        {
+            string root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(mapping.VirtualRoot));
+            string? candidate = string.Equals(full, root, StringComparison.OrdinalIgnoreCase)
+                ? string.Empty
+                : full.StartsWith(root + @"\", StringComparison.OrdinalIgnoreCase) ? full[(root.Length + 1)..] : null;
+            if (candidate is not null && (holder is null || root.Length > holder.VirtualRoot.Length))
+            {
+                holder = mapping with { VirtualRoot = root };
+                rest = candidate;
+            }
+        }
+        if (holder is null)
+            return null;
+        string remote = holder.RemotePath.Trim('/');
+        rest = rest.Replace('\\', '/');
+        return remote.Length == 0 ? rest : rest.Length == 0 ? remote : remote + "/" + rest;
+    }
+
+    /// <summary>A working directory in a virtual folder must exist on machine B: checked here rather than by the hook, whose failure reads "inject failed".</summary>
+    private async Task CheckVirtualWorkingDirectoryAsync(BrokerHost broker, CancellationToken cancellationToken)
+    {
+        if (VirtualWorkingDirectory is not { } remote)
+            return;
+        bool exists;
+        try
+        {
+            exists = (await broker.Client.StatAsync(remote, cancellationToken).ConfigureAwait(false)).IsDirectory;
+        }
+        catch (ProtocolStatusException e) when (!e.IsConnectionFailure && e.Status is NtStatus.ObjectNameNotFound or NtStatus.ObjectPathNotFound)
+        {
+            exists = false;
+        }
+        if (!exists)
+        {
+            throw new LaunchFailedException(LaunchFailureReason.WorkingDirectoryMissing, _options.WorkingDirectory!, string.Empty,
+                $"Working directory {_options.WorkingDirectory} does not exist on machine B ('{remote}' in share '{_options.ShareName}').");
         }
     }
 
@@ -137,12 +193,16 @@ public sealed class LaunchSession
     private async Task<int> RunSpawnAsync(CancellationToken cancellationToken)
     {
 
+        // A virtual working directory does not exist for Spawn (not hooked): the hook of the target sets it (--cwd).
+        string cwd = string.Empty;
+        if (_options.WorkingDirectory is not null && VirtualWorkingDirectory is not null)
+            cwd = $"--cwd {LauncherCommandLine.Quote(Path.GetFullPath(_options.WorkingDirectory))} ";
         // Spawn passes everything after "--" to CreateProcess untouched.
-        var startInfo = new ProcessStartInfo(_options.SpawnPath, $"--broker {SessionId} {Environment.ProcessId} -- {_options.CommandLine}")
+        var startInfo = new ProcessStartInfo(_options.SpawnPath, $"{cwd}--broker {SessionId} {Environment.ProcessId} -- {_options.CommandLine}")
         {
             UseShellExecute = false,
         };
-        if (_options.WorkingDirectory is not null)
+        if (_options.WorkingDirectory is not null && cwd.Length == 0)
             startInfo.WorkingDirectory = _options.WorkingDirectory;
         if (_outputLine is not null)
         {

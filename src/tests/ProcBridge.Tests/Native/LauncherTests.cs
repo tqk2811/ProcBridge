@@ -215,6 +215,82 @@ public sealed class LauncherTests
         Assert.IsFalse(Directory.GetFiles(@"\\.\pipe\").Any(x => x.EndsWith(pipeName, StringComparison.OrdinalIgnoreCase)));
     }
 
+    /// <summary>A working directory inside a virtual folder exists on machine B only: the hook of the target enters it.</summary>
+    [TestMethod]
+    [DataRow("x64")]
+    [DataRow("Win32")]
+    public async Task Run_WorkingDirectoryInAVirtualFolder_StartsTheTargetThere(string platform)
+    {
+        using HookSandbox sandbox = new(platform);
+        await using var agent = new AgentServer([new AgentShare("share", sandbox.RealRoot)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
+        agent.Start();
+        string workingDirectory = Path.Combine(sandbox.VirtualRoot, "sub");
+        var options = new LauncherOptions
+        {
+            AllowPlaintextTransport = true,
+            AgentHost = "127.0.0.1",
+            AgentPort = agent.Port,
+            ShareName = "share",
+            Mappings = [new Broker.Models.VirtualMapping(sandbox.VirtualRoot, "")],
+            CacheRoot = Path.Combine(sandbox.BaseDirectory, "cache"),
+            SpawnPath = sandbox.Binaries.Spawn,
+            WorkingDirectory = workingDirectory,
+            // A relative name resolves against the virtual folder; the child cmd inherits the folder.
+            CommandLine = "cmd.exe /d /c cd & type b.txt & cmd.exe /d /c cd",
+        };
+        var lines = new System.Collections.Concurrent.ConcurrentQueue<string>();
+
+        int exitCode = await new LaunchSession(options, lines.Enqueue).RunAsync();
+
+        Assert.AreEqual(0, exitCode, string.Join(Environment.NewLine, lines));
+        CollectionAssert.AreEqual(new[] { workingDirectory, "bee", workingDirectory }, lines.ToArray());
+    }
+
+    [TestMethod]
+    public async Task Run_WorkingDirectoryMissingOnMachineB_FailsBeforeTheTargetStarts()
+    {
+        using HookSandbox sandbox = new("x64");
+        await using var agent = new AgentServer([new AgentShare("share", sandbox.RealRoot)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
+        agent.Start();
+        string missing = Path.Combine(sandbox.VirtualRoot, "nope");
+        var options = new LauncherOptions
+        {
+            AllowPlaintextTransport = true,
+            AgentHost = "127.0.0.1",
+            AgentPort = agent.Port,
+            ShareName = "share",
+            Mappings = [new Broker.Models.VirtualMapping(sandbox.VirtualRoot, "")],
+            CacheRoot = Path.Combine(sandbox.BaseDirectory, "cache"),
+            SpawnPath = sandbox.Binaries.Spawn,
+            WorkingDirectory = missing,
+            CommandLine = "cmd.exe /d /c exit 0",
+        };
+
+        var e = await Assert.ThrowsExactlyAsync<LaunchFailedException>(() => new LaunchSession(options).RunAsync());
+
+        Assert.AreEqual(LaunchFailureReason.WorkingDirectoryMissing, e.Reason);
+        Assert.AreEqual(missing, e.Target);
+    }
+
+    [TestMethod]
+    [DataRow(@"V:\Proj", "proj")]
+    [DataRow(@"V:\Proj\src\app\", "proj/src/app")]
+    [DataRow(@"V:\Proj\Lib", "lib")]
+    [DataRow(@"V:\All\x", "x")]
+    [DataRow(@"V:\Projects", null)]
+    [DataRow(@"C:\Work", null)]
+    public void ToRemotePath_UsesTheInnermostMapping(string localPath, string? expected)
+    {
+        Broker.Models.VirtualMapping[] mappings =
+        [
+            new(@"V:\Proj", "proj"),
+            new(@"V:\Proj\Lib\", "/lib/"),
+            new(@"V:\All", ""),
+        ];
+
+        Assert.AreEqual(expected, LaunchSession.ToRemotePath(mappings, localPath));
+    }
+
     /// <summary>The WPF Launcher path: output lines of the tree reach the sink, the target starts in the working directory.</summary>
     [TestMethod]
     public async Task Run_WithOutputSink_CollectsLinesOfTheTree_InTheWorkingDirectory()

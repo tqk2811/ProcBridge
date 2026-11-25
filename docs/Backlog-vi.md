@@ -216,13 +216,6 @@ Hook chờ Broker tối đa `PROCBRIDGE_IPC_TIMEOUT_MS` (mặc định 60 giây)
 trọn file. File lớn qua mạng chậm sẽ quá hạn (`STATUS_IO_TIMEOUT`) dù Broker vẫn đang tải. Cần thời hạn riêng
 cho tải, hoặc Broker trả "đang tải" để Hook chờ tiếp.
 
-## [Thấp] Launcher WPF: thư mục làm việc không được nằm trong thư mục ảo
-
-- Vị trí: `src/client/ProcBridge.Launcher/LaunchSession.cs` (kiểm `Directory.Exists(WorkingDirectory)`).
-- Spawn được tạo với thư mục làm việc của target, mà Spawn không bị hook nên thư mục ảo không tồn tại với nó.
-  Cần Spawn nhận `--cwd` và truyền `lpCurrentDirectory` cho process đích sau khi hook đã nạp (hoặc đặt thư mục
-  qua hook lúc khởi động).
-
 ## [Thấp] Launcher WPF: Remote Explorer còn thiếu thao tác và test giao diện
 
 - Vị trí: `src/client/ProcBridge.Launcher.Wpf/ViewModels/RemoteExplorerViewModel.cs`, `RegistryViewModel.cs`.

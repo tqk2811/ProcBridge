@@ -667,6 +667,10 @@ Làm song song với M2, chưa có Broker: cấu hình là `PROCBRIDGE_MAP` cụ
   chạy Spawn, `LaunchSession` mở một kết nối của pool Broker (Hello kèm share): Agent không kết nối được hoặc không có
   share thì dừng bằng `LaunchFailedException` (`LaunchFailureReason`) với lý do rõ ràng, thay cho `inject failed` của
   Spawn; app WPF hiện lý do bằng tiếng Việt.
+- **Thư mục làm việc trong thư mục ảo**: Spawn không bị hook nên không vào được thư mục ảo. `LaunchSession` thấy
+  `--cwd` nằm trong một ánh xạ thì kiểm thư mục đó trên máy B (`FsStat`, thiếu thì `WorkingDirectoryMissing`) rồi
+  truyền `Spawn --cwd <dir>`; Spawn chuyển nó vào khối init (`PROCBRIDGE_CWD`), Hook gỡ biến ngay (con không đổi thư mục
+  lần nữa) và gọi `SetCurrentDirectoryW` sau khi bật hook. Thư mục cục bộ vẫn đi qua `lpCurrentDirectory` như cũ.
 - Kiểm (`src/tests/ProcBridge.Tests/Native/RemoteProcessTreeTests.cs`, Agent loopback): `cmd /c cmd /c type`,
   con khác kiến trúc sau khi cha xoá `PROCBRIDGE_SESSION`, handle stdin kế thừa báo đúng file ID và thời gian
   của máy B (đỏ khi bỏ bản ghi extra), `dotnet build` một project nằm trên Agent với `BaseOutputPath`/
