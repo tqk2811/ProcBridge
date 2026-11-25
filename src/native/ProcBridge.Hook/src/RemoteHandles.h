@@ -44,6 +44,11 @@ namespace ProcBridge::Hook
         /// handle is not a tracked directory.
         bool GetDirectoryPath(HANDLE handle, int& mapping, UNICODE_STRING& path) const noexcept;
 
+        /// Copies what is needed to track the same file under another handle value or in a child process
+        /// (mapping, virtual NT path freed with FreeString, machine B's metadata). The scan state of a directory
+        /// is not part of it: a copy starts a new listing. False when the handle is not tracked.
+        bool GetEntry(HANDLE handle, int& mapping, UNICODE_STRING& path, HookIpc::FileInfo& info) const noexcept;
+
         /// Answers a directory query for handle. False when handle is not a tracked virtual directory (the call
         /// then goes to the system); otherwise status and written (bytes of query.Output) are the answer.
         bool Query(HANDLE handle, const IPathResolver& resolver, const DirectoryQuery& query, NTSTATUS& status, ULONG& written) noexcept;

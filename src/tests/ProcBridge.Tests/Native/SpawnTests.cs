@@ -44,18 +44,31 @@ public sealed class SpawnTests
     [TestMethod]
     [DataRow("x64", "SysWOW64")]
     [DataRow("Win32", "Sysnative")]
-    public void TargetOfOtherArchitecture_IsRefusedClearly(string platform, string systemFolder)
+    public void TargetOfOtherArchitecture_IsHookedThroughHelper(string platform, string systemFolder)
     {
         // A 32-bit Spawn sees the 64-bit System32 only through Sysnative (WOW64 redirection).
         using HookSandbox sandbox = new(platform);
         string cmd = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), systemFolder, "cmd.exe");
 
-        ProcessResult result = sandbox.RunHooked($"\"{cmd}\" /d /c echo started");
+        ProcessResult result = sandbox.RunHooked($"\"{cmd}\" /d /c type \"{sandbox.VirtualRoot}\\a.txt\"");
+
+        Assert.AreEqual(0, result.ExitCode, result.StandardOutput + result.StandardError);
+        Assert.AreEqual(HookSandbox.FileAContent, result.StandardOutput);
+    }
+
+    [TestMethod]
+    public void TargetOfOtherArchitecture_WithoutItsHook_IsRefusedClearly()
+    {
+        using HookSandbox sandbox = new("x64");
+        string cmd = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "SysWOW64", "cmd.exe");
+        string missing = Path.Combine(sandbox.BaseDirectory, "missing", "ProcBridge.Hook.x86.dll");
+
+        ProcessResult result = sandbox.RunSpawn(
+            $"--hook-x86 \"{missing}\" --map \"{sandbox.VirtualRoot}\" \"{sandbox.RealRoot}\" -- \"{cmd}\" /d /c echo started");
 
         Assert.AreEqual(SpawnFailure, result.ExitCode, result.StandardOutput + result.StandardError);
-        // ERROR_EXE_MACHINE_TYPE_MISMATCH.
-        Assert.Contains("target architecture differs", result.StandardError);
-        Assert.Contains("(error 216)", result.StandardError);
+        // The helper next to the missing DLL cannot start: ERROR_PATH_NOT_FOUND.
+        Assert.Contains("inject failed (error 3)", result.StandardError);
         Assert.DoesNotContain("started", result.StandardOutput);
     }
 

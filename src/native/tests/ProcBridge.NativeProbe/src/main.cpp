@@ -914,6 +914,49 @@ namespace
         return 0;
     }
 
+    /// --stdin-name: final path of the standard input handle (inherited from the parent, plan 5.5).
+    int StdinName()
+    {
+        WriteLine(L"stdin: " + FinalPath(GetStdHandle(STD_INPUT_HANDLE)));
+        return 0;
+    }
+
+    /// File id and last write time of handle, as GetFileInformationByHandle reports them (with the Broker:
+    /// machine B's, not the cache copy's).
+    std::wstring Identity(HANDLE handle)
+    {
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (!GetFileInformationByHandle(handle, &info))
+        {
+            return L"error " + std::to_wstring(GetLastError());
+        }
+        const ULONGLONG id = (static_cast<ULONGLONG>(info.nFileIndexHigh) << 32) | info.nFileIndexLow;
+        const ULONGLONG written = (static_cast<ULONGLONG>(info.ftLastWriteTime.dwHighDateTime) << 32) | info.ftLastWriteTime.dwLowDateTime;
+        return L"id " + std::to_wstring(id) + L" written " + std::to_wstring(written);
+    }
+
+    /// --stdin-id: identity of the standard input handle (inherited, plan 5.5).
+    int StdinIdentity()
+    {
+        WriteLine(L"identity: " + Identity(GetStdHandle(STD_INPUT_HANDLE)));
+        return 0;
+    }
+
+    /// --file-id <file>: identity of a file opened by path.
+    int FileIdentity(const wchar_t* file)
+    {
+        const HANDLE handle = CreateFileW(file, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+            OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        if (handle == INVALID_HANDLE_VALUE)
+        {
+            WriteLine(L"identity: error " + std::to_wstring(GetLastError()));
+            return 1;
+        }
+        WriteLine(L"identity: " + Identity(handle));
+        CloseHandle(handle);
+        return 0;
+    }
+
     /// --delete <file>: NtDeleteFile on the DOS path, prints the status.
     int DeleteByName(const wchar_t* file)
     {
@@ -927,9 +970,522 @@ namespace
         return 0;
     }
 
+    // ---- Child process checks (plan 5): the probe runs hooked and creates children of its own. ----
+
+    constexpr int ChildNameMatches = 0;
+    constexpr int ChildNameDiffers = 1;
+
+    HANDLE ParseHandleValue(const wchar_t* text)
+    {
+        return reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(std::wcstoull(text, nullptr, 10)));
+    }
+
+    std::wstring HandleText(HANDLE handle)
+    {
+        return std::to_wstring(reinterpret_cast<ULONG_PTR>(handle));
+    }
+
+    std::wstring SelfPath()
+    {
+        wchar_t path[MAX_PATH];
+        const DWORD length = GetModuleFileNameW(nullptr, path, MAX_PATH);
+        return std::wstring(path, length);
+    }
+
+    /// --handle-name <value>: final path of a handle value received from the parent.
+    int HandleName(const wchar_t* value)
+    {
+        WriteLine(L"handle: " + FinalPath(ParseHandleValue(value)));
+        return 0;
+    }
+
+    /// --final-name <file>: opens the file and prints its final path.
+    int FinalName(const wchar_t* file)
+    {
+        const HANDLE handle = OpenRead(file);
+        if (handle == INVALID_HANDLE_VALUE)
+        {
+            WriteLine(L"name: " + Error(GetLastError()));
+            return 1;
+        }
+        WriteLine(L"name: " + FinalPath(handle));
+        CloseHandle(handle);
+        return 0;
+    }
+
+    /// --handle-is <value> <file>: exit code ChildNameMatches when the handle value shows the file's
+    /// name, ChildNameDiffers otherwise (a stale virtual entry renames it).
+    int HandleIs(const wchar_t* value, const wchar_t* file)
+    {
+        const std::wstring name = FinalPath(ParseHandleValue(value));
+        WriteLine(L"handle: " + name);
+        return name == std::wstring(L"\\\\?\\") + file ? ChildNameMatches : ChildNameDiffers;
+    }
+
+    struct ChildProcess
+    {
+        HANDLE Process = nullptr;
+        HANDLE Thread = nullptr;
+        DWORD ProcessId = 0;
+
+        ~ChildProcess()
+        {
+            if (Thread != nullptr)
+            {
+                CloseHandle(Thread);
+            }
+            if (Process != nullptr)
+            {
+                CloseHandle(Process);
+            }
+        }
+    };
+
+    /// Starts a probe (this one when exe is empty) with the given arguments. attributes may be null.
+    bool StartProbe(const std::wstring& exe, const std::wstring& arguments, BOOL inheritHandles, DWORD flags,
+        LPPROC_THREAD_ATTRIBUTE_LIST attributes, ChildProcess& child)
+    {
+        const std::wstring path = exe.empty() ? SelfPath() : exe;
+        std::wstring commandLine = L"\"" + path + L"\" " + arguments;
+        STARTUPINFOEXW startup{};
+        startup.StartupInfo.cb = attributes == nullptr ? sizeof(STARTUPINFOW) : sizeof(startup);
+        startup.lpAttributeList = attributes;
+        PROCESS_INFORMATION info{};
+        if (!CreateProcessW(path.c_str(), commandLine.data(), nullptr, nullptr, inheritHandles,
+            flags | (attributes == nullptr ? 0 : EXTENDED_STARTUPINFO_PRESENT), nullptr, nullptr, &startup.StartupInfo, &info))
+        {
+            WriteLine(L"create: " + Error(GetLastError()));
+            return false;
+        }
+        child.Process = info.hProcess;
+        child.Thread = info.hThread;
+        child.ProcessId = info.dwProcessId;
+        return true;
+    }
+
+    DWORD WaitExitCode(HANDLE process)
+    {
+        WaitForSingleObject(process, 60000);
+        DWORD code = 0;
+        GetExitCodeProcess(process, &code);
+        return code;
+    }
+
+    HANDLE OpenInheritable(const wchar_t* file)
+    {
+        SECURITY_ATTRIBUTES inherit{ sizeof(inherit), nullptr, TRUE };
+        return CreateFileW(file, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &inherit, OPEN_EXISTING, 0, nullptr);
+    }
+
+    /// Single-attribute PROC_THREAD_ATTRIBUTE_LIST.
+    class AttributeList final
+    {
+    public:
+        AttributeList()
+        {
+            SIZE_T bytes = 0;
+            InitializeProcThreadAttributeList(nullptr, 1, 0, &bytes);
+            _storage.resize(bytes);
+            _ready = InitializeProcThreadAttributeList(Get(), 1, 0, &bytes) != FALSE;
+        }
+        ~AttributeList()
+        {
+            if (_ready)
+            {
+                DeleteProcThreadAttributeList(Get());
+            }
+        }
+
+        LPPROC_THREAD_ATTRIBUTE_LIST Get() { return reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(_storage.data()); }
+
+        bool Set(DWORD_PTR attribute, void* value, SIZE_T bytes)
+        {
+            return _ready && UpdateProcThreadAttribute(Get(), 0, attribute, value, bytes, nullptr, nullptr) != FALSE;
+        }
+
+    private:
+        std::vector<BYTE> _storage;
+        bool _ready = false;
+    };
+
+    /// --child suspended-close <virtual file>: creates a child suspended that inherits a virtual handle,
+    /// closes the handle before resuming it; the child must still see the virtual name.
+    int ChildSuspendedClose(const wchar_t* virtualFile)
+    {
+        const HANDLE handle = OpenInheritable(virtualFile);
+        if (handle == INVALID_HANDLE_VALUE)
+        {
+            WriteLine(L"open: " + Error(GetLastError()));
+            return 1;
+        }
+        ChildProcess child;
+        if (!StartProbe(L"", L"--handle-name " + HandleText(handle), TRUE, CREATE_SUSPENDED, nullptr, child))
+        {
+            return 1;
+        }
+        CloseHandle(handle);
+        ResumeThread(child.Thread);
+        return static_cast<int>(WaitExitCode(child.Process));
+    }
+
+    /// --child handle-list|parent-process <virtual file> <real file>: the child does not inherit the
+    /// virtual handle (a handle list without it, or another parent process), so it must not receive
+    /// its entry: the same value in the child, holding the real file, must show the real name. Prints
+    /// "child: <exit code of --handle-is>".
+    int ChildWithoutVirtualHandle(bool useHandleList, const wchar_t* virtualFile, const wchar_t* realFile)
+    {
+        // Push the virtual handle above the values the child uses at startup.
+        std::vector<HANDLE> padding;
+        for (int i = 0; i < 256; ++i)
+        {
+            padding.push_back(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+        }
+        const HANDLE handle = OpenInheritable(virtualFile);
+        if (handle == INVALID_HANDLE_VALUE)
+        {
+            WriteLine(L"open: " + Error(GetLastError()));
+            return 1;
+        }
+        AttributeList attributes;
+        SECURITY_ATTRIBUTES inherit{ sizeof(inherit), nullptr, TRUE };
+        HANDLE listed = CreateEventW(&inherit, TRUE, FALSE, nullptr);
+        HANDLE parent = nullptr;
+        bool ready = false;
+        if (useHandleList)
+        {
+            ready = attributes.Set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &listed, sizeof(listed));
+        }
+        else
+        {
+            PROCESS_BASIC_INFORMATION basic{};
+            if (NT_SUCCESS(NtQueryInformationProcess(GetCurrentProcess(), ProcessBasicInformation, &basic, sizeof(basic), nullptr)))
+            {
+                parent = OpenProcess(PROCESS_CREATE_PROCESS | PROCESS_DUP_HANDLE, FALSE,
+                    static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(basic.Reserved3)));
+            }
+            ready = parent != nullptr && attributes.Set(PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, &parent, sizeof(parent));
+        }
+        if (!ready)
+        {
+            WriteLine(L"attributes: " + Error(GetLastError()));
+            return 1;
+        }
+        ChildProcess child;
+        if (!StartProbe(L"", L"--handle-is " + HandleText(handle) + L" \"" + realFile + L"\"", TRUE,
+            CREATE_SUSPENDED | CREATE_NO_WINDOW, attributes.Get(), child))
+        {
+            return 1;
+        }
+        // Give the child a handle to the real file at the value of the virtual handle, without a hooked
+        // open in the child (an open there would replace any stale entry).
+        const HANDLE real = OpenRead(realFile);
+        std::vector<HANDLE> extra;
+        bool placed = false;
+        for (int attempt = 0; attempt < 4096 && !placed; ++attempt)
+        {
+            HANDLE value = nullptr;
+            if (!DuplicateHandle(GetCurrentProcess(), real, child.Process, &value, 0, FALSE, DUPLICATE_SAME_ACCESS))
+            {
+                break;
+            }
+            placed = value == handle;
+            if (!placed)
+            {
+                extra.push_back(value);
+            }
+        }
+        for (HANDLE value : extra)
+        {
+            DuplicateHandle(child.Process, value, nullptr, nullptr, 0, FALSE, DUPLICATE_CLOSE_SOURCE);
+        }
+        CloseHandle(real);
+        if (!placed)
+        {
+            TerminateProcess(child.Process, 1);
+            WriteLine(L"value not placed");
+            return 1;
+        }
+        ResumeThread(child.Thread);
+        WriteLine(L"child: " + Num(WaitExitCode(child.Process)));
+        CloseHandle(handle);
+        CloseHandle(listed);
+        if (parent != nullptr)
+        {
+            CloseHandle(parent);
+        }
+        for (HANDLE event : padding)
+        {
+            CloseHandle(event);
+        }
+        return 0;
+    }
+
+    /// --child alert-resume <virtual file>: creates a child suspended and resumes it with
+    /// NtAlertResumeThread; the child must be hooked.
+    int ChildAlertResume(const wchar_t* virtualFile)
+    {
+        using NtAlertResumeThreadFn = NTSTATUS(NTAPI*)(HANDLE, PULONG);
+        const auto alertResume = reinterpret_cast<NtAlertResumeThreadFn>(
+            GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtAlertResumeThread"));
+        ChildProcess child;
+        if (!StartProbe(L"", std::wstring(L"--final-name \"") + virtualFile + L"\"", FALSE, CREATE_SUSPENDED, nullptr, child))
+        {
+            return 1;
+        }
+        ULONG previous = 0;
+        alertResume(child.Thread, &previous);
+        return static_cast<int>(WaitExitCode(child.Process));
+    }
+
+    struct ConcurrentResume
+    {
+        HANDLE Start;
+        HANDLE Thread;
+    };
+
+    DWORD WINAPI ConcurrentResumeWorker(LPVOID parameter)
+    {
+        auto* resume = static_cast<ConcurrentResume*>(parameter);
+        WaitForSingleObject(resume->Start, INFINITE);
+        ResumeThread(resume->Thread);
+        return 0;
+    }
+
+    /// --child double-resume <virtual file>: two threads resume a child created suspended at the same
+    /// time; neither may let it run before it is hooked. Repeated a few times.
+    int ChildDoubleResume(const wchar_t* virtualFile)
+    {
+        for (int round = 0; round < 5; ++round)
+        {
+            ChildProcess child;
+            if (!StartProbe(L"", std::wstring(L"--final-name \"") + virtualFile + L"\"", FALSE, CREATE_SUSPENDED, nullptr, child))
+            {
+                return 1;
+            }
+            ConcurrentResume resume{ CreateEventW(nullptr, TRUE, FALSE, nullptr), child.Thread };
+            HANDLE threads[2];
+            for (HANDLE& thread : threads)
+            {
+                thread = CreateThread(nullptr, 0, ConcurrentResumeWorker, &resume, 0, nullptr);
+            }
+            Sleep(50);
+            SetEvent(resume.Start);
+            WaitForMultipleObjects(2, threads, TRUE, INFINITE);
+            for (HANDLE thread : threads)
+            {
+                CloseHandle(thread);
+            }
+            CloseHandle(resume.Start);
+            WaitExitCode(child.Process);
+        }
+        return 0;
+    }
+
+    /// --child pending-exit: children created suspended and terminated before any resume must not keep
+    /// a handle in the hook's pending list. Prints the growth of this process's handle count.
+    int ChildPendingExit()
+    {
+        auto round = [](int count)
+        {
+            std::vector<ChildProcess> children(count);
+            for (ChildProcess& child : children)
+            {
+                StartProbe(L"", L"--final-name nul", FALSE, CREATE_SUSPENDED, nullptr, child);
+            }
+            for (ChildProcess& child : children)
+            {
+                if (child.Process != nullptr)
+                {
+                    TerminateProcess(child.Process, 1);
+                    WaitForSingleObject(child.Process, 10000);
+                }
+            }
+        };
+        round(4);
+        Sleep(1000);
+        DWORD before = 0;
+        GetProcessHandleCount(GetCurrentProcess(), &before);
+        round(20);
+        Sleep(2000);
+        DWORD after = 0;
+        GetProcessHandleCount(GetCurrentProcess(), &after);
+        WriteLine(L"growth: " + Num(static_cast<long long>(after) - static_cast<long long>(before)));
+        return 0;
+    }
+
+    struct SystemHandleEntryEx
+    {
+        PVOID Object;
+        ULONG_PTR UniqueProcessId;
+        ULONG_PTR HandleValue;
+        ULONG GrantedAccess;
+        USHORT CreatorBackTraceIndex;
+        USHORT ObjectTypeIndex;
+        ULONG HandleAttributes;
+        ULONG Reserved;
+    };
+
+    struct SystemHandleInfoEx
+    {
+        ULONG_PTR NumberOfHandles;
+        ULONG_PTR Reserved;
+        SystemHandleEntryEx Handles[1];
+    };
+
+    /// Number of process and section handles held by processId (types found from this process's own
+    /// handles in the same snapshot). -1 when the snapshot fails.
+    int CountProcessAndSectionHandles(DWORD processId, HANDLE ownProcess, HANDLE ownSection, std::vector<BYTE>& buffer)
+    {
+        constexpr SYSTEM_INFORMATION_CLASS SystemExtendedHandleInformation = static_cast<SYSTEM_INFORMATION_CLASS>(64);
+        NTSTATUS status = STATUS_INFO_LENGTH_MISMATCH;
+        for (int attempt = 0; attempt < 8 && status == STATUS_INFO_LENGTH_MISMATCH; ++attempt)
+        {
+            ULONG needed = 0;
+            status = NtQuerySystemInformation(SystemExtendedHandleInformation, buffer.data(), static_cast<ULONG>(buffer.size()), &needed);
+            if (status == STATUS_INFO_LENGTH_MISMATCH)
+            {
+                buffer.resize((needed > buffer.size() ? needed : buffer.size()) * 2);
+            }
+        }
+        if (!NT_SUCCESS(status))
+        {
+            return -1;
+        }
+        const auto* info = reinterpret_cast<const SystemHandleInfoEx*>(buffer.data());
+        const ULONG_PTR self = GetCurrentProcessId();
+        USHORT processType = 0xFFFF;
+        USHORT sectionType = 0xFFFF;
+        for (ULONG_PTR i = 0; i < info->NumberOfHandles; ++i)
+        {
+            const SystemHandleEntryEx& entry = info->Handles[i];
+            if (entry.UniqueProcessId == self && entry.HandleValue == reinterpret_cast<ULONG_PTR>(ownProcess))
+            {
+                processType = entry.ObjectTypeIndex;
+            }
+            if (entry.UniqueProcessId == self && entry.HandleValue == reinterpret_cast<ULONG_PTR>(ownSection))
+            {
+                sectionType = entry.ObjectTypeIndex;
+            }
+        }
+        int count = 0;
+        for (ULONG_PTR i = 0; i < info->NumberOfHandles; ++i)
+        {
+            const SystemHandleEntryEx& entry = info->Handles[i];
+            if (entry.UniqueProcessId == processId && (entry.ObjectTypeIndex == processType || entry.ObjectTypeIndex == sectionType))
+            {
+                ++count;
+            }
+        }
+        return count;
+    }
+
+    struct OtherArchitectureRun
+    {
+        const wchar_t* Probe;
+        const wchar_t* VirtualFile;
+        volatile LONG Done;
+    };
+
+    DWORD WINAPI OtherArchitectureWorker(LPVOID parameter)
+    {
+        auto* run = static_cast<OtherArchitectureRun*>(parameter);
+        for (int i = 0; i < 4; ++i)
+        {
+            ChildProcess child;
+            if (StartProbe(run->Probe, std::wstring(L"--final-name \"") + run->VirtualFile + L"\"", FALSE, CREATE_NO_WINDOW,
+                nullptr, child))
+            {
+                WaitExitCode(child.Process);
+            }
+        }
+        InterlockedExchange(&run->Done, 1);
+        return 0;
+    }
+
+    /// --child sibling-leak <other architecture probe> <virtual file>: while one thread starts children
+    /// of the other architecture (injected through the helper), another creates children that inherit
+    /// every inheritable handle; those must never receive the helper's process or section handle.
+    /// Prints "leaked: <count>".
+    int ChildSiblingLeak(const wchar_t* otherProbe, const wchar_t* virtualFile)
+    {
+        const HANDLE ownProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, GetCurrentProcessId());
+        const HANDLE ownSection = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, 1, nullptr);
+        std::vector<BYTE> buffer(1 << 20);
+        OtherArchitectureRun run{ otherProbe, virtualFile, 0 };
+        const HANDLE worker = CreateThread(nullptr, 0, OtherArchitectureWorker, &run, 0, nullptr);
+        int leaked = 0;
+        int rounds = 0;
+        while (InterlockedCompareExchange(&run.Done, 0, 0) == 0)
+        {
+            ChildProcess child;
+            if (!StartProbe(L"", L"--final-name nul", TRUE, CREATE_SUSPENDED | CREATE_NO_WINDOW, nullptr, child))
+            {
+                break;
+            }
+            const int count = CountProcessAndSectionHandles(child.ProcessId, ownProcess, ownSection, buffer);
+            if (count < 0)
+            {
+                WriteLine(L"snapshot failed");
+                TerminateProcess(child.Process, 1);
+                break;
+            }
+            leaked += count;
+            ++rounds;
+            TerminateProcess(child.Process, 1);
+            WaitForSingleObject(child.Process, 10000);
+        }
+        WaitForSingleObject(worker, INFINITE);
+        CloseHandle(worker);
+        CloseHandle(ownSection);
+        CloseHandle(ownProcess);
+        std::fwprintf(stderr, L"rounds: %d\n", rounds);
+        WriteLine(L"leaked: " + Num(leaked));
+        return 0;
+    }
+
     int RunCommand(int argc, wchar_t** argv)
     {
         const std::wstring command = argv[1];
+        if (command == L"--handle-name" && argc == 3)
+        {
+            return HandleName(argv[2]);
+        }
+        if (command == L"--final-name" && argc == 3)
+        {
+            return FinalName(argv[2]);
+        }
+        if (command == L"--handle-is" && argc == 4)
+        {
+            return HandleIs(argv[2], argv[3]);
+        }
+        if (command == L"--child" && argc >= 3)
+        {
+            const std::wstring mode = argv[2];
+            if (mode == L"suspended-close" && argc == 4)
+            {
+                return ChildSuspendedClose(argv[3]);
+            }
+            if ((mode == L"handle-list" || mode == L"parent-process") && argc == 5)
+            {
+                return ChildWithoutVirtualHandle(mode == L"handle-list", argv[3], argv[4]);
+            }
+            if (mode == L"alert-resume" && argc == 4)
+            {
+                return ChildAlertResume(argv[3]);
+            }
+            if (mode == L"double-resume" && argc == 4)
+            {
+                return ChildDoubleResume(argv[3]);
+            }
+            if (mode == L"pending-exit" && argc == 3)
+            {
+                return ChildPendingExit();
+            }
+            if (mode == L"sibling-leak" && argc == 5)
+            {
+                return ChildSiblingLeak(argv[3], argv[4]);
+            }
+        }
         if (command == L"--stale-handle" && argc == 4)
         {
             return StaleHandle(argv[2], argv[3]);
@@ -941,6 +1497,18 @@ namespace
         if (command == L"--delete" && argc == 3)
         {
             return DeleteByName(argv[2]);
+        }
+        if (command == L"--stdin-name" && argc == 2)
+        {
+            return StdinName();
+        }
+        if (command == L"--stdin-id" && argc == 2)
+        {
+            return StdinIdentity();
+        }
+        if (command == L"--file-id" && argc == 3)
+        {
+            return FileIdentity(argv[2]);
         }
         if (command == L"--threads" && argc == 4)
         {

@@ -1,5 +1,7 @@
 #include "ProcBridge/Inject.h"
+#include "ProcBridge/InitBlock.h"
 #include <tlhelp32.h>
+#include <cstring>
 #include <string>
 
 namespace ProcBridge::Inject
@@ -97,23 +99,135 @@ namespace ProcBridge::Inject
             FreeLibrary(local);
             return error;
         }
+
+        /// Copies bytes into a new allocation of the target. Returns nullptr on failure (error set).
+        void* CopyToRemote(HANDLE process, const void* data, size_t bytes, DWORD& error) noexcept
+        {
+            void* remote = VirtualAllocEx(process, nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            if (remote == nullptr)
+            {
+                error = GetLastError();
+                return nullptr;
+            }
+            if (!WriteProcessMemory(process, remote, data, bytes, nullptr))
+            {
+                error = GetLastError();
+                VirtualFreeEx(process, remote, 0, MEM_RELEASE);
+                return nullptr;
+            }
+            error = ERROR_SUCCESS;
+            return remote;
+        }
+
+        DWORD GetCurrentMachine(USHORT& machine) noexcept
+        {
+            return GetProcessMachine(GetCurrentProcess(), machine);
+        }
+
+        const wchar_t* ArchitectureName(USHORT machine) noexcept
+        {
+            switch (machine)
+            {
+            case IMAGE_FILE_MACHINE_AMD64:
+                return L"x64";
+            case IMAGE_FILE_MACHINE_I386:
+                return L"x86";
+            default:
+                return nullptr;
+            }
+        }
+
+        /// Runs the helper of the target's architecture: it duplicates the target process handle and a
+        /// section holding the init data from this process, injects and exits with the result. Nothing
+        /// is inheritable, so children created meanwhile by other threads receive neither handle.
+        DWORD InjectWithHelper(HANDLE process, const std::wstring& dllPath, const wchar_t* architecture, const void* initData,
+            size_t initBytes, DWORD timeoutMs) noexcept
+        {
+            const size_t slash = dllPath.find_last_of(L'\\');
+            if (slash == std::wstring::npos)
+            {
+                return ERROR_BAD_PATHNAME;
+            }
+            const std::wstring helper = dllPath.substr(0, slash + 1) + L"ProcBridge.Spawn." + architecture + L".exe";
+
+            const size_t sectionBytes = initBytes == 0 ? 1 : initBytes;
+            ScopedHandle section(CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
+                static_cast<DWORD>(sectionBytes), nullptr));
+            if (!section.IsValid())
+            {
+                return GetLastError();
+            }
+            if (initBytes > 0)
+            {
+                void* view = MapViewOfFile(section.Get(), FILE_MAP_WRITE, 0, 0, initBytes);
+                if (view == nullptr)
+                {
+                    return GetLastError();
+                }
+                memcpy(view, initData, initBytes);
+                UnmapViewOfFile(view);
+            }
+
+            // Both handles stay open here until the helper exits (this function waits for it).
+            std::wstring commandLine = L"\"" + helper + L"\" --inject " + std::to_wstring(GetCurrentProcessId()) + L" "
+                + std::to_wstring(reinterpret_cast<ULONG_PTR>(process)) + L" --init-section "
+                + std::to_wstring(reinterpret_cast<ULONG_PTR>(section.Get())) + L" " + std::to_wstring(initBytes) + L" --hook \""
+                + dllPath + L"\"";
+            STARTUPINFOW startup{};
+            startup.cb = sizeof(startup);
+            PROCESS_INFORMATION info{};
+            if (!CreateProcessW(helper.c_str(), commandLine.data(), nullptr, nullptr, FALSE, DETACHED_PROCESS, nullptr, nullptr,
+                &startup, &info))
+            {
+                return GetLastError();
+            }
+            ScopedHandle helperProcess(info.hProcess);
+            ScopedHandle helperThread(info.hThread);
+            // The helper runs two remote threads, each bounded by timeoutMs.
+            const DWORD wait = WaitForSingleObject(helperProcess.Get(), timeoutMs == INFINITE ? INFINITE : timeoutMs * 2 + 5000);
+            if (wait != WAIT_OBJECT_0)
+            {
+                TerminateProcess(helperProcess.Get(), ERROR_TIMEOUT);
+                return wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();
+            }
+            DWORD exitCode = 0;
+            if (!GetExitCodeProcess(helperProcess.Get(), &exitCode))
+            {
+                return GetLastError();
+            }
+            return exitCode;
+        }
     }
 
-    DWORD InjectDll(HANDLE process, const wchar_t* dllPath, const char* initExport, DWORD timeoutMs, DWORD& initResult) noexcept
+    DWORD GetProcessMachine(HANDLE process, USHORT& machine) noexcept
     {
-        initResult = ERROR_SUCCESS;
-        // The remote LoadLibraryW address and the DLL come from this process: they are only valid in a
-        // target of the same architecture (cross-architecture injection is M4).
-        USHORT selfProcess = 0;
-        USHORT selfNative = 0;
-        USHORT targetProcess = 0;
-        USHORT targetNative = 0;
-        if (!IsWow64Process2(GetCurrentProcess(), &selfProcess, &selfNative) || !IsWow64Process2(process, &targetProcess, &targetNative))
+        USHORT processMachine = 0;
+        USHORT nativeMachine = 0;
+        if (!IsWow64Process2(process, &processMachine, &nativeMachine))
         {
             return GetLastError();
         }
-        const USHORT selfMachine = selfProcess == IMAGE_FILE_MACHINE_UNKNOWN ? selfNative : selfProcess;
-        const USHORT targetMachine = targetProcess == IMAGE_FILE_MACHINE_UNKNOWN ? targetNative : targetProcess;
+        machine = processMachine == IMAGE_FILE_MACHINE_UNKNOWN ? nativeMachine : processMachine;
+        return ERROR_SUCCESS;
+    }
+
+    DWORD InjectDll(HANDLE process, const wchar_t* dllPath, const char* initExport, const void* initData, size_t initBytes,
+        DWORD timeoutMs, DWORD& initResult) noexcept
+    {
+        initResult = ERROR_SUCCESS;
+        // The remote LoadLibraryW address and the DLL come from this process: they are only valid in a
+        // target of the same architecture.
+        USHORT selfMachine = 0;
+        USHORT targetMachine = 0;
+        DWORD error = GetCurrentMachine(selfMachine);
+        if (error == ERROR_SUCCESS)
+        {
+            error = GetProcessMachine(process, targetMachine);
+        }
+        if (error != ERROR_SUCCESS)
+        {
+            return error;
+        }
         if (selfMachine != targetMachine)
         {
             return ERROR_EXE_MACHINE_TYPE_MISMATCH;
@@ -128,30 +242,22 @@ namespace ProcBridge::Inject
         const std::wstring modulePath(fullPath, fullLength);
 
         SIZE_T exportOffset = 0;
-        DWORD error = GetExportOffset(modulePath, initExport, exportOffset);
+        error = GetExportOffset(modulePath, initExport, exportOffset);
         if (error != ERROR_SUCCESS)
         {
             return error;
         }
 
-        const SIZE_T pathBytes = (modulePath.size() + 1) * sizeof(wchar_t);
-        void* remotePath = VirtualAllocEx(process, nullptr, pathBytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        void* remotePath = CopyToRemote(process, modulePath.c_str(), (modulePath.size() + 1) * sizeof(wchar_t), error);
         if (remotePath == nullptr)
         {
-            return GetLastError();
+            return error;
         }
+        // kernel32 is mapped at the same address in every process of the same architecture.
+        auto* loadLibrary = reinterpret_cast<LPTHREAD_START_ROUTINE>(
+            GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW"));
         DWORD loadResult = 0;
-        if (!WriteProcessMemory(process, remotePath, modulePath.c_str(), pathBytes, nullptr))
-        {
-            error = GetLastError();
-        }
-        else
-        {
-            // kernel32 is mapped at the same address in every process of the same architecture.
-            auto* loadLibrary = reinterpret_cast<LPTHREAD_START_ROUTINE>(
-                GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW"));
-            error = RunRemoteThread(process, loadLibrary, remotePath, timeoutMs, loadResult);
-        }
+        error = RunRemoteThread(process, loadLibrary, remotePath, timeoutMs, loadResult);
         if (error != ERROR_TIMEOUT)
         {
             VirtualFreeEx(process, remotePath, 0, MEM_RELEASE);
@@ -170,7 +276,112 @@ namespace ProcBridge::Inject
         {
             return ERROR_MOD_NOT_FOUND;
         }
+        void* remoteData = nullptr;
+        if (initData != nullptr && initBytes > 0)
+        {
+            remoteData = CopyToRemote(process, initData, initBytes, error);
+            if (remoteData == nullptr)
+            {
+                return error;
+            }
+        }
         auto* initialize = reinterpret_cast<LPTHREAD_START_ROUTINE>(remoteBase + exportOffset);
-        return RunRemoteThread(process, initialize, nullptr, timeoutMs, initResult);
+        // The initializer frees remoteData; on a failure to start it the block stays (a few bytes).
+        return RunRemoteThread(process, initialize, remoteData, timeoutMs, initResult);
+    }
+
+    DWORD InjectHook(HANDLE process, const HookPaths& hooks, const void* initData, size_t initBytes, DWORD timeoutMs) noexcept
+    {
+        USHORT selfMachine = 0;
+        USHORT targetMachine = 0;
+        DWORD error = GetCurrentMachine(selfMachine);
+        if (error == ERROR_SUCCESS)
+        {
+            error = GetProcessMachine(process, targetMachine);
+        }
+        if (error != ERROR_SUCCESS)
+        {
+            return error;
+        }
+        const wchar_t* architecture = ArchitectureName(targetMachine);
+        if (architecture == nullptr)
+        {
+            return ERROR_EXE_MACHINE_TYPE_MISMATCH; // ARM64 and others: no hook build
+        }
+        const std::wstring& dllPath = targetMachine == IMAGE_FILE_MACHINE_AMD64 ? hooks.X64 : hooks.X86;
+        if (dllPath.empty())
+        {
+            return ERROR_EXE_MACHINE_TYPE_MISMATCH;
+        }
+        if (targetMachine != selfMachine)
+        {
+            return InjectWithHelper(process, dllPath, architecture, initData, initBytes, timeoutMs);
+        }
+        DWORD initResult = ERROR_SUCCESS;
+        error = InjectDll(process, dllPath.c_str(), HookInitializeExport, initData, initBytes, timeoutMs, initResult);
+        return error != ERROR_SUCCESS ? error : initResult;
+    }
+
+    std::vector<BYTE> BuildInitBlock(const std::wstring& environment, const std::vector<InheritedHandle>& handles,
+        const std::vector<BYTE>& extra)
+    {
+        const size_t environmentOffset = sizeof(InitBlockHeader);
+        const size_t environmentBytes = environment.size() * sizeof(wchar_t);
+        const size_t handleOffset = (environmentOffset + environmentBytes + 7) & ~static_cast<size_t>(7);
+        const size_t extraOffset = (handleOffset + handles.size() * sizeof(InheritedHandle) + 7) & ~static_cast<size_t>(7);
+        const size_t totalBytes = extraOffset + extra.size();
+        std::vector<BYTE> block(totalBytes, 0);
+        InitBlockHeader header{};
+        header.Magic = InitBlockMagic;
+        header.Version = InitBlockVersion;
+        header.TotalBytes = static_cast<ULONG>(totalBytes);
+        header.EnvironmentOffset = static_cast<ULONG>(environmentOffset);
+        header.EnvironmentChars = static_cast<ULONG>(environment.size());
+        header.HandleOffset = static_cast<ULONG>(handleOffset);
+        header.HandleCount = static_cast<ULONG>(handles.size());
+        header.ExtraOffset = static_cast<ULONG>(extraOffset);
+        header.ExtraBytes = static_cast<ULONG>(extra.size());
+        memcpy(block.data(), &header, sizeof(header));
+        if (environmentBytes > 0)
+        {
+            memcpy(block.data() + environmentOffset, environment.data(), environmentBytes);
+        }
+        if (!handles.empty())
+        {
+            memcpy(block.data() + handleOffset, handles.data(), handles.size() * sizeof(InheritedHandle));
+        }
+        if (!extra.empty())
+        {
+            memcpy(block.data() + extraOffset, extra.data(), extra.size());
+        }
+        return block;
+    }
+
+    bool ParseInitBlock(const void* block, size_t blockBytes, const wchar_t*& environment, size_t& environmentChars,
+        const InheritedHandle*& handles, size_t& handleCount, const BYTE*& extra, size_t& extraBytes) noexcept
+    {
+        if (block == nullptr || blockBytes < sizeof(InitBlockHeader))
+        {
+            return false;
+        }
+        InitBlockHeader header{};
+        memcpy(&header, block, sizeof(header));
+        const ULONGLONG environmentEnd = header.EnvironmentOffset + static_cast<ULONGLONG>(header.EnvironmentChars) * sizeof(wchar_t);
+        const ULONGLONG handleEnd = header.HandleOffset + static_cast<ULONGLONG>(header.HandleCount) * sizeof(InheritedHandle);
+        const ULONGLONG extraEnd = static_cast<ULONGLONG>(header.ExtraOffset) + header.ExtraBytes;
+        if (header.Magic != InitBlockMagic || header.Version != InitBlockVersion || header.TotalBytes > blockBytes
+            || environmentEnd > header.TotalBytes || handleEnd > header.TotalBytes || extraEnd > header.TotalBytes || header.HandleOffset % 8 != 0
+            || header.EnvironmentOffset % sizeof(wchar_t) != 0)
+        {
+            return false;
+        }
+        const BYTE* base = static_cast<const BYTE*>(block);
+        environment = reinterpret_cast<const wchar_t*>(base + header.EnvironmentOffset);
+        environmentChars = header.EnvironmentChars;
+        handles = reinterpret_cast<const InheritedHandle*>(base + header.HandleOffset);
+        handleCount = header.HandleCount;
+        extra = base + header.ExtraOffset;
+        extraBytes = header.ExtraBytes;
+        return true;
     }
 }

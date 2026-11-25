@@ -54,7 +54,7 @@
       <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary Condition="'$(Configuration)' == 'Debug'">MultiThreadedDebug</RuntimeLibrary>
       <RuntimeLibrary Condition="'$(Configuration)' == 'Release'">MultiThreaded</RuntimeLibrary>
-      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..\external\minhook\include;$(MSBuildThisFileDirectory)..\..\shared\ProcBridge.HookIpc\native;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..\external\minhook\include;$(MSBuildThisFileDirectory)..\..\shared\ProcBridge.HookIpc\native;$(MSBuildThisFileDirectory)..\ProcBridge.Inject\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <ClCompile Condition="'$(Configuration)' == 'Release'">
       <Optimization>MaxSpeed</Optimization>
@@ -78,6 +78,7 @@
     <ClCompile Include="src\PathMapper.cpp" />
     <ClCompile Include="src\PathString.cpp" />
     <ClCompile Include="src\RemoteHandles.cpp" />
+    <ClCompile Include="src\ProcessHooks.cpp" />
     <ClCompile Include="..\external\minhook\src\buffer.c">
       <CompileAs>CompileAsC</CompileAs>
       <WarningLevel>Level3</WarningLevel>
@@ -111,14 +112,22 @@
     <ClInclude Include="src\BrokerResolver.h" />
     <ClInclude Include="src\DirectoryNameCache.h" />
     <ClInclude Include="src\FileHooks.h" />
+    <ClInclude Include="src\HandleInheritance.h" />
     <ClInclude Include="src\HandleTable.h" />
+    <ClInclude Include="src\HookGuard.h" />
     <ClInclude Include="src\NtApi.h" />
     <ClInclude Include="src\PathMapper.h" />
     <ClInclude Include="src\PathString.h" />
     <ClInclude Include="src\RemoteHandles.h" />
+    <ClInclude Include="src\ProcessHooks.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="ProcBridge.Hook.def" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ProcBridge.Inject\ProcBridge.Inject.vcxproj">
+      <Project>{FF3F52D5-0A28-5C8C-B0F4-F8F5CE92E50A}</Project>
+    </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

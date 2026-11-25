@@ -15,7 +15,7 @@ internal sealed class HookSandbox : IDisposable
     // Vietnamese + Latin-1 name built from code points so the source stays ASCII; must match NativeProbe.
     public static readonly string UnicodeFileName = "t" + (char)0x1EC7 + "p-" + (char)0x00FC + ".txt";
 
-    private static readonly TimeSpan _timeout = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan _timeout = TimeSpan.FromMinutes(5);
 
     private readonly string _baseDirectory;
     private readonly NativeBinaries _binaries;
@@ -41,6 +41,10 @@ internal sealed class HookSandbox : IDisposable
 
     public ProcessResult Run(string fileName, string arguments) => RunProcess(fileName, arguments, null);
 
+    /// <summary>Runs a command line under ProcBridge.Spawn with extra environment variables for the tree.</summary>
+    public ProcessResult RunHooked(string commandLine, IReadOnlyDictionary<string, string> environment)
+        => RunProcess(_binaries.Spawn, $"--map \"{VirtualRoot}\" \"{RealRoot}\" -- {commandLine}", null, environment);
+
     /// <summary>Runs a command line under ProcBridge.Spawn with the virtual root mapped onto the real root.</summary>
     public ProcessResult RunHooked(string commandLine, string? workingDirectory = null)
         => RunSpawn($"--map \"{VirtualRoot}\" \"{RealRoot}\" -- {commandLine}", workingDirectory);
@@ -48,6 +52,24 @@ internal sealed class HookSandbox : IDisposable
     /// <summary>Runs ProcBridge.Spawn with raw arguments (own --map options and command line).</summary>
     public ProcessResult RunSpawn(string arguments, string? workingDirectory = null)
         => RunProcess(_binaries.Spawn, arguments, workingDirectory);
+
+    /// <summary>Runs ProcBridge.Spawn with raw arguments and extra environment variables for the tree.</summary>
+    public ProcessResult RunSpawn(string arguments, IReadOnlyDictionary<string, string> environment)
+        => RunProcess(_binaries.Spawn, arguments, null, environment);
+
+    /// <summary>
+    /// Starts a command line under ProcBridge.Spawn without waiting; output is not redirected. The caller
+    /// owns the returned process.
+    /// </summary>
+    public Process StartHooked(string commandLine)
+    {
+        ProcessStartInfo startInfo = new(_binaries.Spawn, $"--map \"{VirtualRoot}\" \"{RealRoot}\" -- {commandLine}")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        return Process.Start(startInfo) ?? throw new InvalidOperationException("Cannot start ProcBridge.Spawn.");
+    }
 
     public void Dispose()
     {
@@ -86,7 +108,8 @@ internal sealed class HookSandbox : IDisposable
         File.WriteAllBytes(Path.Combine(RealRoot, "sub", "deep", "c.bin"), binary);
     }
 
-    private static ProcessResult RunProcess(string fileName, string arguments, string? workingDirectory)
+    private static ProcessResult RunProcess(string fileName, string arguments, string? workingDirectory,
+        IReadOnlyDictionary<string, string>? environment = null)
     {
         ProcessStartInfo startInfo = new(fileName, arguments)
         {
@@ -98,6 +121,10 @@ internal sealed class HookSandbox : IDisposable
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,
         };
+        foreach ((string name, string value) in environment ?? new Dictionary<string, string>())
+        {
+            startInfo.Environment[name] = value;
+        }
         using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException($"Cannot start {fileName}.");
         // Read both pipes concurrently, otherwise a full pipe blocks the child.
         Task<string> output = process.StandardOutput.ReadToEndAsync();

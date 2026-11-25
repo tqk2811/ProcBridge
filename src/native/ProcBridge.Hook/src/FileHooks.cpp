@@ -11,7 +11,9 @@
 // by path come from Stat, and every open asks the Broker to bring the file into the cache first.
 #include "FileHooks.h"
 #include "DirectoryNameCache.h"
+#include "HandleInheritance.h"
 #include "HandleTable.h"
+#include "HookGuard.h"
 #include "PathString.h"
 #include "RemoteHandles.h"
 #include <MinHook.h>
@@ -55,8 +57,7 @@ namespace ProcBridge::Hook
         NtCloseFn g_ntClose = nullptr;
         NtQueryInformationByNameFn g_ntQueryInformationByName = nullptr;
         NtDeleteFileFn g_ntDeleteFile = nullptr;
-
-        thread_local unsigned t_hookDepth = 0;
+        NtDuplicateObjectFn g_ntDuplicateObject = nullptr;
 
         // Caller memory: hooks read and write pointers that the kernel would probe and answer with
         // STATUS_ACCESS_VIOLATION. Every access to caller memory goes through these SEH-guarded copies
@@ -89,22 +90,6 @@ namespace ProcBridge::Hook
             value.Information = information;
             return SafeCopy(ioStatusBlock, &value, sizeof(value));
         }
-
-        /// Per-thread re-entry guard (plan 4.6): a hook that ends up calling a hooked function again
-        /// on the same thread goes straight to the original.
-        class ReentryGuard final
-        {
-        public:
-            ReentryGuard() noexcept : _outermost(t_hookDepth == 0) { ++t_hookDepth; }
-            ~ReentryGuard() { --t_hookDepth; }
-            ReentryGuard(const ReentryGuard&) = delete;
-            ReentryGuard& operator=(const ReentryGuard&) = delete;
-
-            bool IsOutermost() const noexcept { return _outermost; }
-
-        private:
-            bool _outermost;
-        };
 
         /// Resolves OBJECT_ATTRIBUTES against the virtual roots and owns the rewritten name.
         /// The caller's structures are read once into a snapshot (SEH-guarded); an unreadable pointer
@@ -975,6 +960,73 @@ namespace ProcBridge::Hook
             return status;
         }
 
+        bool IsCurrentProcess(HANDLE process) noexcept
+        {
+            return process == GetCurrentProcess() || (process != nullptr && GetProcessId(process) == GetCurrentProcessId());
+        }
+
+        /// DuplicateHandle inside the process: the copy of a virtual handle is virtual too, a copy that
+        /// lands on a stale value replaces its entry, and DUPLICATE_CLOSE_SOURCE closes like NtClose.
+        /// Duplicates into other processes are not tracked (backlog).
+        NTSTATUS NTAPI HookNtDuplicateObject(HANDLE sourceProcess, HANDLE sourceHandle, HANDLE targetProcess, PHANDLE targetHandle,
+            ACCESS_MASK desiredAccess, ULONG handleAttributes, ULONG options)
+        {
+            ReentryGuard guard;
+            if (!guard.IsOutermost())
+            {
+                return g_ntDuplicateObject(sourceProcess, sourceHandle, targetProcess, targetHandle, desiredAccess, handleAttributes, options);
+            }
+            const bool sourceIsSelf = IsCurrentProcess(sourceProcess);
+            ULONG64 generation = 0;
+            const int mapping = sourceIsSelf ? g_handles.Find(sourceHandle, &generation) : -1;
+            // Remote entry of the source (Broker): the copy reports the same machine B metadata.
+            int remoteMapping = -1;
+            UNICODE_STRING remotePath{};
+            HookIpc::FileInfo remoteInfo{};
+            const bool remote = sourceIsSelf && !g_remoteHandles.IsEmpty()
+                && g_remoteHandles.GetEntry(sourceHandle, remoteMapping, remotePath, remoteInfo);
+            const NTSTATUS status = g_ntDuplicateObject(sourceProcess, sourceHandle, targetProcess, targetHandle, desiredAccess,
+                handleAttributes, options);
+            if (!NT_SUCCESS(status))
+            {
+                FreeString(remotePath);
+                return status;
+            }
+            if (sourceIsSelf && (options & DUPLICATE_CLOSE_SOURCE) != 0)
+            {
+                if (mapping >= 0)
+                {
+                    g_handles.Remove(sourceHandle, generation);
+                }
+                g_directoryNames.Remove(sourceHandle);
+                g_remoteHandles.Remove(sourceHandle);
+            }
+            HANDLE copy = nullptr;
+            if (targetHandle != nullptr && targetProcess != nullptr && SafeCopy(&copy, targetHandle, sizeof(copy))
+                && IsCurrentProcess(targetProcess))
+            {
+                g_directoryNames.Remove(copy);
+                if (mapping >= 0)
+                {
+                    g_handles.Add(copy, mapping);
+                }
+                else
+                {
+                    g_handles.Remove(copy);
+                }
+                if (remote)
+                {
+                    g_remoteHandles.Add(copy, remoteMapping, remotePath, remoteInfo);
+                }
+                else
+                {
+                    g_remoteHandles.Remove(copy);
+                }
+            }
+            FreeString(remotePath);
+            return status;
+        }
+
         NTSTATUS NTAPI HookNtQueryDirectoryFile(HANDLE fileHandle, HANDLE event, PIO_APC_ROUTINE apcRoutine, PVOID apcContext,
             PIO_STATUS_BLOCK ioStatusBlock, PVOID information, ULONG length, ULONG informationClass, BOOLEAN returnSingleEntry,
             PUNICODE_STRING fileName, BOOLEAN restartScan)
@@ -1015,6 +1067,117 @@ namespace ProcBridge::Hook
                 informationClass, queryFlags, fileName);
         }
 
+        /// Extra record of an inherited remote handle (init block): machine B's metadata, then the virtual
+        /// NT path (PathBytes bytes, no terminator). Read with memcpy: records are not aligned.
+        struct InheritedRemoteRecord
+        {
+            HookIpc::FileInfo Info;
+            ULONG PathBytes;
+        };
+
+        /// Handle inheritance (plan 5.5): entries travel in the child's init block (see HandleInheritance.h).
+        /// With the Broker the record of a remote handle also carries its virtual path and machine B's
+        /// metadata, so the child tracks it like its own open without asking the Broker; a directory starts
+        /// a new listing in the child.
+        class InitBlockHandleInheritance final : public IHandleInheritance
+        {
+        public:
+            void ExportForChild(std::vector<Inject::InheritedHandle>& handles, std::vector<BYTE>& extra) const override
+            {
+                // A full copy may have been cut short: grow until the whole table fits.
+                std::vector<HANDLE> values(256);
+                std::vector<int> mappings(256);
+                size_t count = g_handles.CopyEntries(values.data(), mappings.data(), values.size());
+                while (count == values.size())
+                {
+                    values.resize(values.size() * 2);
+                    mappings.resize(mappings.size() * 2);
+                    count = g_handles.CopyEntries(values.data(), mappings.data(), values.size());
+                }
+                for (size_t i = 0; i < count; ++i)
+                {
+                    DWORD flags = 0;
+                    if (GetHandleInformation(values[i], &flags) && (flags & HANDLE_FLAG_INHERIT) != 0)
+                    {
+                        handles.push_back({ reinterpret_cast<ULONG_PTR>(values[i]), mappings[i], Inject::NoExtra });
+                        AppendRemoteRecord(values[i], handles.back(), extra);
+                    }
+                }
+            }
+
+            void ImportFromParent(const Inject::InheritedHandle* handles, size_t count, const BYTE* extra,
+                size_t extraBytes) noexcept override
+            {
+                for (size_t i = 0; i < count; ++i)
+                {
+                    const int mapping = handles[i].Mapping;
+                    if (mapping < 0 || mapping >= g_resolver->Count())
+                    {
+                        continue;
+                    }
+                    const HANDLE handle = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(handles[i].Handle));
+                    g_handles.Add(handle, mapping);
+                    const ULONG offset = handles[i].ExtraOffset;
+                    InheritedRemoteRecord record{};
+                    if (!g_resolver->IsRemote() || offset == Inject::NoExtra || offset > extraBytes
+                        || extraBytes - offset < sizeof(record))
+                    {
+                        continue;
+                    }
+                    memcpy(&record, extra + offset, sizeof(record));
+                    const size_t pathOffset = offset + sizeof(record);
+                    if (record.PathBytes == 0 || record.PathBytes % sizeof(wchar_t) != 0 || record.PathBytes > 0xFFFE
+                        || extraBytes - pathOffset < record.PathBytes)
+                    {
+                        continue;
+                    }
+                    UNICODE_STRING path{};
+                    if (!AllocateString(path, record.PathBytes))
+                    {
+                        continue;
+                    }
+                    memcpy(path.Buffer, extra + pathOffset, record.PathBytes);
+                    path.Length = static_cast<USHORT>(record.PathBytes);
+                    g_remoteHandles.Add(handle, mapping, path, record.Info);
+                    FreeString(path);
+                }
+            }
+
+        private:
+            static void AppendRemoteRecord(HANDLE handle, Inject::InheritedHandle& entry, std::vector<BYTE>& extra)
+            {
+                if (g_remoteHandles.IsEmpty())
+                {
+                    return;
+                }
+                InheritedRemoteRecord record{};
+                int mapping = -1;
+                UNICODE_STRING path{};
+                if (!g_remoteHandles.GetEntry(handle, mapping, path, record.Info))
+                {
+                    return;
+                }
+                record.PathBytes = path.Length;
+                try
+                {
+                    const BYTE* head = reinterpret_cast<const BYTE*>(&record);
+                    const BYTE* text = reinterpret_cast<const BYTE*>(path.Buffer);
+                    const size_t offset = extra.size();
+                    extra.insert(extra.end(), head, head + sizeof(record));
+                    extra.insert(extra.end(), text, text + path.Length);
+                    entry.ExtraOffset = static_cast<ULONG>(offset);
+                }
+                catch (...)
+                {
+                    FreeString(path);
+                    throw;
+                }
+                FreeString(path);
+            }
+        };
+
+        InitBlockHandleInheritance g_inheritance;
+
         struct HookEntry
         {
             const char* Name;
@@ -1042,6 +1205,7 @@ namespace ProcBridge::Hook
             { "NtQueryObject", reinterpret_cast<void*>(&HookNtQueryObject), reinterpret_cast<void**>(&g_ntQueryObject) },
             { "NtClose", reinterpret_cast<void*>(&HookNtClose), reinterpret_cast<void**>(&g_ntClose) },
             { "NtDeleteFile", reinterpret_cast<void*>(&HookNtDeleteFile), reinterpret_cast<void**>(&g_ntDeleteFile) },
+            { "NtDuplicateObject", reinterpret_cast<void*>(&HookNtDuplicateObject), reinterpret_cast<void**>(&g_ntDuplicateObject) },
             { "NtQueryInformationByName", reinterpret_cast<void*>(&HookNtQueryInformationByName),
                 reinterpret_cast<void**>(&g_ntQueryInformationByName), true },
             { "NtQueryDirectoryFile", reinterpret_cast<void*>(&HookNtQueryDirectoryFile), reinterpret_cast<void**>(&g_ntQueryDirectoryFile) },
@@ -1064,6 +1228,11 @@ namespace ProcBridge::Hook
                 return ERROR_GEN_FAILURE;
             }
         }
-        return MH_EnableHook(MH_ALL_HOOKS) == MH_OK ? ERROR_SUCCESS : ERROR_GEN_FAILURE;
+        return ERROR_SUCCESS;
+    }
+
+    IHandleInheritance& GetLocalHandleInheritance() noexcept
+    {
+        return g_inheritance;
     }
 }

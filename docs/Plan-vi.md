@@ -1,6 +1,7 @@
 # ProcBridge — Kế hoạch thiết kế
 
-> Trạng thái: đã xong M0 (bộ khung) và M1 (spike hook cục bộ, mục 13.1). Ngày lập: 2026-11-25.
+> Trạng thái: đã xong M0 (bộ khung), M1 (spike hook cục bộ, mục 13.1), M2 (LAN chỉ đọc, mục 13.2) và M4
+> (cây process, mục 13.3; ghép với máy B ở mục 13.4). Ngày lập: 2026-11-25.
 > Việc còn treo: xem [Backlog-vi.md](Backlog-vi.md).
 > Thuật ngữ: xem [Glossary-vi.md](Glossary-vi.md).
 
@@ -259,8 +260,9 @@ sequenceDiagram
 4. Khác kiến trúc: cha x64 sinh con x86 (WOW64) hoặc ngược lại. Hook nhờ Broker hoặc một helper đúng
    kiến trúc làm việc inject. Build cả `ProcBridge.Hook.x64.dll` và `ProcBridge.Hook.x86.dll`.
 5. Process con kế thừa handle ảo từ cha (handle thật của file cache): bảng `handle → đường dẫn ảo`
-   phải được chuyển cho con. Cách làm: con hỏi Broker theo `(pid cha, giá trị handle)` khi gặp handle
-   lạ; Broker giữ bảng chung của cả phiên.
+   phải được chuyển cho con. Cách làm: cha chép các mục của handle ảo kế thừa vào khối khởi tạo của con
+   (với Broker kèm metadata máy B và đường dẫn ảo), sau giao diện `IHandleInheritance` (mục 13.3, 13.4);
+   không cần bảng chung của phiên trong Broker.
 
 ---
 
@@ -465,6 +467,75 @@ người dùng cần nó để chọn thư mục máy B trước khi mở phiên
   ghi bị từ chối, pipe của process khác bị từ chối, Broker im lặng thì lời gọi trả lỗi sau thời hạn. `NativeProbe`
   không in thời gian của mục `..` và mở file kiểm đổi tên bằng một file tạm ngoài gốc (cần quyền `DELETE`, share
   chỉ đọc từ chối). Bộ test M1 (`PROCBRIDGE_MAP`) vẫn xanh.
+
+### 13.3 Kết quả M4 bản cục bộ (2026-11-25)
+
+Làm song song với M2, chưa có Broker: cấu hình là `PROCBRIDGE_MAP` cục bộ. Phần ghép với Broker ở mục 13.4.
+
+- **Inject con**: Hook chặn `NtCreateUserProcess`: thêm cờ tạo thread treo, bỏ cờ thoát Job
+  (`PROCESS_CREATE_FLAGS_BREAKAWAY`), ghi con vào danh sách chờ. Không inject ngay trong
+  `NtCreateUserProcess`: kernelbase chỉ đăng ký process mới với csrss *sau* khi hàm này trả về, inject lúc
+  đó làm loader và kernel32 của con khởi động quá sớm. kernelbase luôn tạo process treo rồi gọi
+  `NtResumeThread` khi xong việc đăng ký (hoặc để bên gọi `CREATE_SUSPENDED` tự resume), nên Hook inject ở
+  lần `NtResumeThread` đầu tiên trên thread chính của con (hoặc `NtResumeProcess`), chạy initializer xong
+  mới cho resume (`NtAlertResumeThread` cũng được chặn). Hai resume cùng lúc trên một con: một thread inject,
+  thread kia chờ event của mục đó rồi mới gọi hàm gốc. Con thoát trước lần resume đầu thì mục chờ được dọn
+  ngay (wait đăng ký trên handle process). Bên gọi thẳng `NtCreateUserProcess` không xin thread treo thì
+  inject và resume ngay.
+  Không cần hook `CreateProcessInternalW`. Inject hỏng thì con bị kết thúc (mã `STATUS_DLL_INIT_FAILED`)
+  chứ không để chạy ngoài hook.
+- **Khác kiến trúc**: `ProcBridge.Inject::InjectHook` cùng kiến trúc thì inject trực tiếp; khác kiến trúc
+  thì chạy `ProcBridge.Spawn.<arch>.exe --inject` nằm cạnh `Hook.dll` của kiến trúc đích. Helper không kế
+  thừa gì: nó mở process inject theo PID rồi `DuplicateHandle` hai handle (process đích, section chứa khối
+  khởi tạo), nên con do thread khác tạo cùng lúc không nhận nhầm hai handle này.
+  Đường dẫn `Hook.dll` hai kiến trúc đi xuống cây qua `PROCBRIDGE_HOOK_X64`/`PROCBRIDGE_HOOK_X86`. Spawn
+  cũng dùng đường này nên đích khác kiến trúc không còn bị từ chối.
+- **Biến môi trường**: injector chép một khối khởi tạo (`ProcBridge/InitBlock.h`) vào con và truyền địa chỉ
+  làm tham số của `ProcBridgeHookInitialize`. Khối mang các biến cấu hình (initializer đặt lại vào môi
+  trường của con) và các handle ảo kế thừa. Hook chụp cấu hình lúc khởi tạo, nên process xoá biến hoặc
+  truyền environment block riêng thì con vẫn được hook.
+- **Job Object**: Spawn tạo Job `KILL_ON_JOB_CLOSE`, gán process đầu trước khi inject; con cháu tự vào Job
+  (Hook bỏ cờ breakaway). Spawn chờ Job hết process (`JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO`) rồi trả mã thoát
+  của process đầu. Spawn chết thì Job đóng và cả cây bị kết thúc.
+- **Handle kế thừa**: chọn chuyển bảng qua khối khởi tạo thay vì để con tự hỏi `NtQueryObject` khi gặp
+  handle lạ. Lý do: tên thật của handle không cho biết handle đó được mở qua đường ảo hay đường thật (process
+  được phép mở thẳng thư mục thật), còn cha biết chắc. Cha lọc các handle ảo có cờ `HANDLE_FLAG_INHERIT`
+  khi tạo con với `bInheritHandles`; con nạp vào bảng trước khi bật hook. Danh sách được chụp ngay trong
+  `NtCreateUserProcess` (đóng hoặc dùng lại handle trước lần resume đầu không đổi thứ con đang giữ), thu hẹp
+  theo `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` (`PS_ATTRIBUTE_HANDLE_LIST` 0x2000B), và rỗng khi có
+  `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` trỏ process khác (con kế thừa handle của process đó). Không cần shared memory theo
+  phiên. Giao diện `IHandleInheritance` (bản Broker ở mục 13.4). Kèm theo: hook `NtDuplicateObject` để bản
+  sao handle trong cùng process (vd `cmd` nhân bản handle khi chuyển hướng `<`) vẫn là handle ảo.
+- Kiểm (`src/tests/ProcBridge.Tests/Native/ProcessTreeTests.cs`, `SpawnTests.cs`): `cmd /c cmd /c cmd /c type`
+  qua thư mục ảo, con x86 từ cha x64 và ngược lại (cả trực tiếp từ Spawn), con tạo sau khi cha xoá
+  `PROCBRIDGE_MAP`, handle stdin kế thừa giữ tên ảo, Spawn chờ cháu chạy nền, giết Spawn thì cháu chết,
+  `dotnet build` hai project trong thư mục ảo với `-m:2 -nodeReuse:false --disable-build-servers
+  -p:UseSharedCompilation=false` (dotnet, node MSBuild, csc là process riêng) rồi chạy được app vừa build.
+  `ChildCreationTests.cs`: handle kế thừa bị đóng trước resume, danh sách handle / process cha khác, resume
+  bằng `NtAlertResumeThread`, hai thread resume cùng lúc, con chết trước resume không giữ handle, helper khác
+  kiến trúc không rò handle sang con anh em.
+
+### 13.4 Ghép M2 + M4: cây process với máy B (2026-11-25)
+
+- **Cấu hình xuống cây**: khối khởi tạo mang cả `PROCBRIDGE_SESSION`, `PROCBRIDGE_BROKER_PID`,
+  `PROCBRIDGE_IPC_TIMEOUT_MS` cạnh `PROCBRIDGE_MAP` và đường dẫn `Hook.dll`. Kênh không dùng đi với giá trị rỗng
+  và initializer **xoá** biến có giá trị rỗng, nên giá trị thừa kế từ nơi khác không chiếm được kênh. Mỗi process
+  con tự kết nối pipe Broker (kiểm PID chủ pipe như process đầu) và gửi `Hello` riêng.
+- **Handle kế thừa từ xa**: không cần bảng chung của phiên trong Broker (khác ý ban đầu ở mục 5). Khối khởi tạo bản
+  2 thêm vùng `extra`; mỗi handle ảo kế thừa có `ExtraOffset` trỏ tới bản ghi của Hook: `FileInfo` của máy B và
+  đường dẫn NT ảo lấy từ `RemoteHandleTable`. Con nạp vào cả `HandleTable` và `RemoteHandleTable` trước khi bật
+  hook, nên metadata (file ID, thời gian, thuộc tính) vẫn là của máy B mà không hỏi lại Broker. Chỉ số ánh xạ
+  giống nhau giữa cha và con vì cùng Broker trả cùng danh sách gốc trong `Hello`. Handle thư mục sang con bắt đầu
+  một lượt liệt kê mới (con trỏ liệt kê của cha không chuyển theo, xem Backlog). `NtDuplicateObject` trong cùng
+  process cũng chép mục `RemoteHandleTable`.
+- **Launcher**: Spawn chỉ thoát khi Job hết process, nên Launcher chờ Spawn là chờ cả cây; Broker chỉ dừng sau
+  đó. `--no-build-servers` (`LauncherOptions.DisableBuildServers`) đặt `DOTNET_CLI_USE_MSBUILD_SERVER=0`,
+  `MSBUILDDISABLENODEREUSE=1`, `UseSharedCompilation=false` (MSBuild đọc biến môi trường thành property) cho cả cây.
+- Kiểm (`src/tests/ProcBridge.Tests/Native/RemoteProcessTreeTests.cs`, Agent loopback): `cmd /c cmd /c type`,
+  con khác kiến trúc sau khi cha xoá `PROCBRIDGE_SESSION`, handle stdin kế thừa báo đúng file ID và thời gian
+  của máy B (đỏ khi bỏ bản ghi extra), `dotnet build` một project nằm trên Agent với `BaseOutputPath`/
+  `BaseIntermediateOutputPath` trỏ ra thư mục tạm (máy B chỉ đọc tới M3) rồi chạy được app, Launcher chờ cháu
+  chạy nền và đặt biến tắt build server.
 
 ---
 

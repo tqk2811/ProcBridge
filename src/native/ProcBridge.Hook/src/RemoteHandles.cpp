@@ -413,6 +413,20 @@ namespace ProcBridge::Hook
         return copied;
     }
 
+    bool RemoteHandleTable::GetEntry(HANDLE handle, int& mapping, UNICODE_STRING& path, HookIpc::FileInfo& info) const noexcept
+    {
+        State* state = Lock(handle);
+        if (state == nullptr)
+        {
+            return false;
+        }
+        mapping = state->Mapping;
+        info = state->Self;
+        const bool copied = ConcatString(path, state->Path, nullptr, 0);
+        ReleaseSRWLockExclusive(&state->Lock);
+        return copied;
+    }
+
     bool RemoteHandleTable::Query(HANDLE handle, const IPathResolver& resolver, const DirectoryQuery& query, NTSTATUS& status,
         ULONG& written) noexcept
     {

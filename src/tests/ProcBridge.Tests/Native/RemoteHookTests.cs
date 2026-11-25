@@ -122,7 +122,7 @@ public sealed class RemoteHookTests
         ProcessResult result = session.RunWithBrokerProcess(Environment.ProcessId + 4, $"cmd.exe /d /c echo started");
 
         Assert.AreEqual(125, result.ExitCode, result.StandardOutput);
-        Assert.Contains("hook initialization failed (error 5)", result.StandardError);
+        Assert.Contains("inject failed (error 5)", result.StandardError);
         Assert.DoesNotContain("started", result.StandardOutput);
     }
 }

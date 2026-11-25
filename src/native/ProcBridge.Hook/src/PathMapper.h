@@ -56,6 +56,9 @@ namespace ProcBridge::Hook
 
         virtual const PathMapping& GetMapping(int mapping) const noexcept = 0;
 
+        /// Number of mappings (valid indexes are 0..Count()-1).
+        virtual int Count() const noexcept = 0;
+
         /// True when a virtual root lies inside directoryDevicePath (\Device\...\dir) or contains it, i.e.
         /// a name relative to that directory may be virtual. Cheap: decides whether joining is needed.
         virtual bool IsNearVirtualRoot(const UNICODE_STRING& directoryDevicePath) const noexcept = 0;
@@ -107,7 +110,7 @@ namespace ProcBridge::Hook
         /// Returns ERROR_SUCCESS (also when the variable is missing: no mappings) or a Win32 error.
         DWORD LoadFromEnvironment() noexcept;
 
-        int Count() const noexcept { return _count; }
+        int Count() const noexcept override { return _count; }
 
         int FindMapping(const UNICODE_STRING& ntPath) const noexcept override;
         bool TranslateToReal(int mapping, const UNICODE_STRING& ntPath, UNICODE_STRING& realPath) const noexcept override;
