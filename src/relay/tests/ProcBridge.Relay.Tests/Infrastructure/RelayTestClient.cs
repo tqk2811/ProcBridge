@@ -78,6 +78,33 @@ public sealed class RelayTestClient
         }
     }
 
+    public bool HasPairingSlot(string hostId) => _factory.Services.GetRequiredService<TunnelHub>().HasPairingSlot(hostId);
+
+    /// <summary>Host side: sends one JSON control message (pairing slot open/cancel).</summary>
+    public static async Task SendControlAsync(WebSocket control, object message)
+    {
+        using var cts = new CancellationTokenSource(Timeout);
+        var bytes = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(message, RelayJsonSettings.Create()));
+        await control.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, cts.Token);
+    }
+
+    /// <summary>Host side: asks for a pairing slot under <paramref name="lookupKey"/> and returns the relay's answer (registered or rejected).</summary>
+    public static async Task<TunnelPairingSlotStateMessageVM> RequestPairingSlotAsync(WebSocket control, string? lookupKey)
+    {
+        await SendControlAsync(control, new TunnelPairingSlotMessageVM(TunnelProtocol.PairingSlotMessage, lookupKey));
+        var buffer = new byte[8192];
+        using var cts = new CancellationTokenSource(Timeout);
+        while (true)
+        {
+            var result = await control.ReceiveAsync(buffer, cts.Token);
+            Assert.AreEqual(WebSocketMessageType.Text, result.MessageType);
+            var text = Encoding.UTF8.GetString(buffer, 0, result.Count);
+            var type = Newtonsoft.Json.Linq.JObject.Parse(text).Value<string>("type");
+            if (type is TunnelProtocol.PairingSlotRegisteredMessage or TunnelProtocol.PairingSlotRejectedMessage)
+                return JsonConvert.DeserializeObject<TunnelPairingSlotStateMessageVM>(text, RelayJsonSettings.Create())!;
+        }
+    }
+
     public static async Task<TunnelSessionOpenedMessageVM> ReceiveSessionOpenedAsync(WebSocket control)
         => JsonConvert.DeserializeObject<TunnelSessionOpenedMessageVM>(
             await ReceiveControlMessageAsync(control, TunnelProtocol.SessionOpenedMessage), RelayJsonSettings.Create())!;

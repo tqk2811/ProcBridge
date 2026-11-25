@@ -2,7 +2,11 @@ using System.Runtime.Versioning;
 using ProcBridge.Broker.Models;
 using ProcBridge.Crypto.Identity;
 using ProcBridge.Launcher.Models;
+using ProcBridge.Relay.Shared.Tunnel;
+using ProcBridge.Transport.Relay;
+using ProcBridge.Transport.Relay.Models;
 using ProcBridge.Transport.Secure;
+using ProcBridge.Transport.Secure.Interfaces;
 using ProcBridge.Transport.Secure.Models;
 
 namespace ProcBridge.Launcher;
@@ -38,7 +42,7 @@ internal static class Program
             if (agent is null)
             {
                 Console.Error.WriteLine(options.AgentFingerprint is not null
-                    ? $"ProcBridge.Launcher: Agent {options.AgentFingerprint} is not paired; run --pair first (on the LAN)."
+                    ? $"ProcBridge.Launcher: Agent {options.AgentFingerprint} is not paired; run --pair first (--agent on the LAN, or --relay with the Agent's relay pairing code)."
                     : $"ProcBridge.Launcher: no paired Agent for {options.AgentHost}:{options.AgentPort}; run --pair first.");
                 return 2;
             }
@@ -58,10 +62,15 @@ internal static class Program
         }
     }
 
-    /// <summary><c>--pair --agent host[:port]</c>, <c>--list-paired</c>, <c>--revoke &lt;fingerprint&gt;</c>, each with optional <c>--data</c>.</summary>
+    /// <summary>
+    /// <c>--pair --agent host[:port]</c>, <c>--pair --relay url [--code c]</c>, <c>--list-paired</c>,
+    /// <c>--revoke &lt;fingerprint&gt;</c>, each with optional <c>--data</c>.
+    /// </summary>
     private static async Task<int> RunTrustCommandAsync(string[] args)
     {
         string? agent = null;
+        string? relay = null;
+        string? relayCode = null;
         string? revoke = null;
         string? dataDirectory = null;
         for (int i = 1; i < args.Length; i++)
@@ -71,6 +80,12 @@ internal static class Program
             {
                 case "--agent":
                     agent = Next();
+                    break;
+                case "--relay" when args[0] == "--pair":
+                    relay = Next();
+                    break;
+                case "--code" when args[0] == "--pair":
+                    relayCode = Next();
                     break;
                 case "--data":
                     dataDirectory = Next();
@@ -105,30 +120,60 @@ internal static class Program
                 return removed ? 0 : 1;
         }
 
-        if (agent is null)
+        if ((agent is null) == (relay is null))
         {
-            Console.Error.WriteLine("--pair needs --agent <host>[:port].");
+            Console.Error.WriteLine("--pair needs --agent <host>[:port] or --relay <url>.");
             return 2;
         }
-        (string host, int port) = LauncherCommandLine.ParseAgent(agent);
+        IStreamConnector connector;
+        if (relay is not null)
+        {
+            if (!Uri.TryCreate(relay, UriKind.Absolute, out Uri? relayUrl) || relayUrl.Scheme is not ("https" or "http"))
+            {
+                Console.Error.WriteLine("--relay expects an http(s) URL.");
+                return 2;
+            }
+            if (relayCode is null)
+            {
+                Console.Write("Relay pairing code shown on the Agent: ");
+                relayCode = Console.ReadLine() ?? string.Empty;
+            }
+            if (!RelayPairingCode.TryNormalize(relayCode, out string code))
+            {
+                Console.Error.WriteLine($"The relay pairing code has {RelayPairingCode.Length} digits.");
+                return 2;
+            }
+            connector = new RelayPairingConnector(new RelayEndpoint(relayUrl), code);
+        }
+        else
+        {
+            (string host, int port) = LauncherCommandLine.ParseAgent(agent!);
+            connector = new TcpStreamConnector(host, port);
+        }
         using IdentityKey identity = OpenIdentity(dataDirectory);
         var client = new PairingClient(identity, store);
         Console.WriteLine($"This machine's fingerprint: {client.Fingerprint}");
         try
         {
-            PairedMachine paired = await client.PairAsync(new TcpStreamConnector(host, port), (fingerprint, _) =>
+            PairedMachine paired = await client.PairAsync(connector, (fingerprint, _) =>
             {
                 Console.WriteLine($"Agent fingerprint (compare with what the Agent shows): {fingerprint}");
                 Console.Write("Code shown on the Agent: ");
                 return Task.FromResult(Console.ReadLine() ?? string.Empty);
             }, CancellationToken.None);
             Console.WriteLine($"Paired with {paired.Name} ({paired.Fingerprint}).");
+            if (relay is not null)
+                Console.WriteLine($"Run through the relay with: --relay {relay} --agent-fingerprint {paired.Fingerprint}");
             return 0;
         }
         catch (Exception e) when (e is PairingFailedException or IOException or System.Net.Sockets.SocketException)
         {
             Console.Error.WriteLine($"Pairing failed: {e.Message}");
             return 1;
+        }
+        finally
+        {
+            (connector as IDisposable)?.Dispose();
         }
     }
 

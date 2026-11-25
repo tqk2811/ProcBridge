@@ -33,6 +33,7 @@ public sealed class MainViewModel : ObservableObject
     private string _bindAddress;
     private string _relayUrl;
     private string? _relayState;
+    private string? _relayPairingCode;
     private bool _isRunning;
     private bool _sharesChangedWhileRunning;
     private bool _pairingOpen;
@@ -111,6 +112,16 @@ public sealed class MainViewModel : ObservableObject
         private set => SetProperty(ref _relayState, value);
     }
 
+    /// <summary>
+    /// Invite code a machine A types to find this machine through the relay (pairing on, relay connected); null hides it.
+    /// The 6-digit code and the fingerprint check still come in the pairing dialog afterwards.
+    /// </summary>
+    public string? RelayPairingCode
+    {
+        get => _relayPairingCode;
+        private set => SetProperty(ref _relayPairingCode, value);
+    }
+
     public bool IsRunning
     {
         get => _isRunning;
@@ -146,6 +157,7 @@ public sealed class MainViewModel : ObservableObject
                 return;
             _host.AllowPairing = value;
             OnPropertyChanged();
+            RelayPairingCode = _host.RelayPairingCode;
         }
     }
 
@@ -259,6 +271,7 @@ public sealed class MainViewModel : ObservableObject
         IsRunning = false;
         StatusText = "Đã dừng";
         RelayState = null;
+        RelayPairingCode = null;
         Refresh();
     }
 
@@ -287,6 +300,7 @@ public sealed class MainViewModel : ObservableObject
     public void Refresh()
     {
         RelayState = _host.RelayState;
+        RelayPairingCode = _host.RelayPairingCode;
         IReadOnlyList<AgentConnectionInfo> connections = _host.GetConnections();
         DateTime now = _utcNow();
         var grouped = connections

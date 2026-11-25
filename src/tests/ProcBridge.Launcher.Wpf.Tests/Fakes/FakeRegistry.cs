@@ -36,4 +36,20 @@ internal sealed class FakeRegistry : IPairedMachineRegistry
         Machines.Add(machine);
         return machine;
     }
+
+    public Uri? LastRelayUrl { get; private set; }
+
+    public string? LastRelayCode { get; private set; }
+
+    public async Task<PairedMachine> PairThroughRelayAsync(Uri relayUrl, string relayCode, Func<string, CancellationToken, Task<string>> askCode, CancellationToken cancellationToken)
+    {
+        LastRelayUrl = relayUrl;
+        LastRelayCode = relayCode;
+        CodeReceived = await askCode(AgentFingerprint, cancellationToken);
+        if (CodeReceived != "123456")
+            throw new InvalidOperationException("code mismatch");
+        PairedMachine machine = Machine("B-relay", AgentFingerprint, $"relay {relayUrl}");
+        Machines.Add(machine);
+        return machine;
+    }
 }

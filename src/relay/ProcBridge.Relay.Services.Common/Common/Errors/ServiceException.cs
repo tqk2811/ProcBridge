@@ -20,4 +20,5 @@ public sealed class ServiceException : Exception
     public static ServiceException Forbidden(string code, string message) => new(403, code, message);
     public static ServiceException NotFound(string code, string message) => new(404, code, message);
     public static ServiceException Conflict(string code, string message) => new(409, code, message);
+    public static ServiceException TooManyRequests(string code, string message) => new(429, code, message);
 }

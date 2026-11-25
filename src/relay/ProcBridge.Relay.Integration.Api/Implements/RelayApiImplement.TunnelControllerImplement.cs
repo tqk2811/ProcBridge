@@ -14,5 +14,8 @@ public sealed partial class RelayApiImplement
 
         public Task<TunnelSessionVM> OpenSessionAsync(OpenTunnelSessionRequestVM request, CancellationToken cancellationToken = default)
             => _api.SendAsync<TunnelSessionVM>(HttpMethod.Post, $"{BaseUrl}/sessions", request, cancellationToken);
+
+        public Task<TunnelPairingSessionVM> OpenPairingSessionAsync(OpenPairingSessionRequestVM request, CancellationToken cancellationToken = default)
+            => _api.SendAsync<TunnelPairingSessionVM>(HttpMethod.Post, $"{BaseUrl}/pairing-sessions", request, cancellationToken);
     }
 }

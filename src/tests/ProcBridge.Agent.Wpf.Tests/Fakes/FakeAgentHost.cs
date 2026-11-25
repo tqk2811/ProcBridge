@@ -27,6 +27,11 @@ internal sealed class FakeAgentHost : IAgentHost
 
     public string? RelayState => StartedRelay is null || !IsRunning ? null : "relay: đã kết nối";
 
+    /// <summary>What the real host reports while running with a relay and pairing on; tests set it.</summary>
+    public string? RelayPairingCodeValue { get; set; }
+
+    public string? RelayPairingCode => StartedRelay is null || !IsRunning || !AllowPairing ? null : RelayPairingCodeValue;
+
     public Transport.Relay.Models.RelayEndpoint? StartedRelay { get; private set; }
 
     public void Start(IReadOnlyList<ShareSettings> shares, IPAddress bindAddress, int port, Transport.Relay.Models.RelayEndpoint? relay = null)

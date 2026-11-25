@@ -47,6 +47,39 @@ public sealed class RelaySettingsTests
     }
 
     [TestMethod]
+    public async Task RelayPairingCode_ShownWhilePairingIsOnThroughTheRelay()
+    {
+        string folder = NewShareFolder();
+        try
+        {
+            _settings.Settings = new AgentUiSettings { Shares = [new ShareSettings { Name = "src", Path = folder }] };
+            _host.RelayPairingCodeValue = "1234-5678";
+            MainViewModel viewModel = Create();
+            viewModel.RelayUrl = "https://relay.example/";
+            viewModel.Start();
+            Assert.IsNull(viewModel.RelayPairingCode, "Pairing off: no code.");
+
+            viewModel.AllowPairing = true;
+            Assert.AreEqual("1234-5678", viewModel.RelayPairingCode);
+
+            // The code rotates after each use or expiry: the window timer picks the new one up.
+            _host.RelayPairingCodeValue = "8765-4321";
+            viewModel.Refresh();
+            Assert.AreEqual("8765-4321", viewModel.RelayPairingCode);
+
+            viewModel.AllowPairing = false;
+            Assert.IsNull(viewModel.RelayPairingCode);
+            viewModel.AllowPairing = true;
+            await viewModel.StopAsync();
+            Assert.IsNull(viewModel.RelayPairingCode, "Stopped: no code.");
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    [TestMethod]
     public void Start_WithoutRelayUrl_ServesLanOnly()
     {
         string folder = NewShareFolder();

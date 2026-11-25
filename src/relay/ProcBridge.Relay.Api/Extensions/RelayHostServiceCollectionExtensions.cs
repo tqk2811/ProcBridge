@@ -56,6 +56,10 @@ public static class RelayHostServiceCollectionExtensions
             AddPerAddressPolicy(o, RelayRateLimitOptions.TunnelSessionPolicyName, limits.TunnelSessionPermitLimit, limits.Window);
             AddPerAddressPolicy(o, RelayRateLimitOptions.ControlPolicyName, limits.ControlPermitLimit, limits.Window);
             AddPerAddressPolicy(o, RelayRateLimitOptions.LanePolicyName, limits.LanePermitLimit, limits.Window);
+            // By network prefix, not address: one IPv6 host owns a whole /64 and could rotate addresses for free.
+            o.AddPolicy(RelayRateLimitOptions.PairingPolicyName, context => RateLimitPartition.GetFixedWindowLimiter(
+                HttpContextExtensions.AddressPrefix(context.ClientAddress()),
+                _ => new FixedWindowRateLimiterOptions { PermitLimit = limits.PairingPermitLimit, Window = limits.Window, QueueLimit = 0 }));
             o.OnRejected = async (context, cancellationToken) =>
             {
                 var response = context.HttpContext.Response;

@@ -63,7 +63,11 @@ public sealed class AgentServer : IAsyncDisposable
         }
         // The relay knows this Agent only by the HostId its identity key proves on the control channel.
         if (options.Relay is { } relay)
+        {
             _relay = new RelayHostLink(relay.Endpoint, security!.Identity, AcceptRelayLaneAsync, relay.Sockets);
+            // While pairing is allowed, machines A that only see the relay find this Agent by an invite code.
+            _relay.SetPairingSlot(security.AllowPairing);
+        }
     }
 
     /// <summary>Link to the relay (control channel state); null when <see cref="AgentOptions.Relay"/> is not set.</summary>
@@ -88,8 +92,19 @@ public sealed class AgentServer : IAsyncDisposable
             if (_secure is null)
                 throw new InvalidOperationException("Pairing needs an AgentSecurity.");
             _secure.AllowPairing = value;
+            _relay?.SetPairingSlot(value);
         }
     }
+
+    /// <summary>
+    /// Invite code machines A type to find this Agent through the relay while <see cref="AllowPairing"/> is on
+    /// (<c>1234-5678</c>); null without relay, with pairing off, or until the relay opened the slot. Changes are raised by
+    /// <see cref="RelayHostLink.PairingCodeChanged"/> of <see cref="Relay"/>.
+    /// </summary>
+    public string? RelayPairingCode => _relay?.PairingCode;
+
+    /// <summary>Why no relay pairing code can be shown (the relay keeps refusing codes); null when fine or without relay.</summary>
+    public string? RelayPairingError => _relay?.PairingError;
 
     /// <summary>Fingerprint of this Agent's identity key, or null without security.</summary>
     public string? Fingerprint => _secure?.Fingerprint;

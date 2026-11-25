@@ -56,6 +56,18 @@ public sealed class RelayProfileTests
     }
 
     [TestMethod]
+    public void OptionsFactory_MachinePairedThroughTheRelay_NeedsTheRelayOn()
+    {
+        PairedMachine relayPaired = FakeRegistry.Machine("B", "FING-ERPR-INTB", "relay https://relay.example/");
+
+        var e = Assert.ThrowsExactly<ProfileValidationException>(
+            () => new LaunchOptionsFactory(@"C:\pb").Create(Sample() with { UseRelay = false }, relayPaired));
+
+        StringAssert.Contains(e.Errors.Single(), "relay");
+        Assert.IsNotNull(new LaunchOptionsFactory(@"C:\pb").Create(Sample(), relayPaired).Relay);
+    }
+
+    [TestMethod]
     public void ProfileViewModel_RoundTripsRelayFields()
     {
         var viewModel = new ProfileViewModel(Sample(), new FakeDialogs(), _ => MachineB);

@@ -283,6 +283,15 @@ theo đường dẫn trên Agent cho commit, set-info, rename, delete.
   20 lần xanh, chạy 4 tiến trình song song 40 lần xanh. Probe mặc định chỉ đọc gốc thật (lượt ghi duy nhất ra file tạm
   ngoài gốc), nên nghi phần preload/cache thư mục của Broker chụp mtime trước khi NTFS cập nhật xong sau `CreateTree`.
   Lần đỏ sau: giữ nguyên dòng khác nhau và thời điểm tạo cây để so.
+  Đỏ lại trên CI 2026-11-26 (run 45672199926, nhánh `feature/relay-pairing`, bản Win32): dòng
+  `FindFile[sub\*]: deep attr=0x10 size=0 written=...` lệch 1,5 ms (thật `134401038844902208`, qua relay
+  `134401038844917314`): thời gian ghi của thư mục con `sub\deep` nhích lên sau lượt probe thật, khớp giả thuyết NTFS
+  cập nhật mtime thư mục muộn (vd khi file tạm trong `deep` được đóng/xoá) chứ không phải lỗi dịch đường dẫn.
+- `ConnectionPoolTests.BusyConnection_IsNotBlockedByAnotherRequestOpeningASlot`: đỏ một lần khi chạy cả bộ test
+  local (2026-11-26, nhánh `feature/relay-pairing`, không đụng tới pool): 9/10 request xong đúng mốc 2000 ms thay vì
+  dưới 2000 ms, tức các request xếp hàng trên một kết nối 300 ms/lượt chạm sát ngưỡng khi máy đang tải nặng. Chạy riêng
+  3 lần đều xanh. Ngưỡng 2000 ms quá sát (10 request × 300 ms chia trên một kết nối sống); nên đo theo số request phải
+  chờ kết nối chậm thay vì theo thời gian tuyệt đối.
 
 ## [Thấp] Review độc lập cho M2
 
@@ -455,11 +464,17 @@ Cố ý làm gọn ở M6, nên bù khi relay lớn lên:
 
 Ghi 2026-11-25 (M6).
 
-## [Vừa] Relay: ghép cặp vẫn phải làm trong LAN
+## [Thấp] Ghép cặp qua relay: phần còn thiếu
 
-Agent và Launcher đi qua relay chỉ cần URL relay và máy đã ghép cặp (HostId = vân tay), nhưng ghép cặp vẫn chỉ chạy
-trong LAN (`--pair --agent host`). Nên có ghép cặp qua relay: relay chuyển bắt tay XX của ghép cặp theo HostId, người
-dùng so mã SAS như ở LAN. Ghi 2026-11-25, sửa 2026-11-26 (bỏ tài khoản relay).
+Ghép cặp qua relay bằng mã mời đã chạy (Plan 9, "Ghép cặp qua relay"). Còn lại:
+
+- Hồ sơ chạy của app WPF Launcher không tự điền URL relay và bật "Kết nối qua relay" cho máy ghép cặp qua relay
+  (địa chỉ lưu dạng `relay <url>`); hiện chỉ báo lỗi để người dùng tự bật.
+- Chưa chạy thử giao diện thật (UIA) của ô mã mời ở hai app WPF, chỉ test tầng ViewModel; chưa thử với relay thật trên
+  internet.
+- Mã mời đổi sau mỗi lần dùng và mỗi 5 phút; app WPF của Agent chỉ thấy mã mới ở lượt làm mới định kỳ của cửa sổ.
+
+Ghi 2026-11-26.
 
 ## [Thấp] Relay: HostId lộ máy B đang online
 

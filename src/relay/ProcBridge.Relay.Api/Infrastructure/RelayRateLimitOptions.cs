@@ -18,7 +18,13 @@ public sealed class RelayRateLimitOptions
     /// <summary>Policy on <c>GET /tunnel</c> (lanes).</summary>
     public const string LanePolicyName = "relay-tunnel-lanes";
 
+    /// <summary>Policy on <c>POST api/tunnel/pairing-sessions</c> (lookup of a pairing slot by invite code).</summary>
+    public const string PairingPolicyName = "relay-tunnel-pairing";
+
     public int TunnelSessionPermitLimit { get; set; } = 60;
+
+    /// <summary>Pairing lookups per window: low, because each one is a guess at an 8-digit invite code.</summary>
+    public int PairingPermitLimit { get; set; } = 10;
 
     public int ControlPermitLimit { get; set; } = 20;
 
