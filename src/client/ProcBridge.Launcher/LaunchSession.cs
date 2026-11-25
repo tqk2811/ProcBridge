@@ -52,7 +52,7 @@ public sealed class LaunchSession
         if (!File.Exists(_options.SpawnPath))
             throw new FileNotFoundException("ProcBridge.Spawn not found.", _options.SpawnPath);
 
-        await using BrokerHost broker = BrokerHost.Start(new BrokerOptions
+        BrokerHost broker = BrokerHost.Start(new BrokerOptions
         {
             SessionId = SessionId,
             AgentHost = _options.AgentHost,
@@ -65,6 +65,33 @@ public sealed class LaunchSession
             WriteThrough = _options.WriteThrough,
             ConflictPolicy = _options.ConflictPolicy,
         });
+        try
+        {
+            return await RunSpawnAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            // The last write-backs run while the Broker stops, so conflicts are complete only after that.
+            await broker.DisposeAsync().ConfigureAwait(false);
+            ReportConflicts(broker.WriteBack.Conflicts);
+        }
+    }
+
+    /// <summary>Warns about files machine B changed meanwhile: machine A's version was kept beside it (or overwrote it).</summary>
+    private void ReportConflicts(IReadOnlyList<WriteConflict> conflicts)
+    {
+        foreach (WriteConflict conflict in conflicts)
+        {
+            string line = $"ProcBridge: conflict on '{conflict.RemotePath}': machine B changed it meanwhile; this machine's version was saved as '{conflict.ConflictPath}'.";
+            if (_outputLine is not null)
+                _outputLine(line);
+            else
+                Console.Error.WriteLine(line);
+        }
+    }
+
+    private async Task<int> RunSpawnAsync(CancellationToken cancellationToken)
+    {
 
         // Spawn passes everything after "--" to CreateProcess untouched.
         var startInfo = new ProcessStartInfo(_options.SpawnPath, $"--broker {SessionId} {Environment.ProcessId} -- {_options.CommandLine}")

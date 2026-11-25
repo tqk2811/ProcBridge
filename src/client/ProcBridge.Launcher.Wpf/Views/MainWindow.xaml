@@ -189,12 +189,16 @@
                             <TextBox Grid.Row="8" Grid.Column="1" Text="{Binding WorkingDirectory, UpdateSourceTrigger=PropertyChanged}" />
                             <Button Grid.Row="8" Grid.Column="2" Content="…" Command="{Binding PickWorkingDirectoryCommand}" Margin="6,3,0,3" />
 
-                            <StackPanel Grid.Row="9" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,4">
+                            <WrapPanel Grid.Row="9" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,4">
                                 <TextBlock Text="Kiến trúc" Margin="0,0,6,0" />
                                 <ComboBox ItemsSource="{x:Static vm:ProfileViewModel.Architectures}" SelectedItem="{Binding Architecture}" Width="70" />
                                 <CheckBox Content="Tắt build server (MSBuild/Roslyn) trong lần chạy" IsChecked="{Binding DisableBuildServers}"
                                           VerticalAlignment="Center" Margin="16,0,0,0" />
-                            </StackPanel>
+                                <CheckBox Content="Ghi xuyên (gửi từng lần ghi sang máy B ngay)" IsChecked="{Binding WriteThrough}"
+                                          VerticalAlignment="Center" Margin="16,0,0,0" />
+                                <CheckBox Content="Xung đột: máy này ghi đè (mặc định giữ cả hai bản)" IsChecked="{Binding OverwriteOnConflict}"
+                                          VerticalAlignment="Center" Margin="16,0,0,0" />
+                            </WrapPanel>
                         </Grid>
                     </ScrollViewer>
 

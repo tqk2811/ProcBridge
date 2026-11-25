@@ -271,13 +271,6 @@ không bị huỷ khi `BrokerHost` dừng.
 App WPF của Agent (`ProcBridge.Agent.Wpf`) đã liệt kê máy đã ghép cặp (vân tay, tên, lần cuối) và thu hồi; còn thiếu đổi
 tên máy (`PairedMachineStore` chưa có API đổi tên) và màn hình tương tự phía Launcher (máy A).
 
-## [Vừa] Cờ "Cho ghi" của thư mục chia sẻ chưa nối vào Agent
-
-- App WPF lưu `ShareSettings.AllowWrite` cho từng chia sẻ nhưng `AgentHost` vẫn dựng `ReadOnlyShare`: Agent chưa có
-  đường ghi phía máy chủ (M3). Khi M3 có share ghi được thì truyền cờ này vào, mặc định tắt; Agent console cũng cần
-  cú pháp tương ứng (vd `--share name=path;write`).
-- Ghi 2026-11-25.
-
 ## [Thấp] App WPF của Agent: phần còn thiếu
 
 - Chưa có icon riêng (khay hệ thống dùng icon mặc định), chưa tách chuỗi giao diện ra tài nguyên i18n.

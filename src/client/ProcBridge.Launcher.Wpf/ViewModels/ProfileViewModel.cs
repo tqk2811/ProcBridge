@@ -22,6 +22,8 @@ public sealed class ProfileViewModel : ObservableObject
     private string _arguments;
     private string _workingDirectory;
     private bool _disableBuildServers;
+    private bool _writeThrough;
+    private bool _overwriteOnConflict;
     private string _architecture;
     private FolderMappingViewModel? _selectedMapping;
 
@@ -37,6 +39,8 @@ public sealed class ProfileViewModel : ObservableObject
         _arguments = profile.Arguments;
         _workingDirectory = profile.WorkingDirectory;
         _disableBuildServers = profile.DisableBuildServers;
+        _writeThrough = profile.WriteThrough;
+        _overwriteOnConflict = profile.OverwriteOnConflict;
         _architecture = profile.Architecture;
         foreach (FolderMapping mapping in profile.Mappings)
             Mappings.Add(new FolderMappingViewModel(mapping));
@@ -113,6 +117,18 @@ public sealed class ProfileViewModel : ObservableObject
         set => SetProperty(ref _disableBuildServers, value);
     }
 
+    public bool WriteThrough
+    {
+        get => _writeThrough;
+        set => SetProperty(ref _writeThrough, value);
+    }
+
+    public bool OverwriteOnConflict
+    {
+        get => _overwriteOnConflict;
+        set => SetProperty(ref _overwriteOnConflict, value);
+    }
+
     public string Architecture
     {
         get => _architecture;
@@ -138,6 +154,8 @@ public sealed class ProfileViewModel : ObservableObject
         Arguments = Arguments.Trim(),
         WorkingDirectory = WorkingDirectory.Trim(),
         DisableBuildServers = DisableBuildServers,
+        WriteThrough = WriteThrough,
+        OverwriteOnConflict = OverwriteOnConflict,
         Architecture = Architecture,
     };
 

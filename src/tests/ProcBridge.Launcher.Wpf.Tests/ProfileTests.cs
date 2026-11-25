@@ -4,6 +4,7 @@ using ProcBridge.Launcher.Wpf.Models;
 using ProcBridge.Launcher.Wpf.Services;
 using ProcBridge.Launcher.Wpf.Tests.Fakes;
 using ProcBridge.Launcher.Wpf.ViewModels;
+using ProcBridge.Protocol.Enums;
 using ProcBridge.Transport.Secure.Models;
 
 namespace ProcBridge.Launcher.Wpf.Tests;
@@ -25,6 +26,8 @@ public sealed class ProfileTests
         Arguments = "build \"My App.sln\"",
         WorkingDirectory = @"C:\Work",
         DisableBuildServers = true,
+        WriteThrough = true,
+        OverwriteOnConflict = true,
         Architecture = "x86",
     };
 
@@ -121,7 +124,18 @@ public sealed class ProfileTests
         Assert.AreEqual("\"C:\\Program Files\\dotnet\\dotnet.exe\" build \"My App.sln\"", options.CommandLine);
         Assert.AreEqual(@"C:\Work", options.WorkingDirectory);
         Assert.IsTrue(options.DisableBuildServers);
+        Assert.IsTrue(options.WriteThrough);
+        Assert.AreEqual(ConflictPolicy.Overwrite, options.ConflictPolicy);
         Assert.IsNull(options.Security);
+    }
+
+    [TestMethod]
+    public void OptionsFactory_DefaultsToWriteBackOnCloseAndKeepingBothVersions()
+    {
+        LauncherOptions options = new LaunchOptionsFactory(@"C:\pb").Create(Sample() with { WriteThrough = false, OverwriteOnConflict = false }, MachineB);
+
+        Assert.IsFalse(options.WriteThrough);
+        Assert.AreEqual(ConflictPolicy.KeepBoth, options.ConflictPolicy);
     }
 
     [TestMethod]

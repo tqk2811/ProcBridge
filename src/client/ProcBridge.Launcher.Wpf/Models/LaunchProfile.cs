@@ -30,6 +30,12 @@ public sealed record LaunchProfile
     /// <summary><c>--no-build-servers</c>.</summary>
     public bool DisableBuildServers { get; init; } = true;
 
+    /// <summary><c>--write-through</c>: every write goes to machine B at once instead of at close or flush.</summary>
+    public bool WriteThrough { get; init; }
+
+    /// <summary><c>--conflict overwrite</c>: when machine B changed a file meanwhile, this machine wins; otherwise both are kept.</summary>
+    public bool OverwriteOnConflict { get; init; }
+
     /// <summary>x64 or x86: which ProcBridge.Spawn starts the target.</summary>
     public string Architecture { get; init; } = "x64";
 }

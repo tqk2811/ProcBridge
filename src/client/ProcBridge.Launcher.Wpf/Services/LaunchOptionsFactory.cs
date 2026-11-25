@@ -2,6 +2,7 @@ using ProcBridge.Broker.Models;
 using ProcBridge.Launcher.Models;
 using ProcBridge.Launcher.Wpf.Helpers;
 using ProcBridge.Launcher.Wpf.Models;
+using ProcBridge.Protocol.Enums;
 using ProcBridge.Transport.Secure.Models;
 
 namespace ProcBridge.Launcher.Wpf.Services;
@@ -71,6 +72,8 @@ public sealed class LaunchOptionsFactory
             Mappings = mappings,
             SpawnPath = Path.Combine(_spawnDirectory, $"ProcBridge.Spawn.{profile.Architecture}.exe"),
             DisableBuildServers = profile.DisableBuildServers,
+            WriteThrough = profile.WriteThrough,
+            ConflictPolicy = profile.OverwriteOnConflict ? ConflictPolicy.Overwrite : ConflictPolicy.KeepBoth,
             WorkingDirectory = string.IsNullOrWhiteSpace(profile.WorkingDirectory) ? null : profile.WorkingDirectory.Trim(),
             CommandLine = commandLine,
         };

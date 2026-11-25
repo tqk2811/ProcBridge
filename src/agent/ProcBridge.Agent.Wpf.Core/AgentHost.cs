@@ -51,8 +51,8 @@ public sealed class AgentHost : IAgentHost
     {
         if (_server is not null)
             throw new InvalidOperationException("The Agent is already running.");
-        // Write is not served yet (M3): ShareSettings.AllowWrite is only saved.
-        var readOnlyShares = shares.Select(x => new AgentShare(x.Name, x.Path)).ToList();
+        // "Cho ghi" (AllowWrite) makes the share writable, like --write-share of the console Agent.
+        var agentShares = shares.Select(x => new AgentShare(x.Name, x.Path, x.AllowWrite)).ToList();
         var security = new AgentSecurity
         {
             Identity = _identity,
@@ -60,7 +60,7 @@ public sealed class AgentHost : IAgentHost
             ExplorerPolicies = _explorerPolicies,
             AllowPairing = _allowPairing,
         };
-        var server = new AgentServer(readOnlyShares, new AgentOptions { BindAddress = bindAddress, Port = port }, security);
+        var server = new AgentServer(agentShares, new AgentOptions { BindAddress = bindAddress, Port = port }, security);
         server.PairingRequested += OnPairingRequested;
         try
         {
