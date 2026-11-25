@@ -7,6 +7,7 @@ using ProcBridge.HookIpc;
 using ProcBridge.HookIpc.Enums;
 using ProcBridge.HookIpc.Models;
 using ProcBridge.Protocol.Enums;
+using ProcBridge.Protocol.Models;
 using ProcBridge.Tests.Secure;
 
 namespace ProcBridge.Tests.Lan;
@@ -443,5 +444,120 @@ public sealed class BrokerWriteBackTests
         WriteConflict[] conflicts = s.Broker.WriteBack.Conflicts.ToArray();
         Assert.HasCount(2, conflicts);
         Assert.AreEqual("A final version", File.ReadAllText(s.Share.Combine(conflicts[^1].ConflictPath)));
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition, string message)
+    {
+        for (int i = 0; i < 200 && !condition(); i++)
+            await Task.Delay(50);
+        Assert.IsTrue(condition(), message);
+    }
+
+    /// <summary>Completes when the cache applied a change notification that names <paramref name="path"/>.</summary>
+    private static Task WaitForNotificationAsync(FileCache cache, string path)
+    {
+        var seen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        void OnChanged(FsChangeNotification notification)
+        {
+            if (notification.Changes.Any(x => x.Path.Equals(path, StringComparison.OrdinalIgnoreCase)))
+            {
+                cache.RemoteChanged -= OnChanged;
+                seen.TrySetResult();
+            }
+        }
+        cache.RemoteChanged += OnChanged;
+        return seen.Task.WaitAsync(TimeSpan.FromSeconds(15));
+    }
+
+    [TestMethod]
+    public async Task WriteFromOneMachineA_IsSeenByAnotherThroughTheWatch()
+    {
+        await using Session s = await Session.StartAsync();
+        s.Share.WriteFile("a.txt", "base"u8.ToArray());
+        using var otherWork = new TempFolder("wwork2");
+        (BrokerHost other, FakeHook otherHook) = await Session.StartBrokerAsync(s.Peers, otherWork, s.Agent.Port);
+        try
+        {
+            await WaitUntilAsync(() => s.Broker.Cache.IsWatchActive && other.Cache.IsWatchActive, "both Brokers watch the share");
+            var read = new HookResolveRequest { MappingIndex = 0, RelativePath = "a.txt", DesiredAccess = GenericRead, CreateDisposition = 1 };
+            Assert.AreEqual("base", File.ReadAllText((await otherHook.CallOkAsync(read, HookResolveReply.Read)).CachePath));
+
+            HookResolveReply open = await s.ResolveAsync("a.txt", GenericRead | GenericWrite, 1);
+            File.WriteAllText(open.CachePath, "written by the first machine A");
+            await s.CloseAsync(open.WriteToken);
+
+            // The other Broker trusts its watched metadata for minutes: only the notification makes it see the new version.
+            string seen = "";
+            for (int i = 0; i < 200 && seen != "written by the first machine A"; i++)
+            {
+                seen = File.ReadAllText((await otherHook.CallOkAsync(read, HookResolveReply.Read)).CachePath);
+                if (seen != "written by the first machine A")
+                    await Task.Delay(50);
+            }
+            Assert.AreEqual("written by the first machine A", seen);
+        }
+        finally
+        {
+            await otherHook.DisposeAsync();
+            await other.DisposeAsync();
+        }
+    }
+
+    [TestMethod]
+    public async Task OwnWriteBackNotification_DoesNotReloadTheDirtyCopy()
+    {
+        await using Session s = await Session.StartAsync();
+        string remote = s.Share.WriteFile("a.txt", "base"u8.ToArray());
+        s.Share.WriteFile("b.txt", "sibling"u8.ToArray());
+        await WaitUntilAsync(() => s.Broker.Cache.IsWatchActive, "the Broker watches the share");
+
+        HookResolveReply open = await s.ResolveAsync("a.txt", GenericRead | GenericWrite, 1);
+        await s.Broker.Cache.WaitForReadAheadAsync();
+        Task notified = WaitForNotificationAsync(s.Broker.Cache, "a.txt");
+        File.WriteAllText(open.CachePath, "v1");
+        await s.FlushAsync(open.WriteToken);
+        Assert.AreEqual("v1", File.ReadAllText(remote));
+        await notified;
+
+        // Still open, changed again: machine B has v1, the cache copy is dirty. The notification of our own flush cleared
+        // the directory's read-ahead mark, so opening the sibling reads the directory ahead again, a.txt included.
+        File.WriteAllText(open.CachePath, "v1 then v2");
+        await s.ResolveAsync("b.txt", GenericRead, 1);
+        await s.Broker.Cache.WaitForReadAheadAsync();
+        Assert.AreEqual("v1 then v2", File.ReadAllText(open.CachePath), "read-ahead must not download over a dirty copy");
+        HookResolveReply reader = await s.ResolveAsync("a.txt", GenericRead, 1);
+        Assert.AreEqual("v1 then v2", File.ReadAllText(reader.CachePath));
+
+        await s.CloseAsync(open.WriteToken);
+        Assert.AreEqual("v1 then v2", File.ReadAllText(remote));
+        Assert.IsEmpty(s.Broker.WriteBack.Conflicts);
+    }
+
+    [TestMethod]
+    public async Task ChangeOnMachineBWhileDirty_InvalidatesButKeepsTheCopy_UntilTheConflictIsDecided()
+    {
+        await using Session s = await Session.StartAsync();
+        string remote = s.Share.WriteFile("a.txt", "base"u8.ToArray());
+        s.Share.WriteFile("b.txt", "sibling"u8.ToArray());
+        await WaitUntilAsync(() => s.Broker.Cache.IsWatchActive, "the Broker watches the share");
+
+        HookResolveReply open = await s.ResolveAsync("a.txt", GenericRead | GenericWrite, 1);
+        await s.Broker.Cache.WaitForReadAheadAsync();
+        File.WriteAllText(open.CachePath, "edited on machine A");
+        Task notified = WaitForNotificationAsync(s.Broker.Cache, "a.txt");
+        File.WriteAllText(remote, "edited on machine B, longer");
+        await notified;
+
+        // Metadata follows machine B at once; the dirty copy stays until close.
+        HookStatReply stat = await s.Hook.CallOkAsync(new HookStatRequest { MappingIndex = 0, RelativePath = "a.txt" }, HookStatReply.Read);
+        Assert.AreEqual((long)"edited on machine B, longer".Length, stat.Info.Size);
+        await s.ResolveAsync("b.txt", GenericRead, 1);
+        await s.Broker.Cache.WaitForReadAheadAsync();
+        Assert.AreEqual("edited on machine A", File.ReadAllText(open.CachePath));
+
+        await s.CloseAsync(open.WriteToken);
+        Assert.AreEqual("edited on machine B, longer", File.ReadAllText(remote));
+        WriteConflict conflict = s.Broker.WriteBack.Conflicts.Single();
+        Assert.AreEqual("edited on machine A", File.ReadAllText(s.Share.Combine(conflict.ConflictPath)));
     }
 }
