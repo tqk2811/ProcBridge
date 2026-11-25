@@ -3,6 +3,7 @@ using ProcBridge.Agent.Models;
 using ProcBridge.Agent.Wpf.Core.Interfaces;
 using ProcBridge.Agent.Wpf.Core.Models;
 using ProcBridge.Crypto.Identity;
+using ProcBridge.Transport.Relay.Models;
 using ProcBridge.Transport.Secure;
 
 namespace ProcBridge.Agent.Wpf.Core;
@@ -47,7 +48,15 @@ public sealed class AgentHost : IAgentHost
         }
     }
 
-    public void Start(IReadOnlyList<ShareSettings> shares, IPAddress bindAddress, int port)
+    public string? RelayState => _server?.Relay switch
+    {
+        null => null,
+        { IsConnected: true } => "relay: đã kết nối",
+        { LastError: { } error } => $"relay: mất kết nối ({error}), đang thử lại",
+        _ => "relay: đang kết nối",
+    };
+
+    public void Start(IReadOnlyList<ShareSettings> shares, IPAddress bindAddress, int port, RelayEndpoint? relay = null)
     {
         if (_server is not null)
             throw new InvalidOperationException("The Agent is already running.");
@@ -60,7 +69,12 @@ public sealed class AgentHost : IAgentHost
             ExplorerPolicies = _explorerPolicies,
             AllowPairing = _allowPairing,
         };
-        var server = new AgentServer(agentShares, new AgentOptions { BindAddress = bindAddress, Port = port }, security);
+        var server = new AgentServer(agentShares, new AgentOptions
+        {
+            BindAddress = bindAddress,
+            Port = port,
+            Relay = relay is null ? null : new AgentRelayOptions { Endpoint = relay },
+        }, security);
         server.PairingRequested += OnPairingRequested;
         try
         {

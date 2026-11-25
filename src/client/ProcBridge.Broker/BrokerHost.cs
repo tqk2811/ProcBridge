@@ -5,7 +5,9 @@ using ProcBridge.HookIpc;
 using ProcBridge.Protocol;
 using ProcBridge.Protocol.Interfaces;
 using ProcBridge.Protocol.Transport;
+using ProcBridge.Transport.Relay;
 using ProcBridge.Transport.Secure;
+using ProcBridge.Transport.Secure.Interfaces;
 
 namespace ProcBridge.Broker;
 
@@ -89,14 +91,20 @@ public sealed class BrokerHost : IAsyncDisposable
     }
 
     /// <summary>Encrypted factory when <see cref="BrokerOptions.Security"/> is set; plain only when explicitly allowed.</summary>
-    /// <exception cref="ArgumentException">No security and plain transport not allowed.</exception>
+    /// <exception cref="ArgumentException">No security and plain transport not allowed, or a relay without security.</exception>
     public static IConnectionFactory CreateConnectionFactory(BrokerOptions options)
     {
         if (options.Security is { } security)
         {
-            return new SecureConnectionFactory(new TcpStreamConnector(options.AgentHost, options.AgentPort), security.Identity,
+            // Through a relay each pool connection is one lane; the Noise handshake runs inside it (relay sees ciphertext).
+            IStreamConnector connector = options.Relay is { } relay
+                ? new RelayStreamConnector(relay.Endpoint, relay.ShareId, relay.Sockets, relay.Http)
+                : new TcpStreamConnector(options.AgentHost, options.AgentPort);
+            return new SecureConnectionFactory(connector, security.Identity,
                 security.PairedMachines, security.AgentPublicKey, options.Transport);
         }
+        if (options.Relay is not null)
+            throw new ArgumentException("A relay needs BrokerSecurity (paired Agent): the tunnel is always end-to-end encrypted.", nameof(options));
         if (!options.AllowPlaintextTransport)
             throw new ArgumentException("The Broker needs BrokerSecurity (paired Agent); plain transport is for development only.", nameof(options));
         return new TcpConnectionFactory(options.AgentHost, options.AgentPort, options.Transport);

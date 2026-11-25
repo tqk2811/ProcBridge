@@ -17,6 +17,9 @@
     <ProjectReference Include="..\..\shared\ProcBridge.Crypto\ProcBridge.Crypto.csproj" />
     <ProjectReference Include="..\..\agent\ProcBridge.Agent.Explorer\ProcBridge.Agent.Explorer.csproj" />
     <ProjectReference Include="..\..\client\ProcBridge.Explorer.Client\ProcBridge.Explorer.Client.csproj" />
+    <ProjectReference Include="..\..\shared\ProcBridge.Transport.Relay\ProcBridge.Transport.Relay.csproj" />
+    <!-- In-process relay host for the Agent/Broker-through-relay tests (M6). -->
+    <ProjectReference Include="..\..\relay\tests\ProcBridge.Relay.Testing\ProcBridge.Relay.Testing.csproj" />
   </ItemGroup>
   <ItemGroup>
     <None Update="Crypto/Vectors/*.json" CopyToOutputDirectory="PreserveNewest" />

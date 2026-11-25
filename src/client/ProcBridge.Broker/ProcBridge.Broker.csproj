@@ -7,6 +7,7 @@
     <ProjectReference Include="..\..\shared\ProcBridge.HookIpc\ProcBridge.HookIpc.csproj" />
     <ProjectReference Include="..\..\shared\ProcBridge.Crypto\ProcBridge.Crypto.csproj" />
     <ProjectReference Include="..\..\shared\ProcBridge.Transport.Secure\ProcBridge.Transport.Secure.csproj" />
+    <ProjectReference Include="..\..\shared\ProcBridge.Transport.Relay\ProcBridge.Transport.Relay.csproj" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="ProcBridge.Tests" />

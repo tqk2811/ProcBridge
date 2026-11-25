@@ -25,9 +25,14 @@ internal sealed class FakeAgentHost : IAgentHost
 
     public void RaisePairing(IPairingPrompt prompt) => PairingRequested?.Invoke(prompt);
 
-    public void Start(IReadOnlyList<ShareSettings> shares, IPAddress bindAddress, int port)
+    public string? RelayState => StartedRelay is null || !IsRunning ? null : "relay: đã kết nối";
+
+    public Transport.Relay.Models.RelayEndpoint? StartedRelay { get; private set; }
+
+    public void Start(IReadOnlyList<ShareSettings> shares, IPAddress bindAddress, int port, Transport.Relay.Models.RelayEndpoint? relay = null)
     {
         StartCalls++;
+        StartedRelay = relay;
         StartedShares = shares;
         Port = port;
         IsRunning = true;

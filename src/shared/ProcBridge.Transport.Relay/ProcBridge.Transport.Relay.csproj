@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Relay tunnel (plan 8.2, M6) under the encrypted transport: lanes are WebSockets through the relay, and the Noise
+       handshake of ProcBridge.Transport.Secure runs inside each lane, so the relay only carries ciphertext. -->
+  <PropertyGroup>
+    <RootNamespace>ProcBridge.Transport.Relay</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ProcBridge.Transport.Secure\ProcBridge.Transport.Secure.csproj" />
+    <ProjectReference Include="..\..\relay\ProcBridge.Relay.Integration.Api\ProcBridge.Relay.Integration.Api.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="ProcBridge.Tests" />
+  </ItemGroup>
+</Project>
