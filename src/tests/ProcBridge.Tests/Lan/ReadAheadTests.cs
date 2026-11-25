@@ -90,9 +90,11 @@ public sealed class ReadAheadTests
     }
 
     [TestMethod]
-    public void DefaultReadAheadParallelism_LeavesMostOfThePoolToForegroundRequests()
+    public void DefaultReadAheadParallelism_KeepsSeveralSmallFilesInFlight()
     {
-        Assert.AreEqual(2, new FileCacheOptions().ReadAheadParallelism);
+        // Requests share the connections (multiplexed streams), so the cap only bounds bytes in flight: 8 x 64 KB at most.
+        // Measured over a 40 ms / 50 Mbit and a 100 ms / 10 Mbit link, 8 opens a source tree 2.7x faster than 2 (Plan 13.7).
+        Assert.AreEqual(8, new FileCacheOptions().ReadAheadParallelism);
     }
 
     [TestMethod]

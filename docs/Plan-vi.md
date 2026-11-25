@@ -714,6 +714,44 @@ Làm song song với M2, chưa có Broker: cấu hình là `PROCBRIDGE_MAP` cụ
   (máy không cài), SQLite (chưa có gói `Microsoft.Data.Sqlite`), debug bằng VS/VS Code, chạy exe nằm trong thư mục ảo
   (xem Backlog).
 
+### 13.7 Số đo với độ trễ mạng giả lập (2026-11-26)
+
+`src/tools/ProcBridge.Bench` gửi request Hook IPC thẳng vào `HookRequestHandler` của một Broker mới (cache rỗng) cho
+mỗi ca; giữa Broker và Agent là `LatencyProxy`: proxy TCP trên loopback, mỗi khối byte tới đầu kia sau nửa RTT, mỗi
+chiều một băng thông dùng chung cho mọi kết nối. Chạy:
+`dotnet run --project src/tools/ProcBridge.Bench -c Release -- [--profile loopback|lan|wan|far|all] [--rtt ms --mbps n]`.
+Cây thử: 20 thư mục × 25 file 4 KB (500 file), một file 32 MB (tải theo vùng vì bench đặt `RangeThreshold` 16 MB).
+Máy dev, một lượt, sau các sửa bên dưới:
+
+| Ca | loopback | lan (1 ms, 1 Gbit/s) | wan (40 ms, 50 Mbit/s) | far (100 ms, 10 Mbit/s) |
+|---|---|---|---|---|
+| Liệt kê 23 thư mục, không preload | 77 ms | 40 ms | 990 ms | 2 449 ms |
+| Preload cây (`FsTree`) + liệt kê | 28 ms | 12 ms | 177 ms | 433 ms |
+| Mở 500 file nhỏ, không read-ahead | 1 243 ms | 1 832 ms | 21 655 ms | 52 743 ms |
+| Mở 500 file nhỏ, read-ahead ×2 (mặc định cũ) | 351 ms | 692 ms | 7 960 ms | 19 255 ms |
+| Mở 500 file nhỏ, read-ahead ×8 (mặc định mới) | 304 ms | 443 ms | 2 926 ms | 7 155 ms |
+| Đọc trọn file 32 MB | 96 ms | 279 ms | 5 453 ms | 27 050 ms |
+| 16 lần đọc 64 KB rải rác trên file 32 MB | 36 ms | 78 ms | 1 400 ms | 5 189 ms |
+| Mở ghi + sửa + đóng 20 file nhỏ | 166 ms | 219 ms | 3 455 ms | 8 413 ms |
+| Tạo + ghi ngược file 8 MB | 69 ms | 170 ms | 1 604 ms | 7 252 ms |
+
+Nhận xét:
+- Mọi thao tác trên một file đi tuần tự là 1 RTT mỗi request: mở file nhỏ chưa có trong cache tốn đúng 1 RTT
+  (`FsRead`, stat đã có nhờ preload); không có read-ahead thì cây 500 file qua WAN mất 21 s. Preload cây bằng một walk
+  `FsTree` thay cho 23 lần `FsList` (2,4 s → 0,4 s ở far).
+- **Nút cổ chai đã sửa 1 — read-ahead chỉ 2 tải song song**: request dồn kênh trên cùng kết nối nên giới hạn này chỉ
+  chặn số byte đang bay, nhưng ở độ trễ cao nó biến read-ahead thành 2 file/RTT. Nâng mặc định lên 8: mở cây nhanh
+  2,7 lần ở wan và far (×8 file 64 KB = tối đa 512 KB xếp trước request tiền cảnh trên đường 10 Mbit/s, khoảng 0,4 s).
+- **Nút cổ chai đã sửa 2 — stat hai lần khi mở ghi**: mở có quyền ghi stat lại máy B rồi `EnsureAsync` stat thêm lần nữa
+  khi một thay đổi ở nơi khác (vd ghi ngược file trước) bump epoch và giữ kết quả stat đầu khỏi cache. Giờ `EnsureAsync`
+  nhận luôn stat vừa lấy: mở ghi từ 3 xuống 2 RTT (wan 124 → 86 ms/file, far 307 → 211 ms/file; 99 → 80 request cho 20
+  file). Test `OpenForWrite_ChangeElsewhereDuringStat_AsksMachineBOnlyOnce`.
+- File lớn chạy đủ băng thông (32 MB ở 50 Mbit/s ≈ 5,4 s). Đọc rải rác: mỗi lần 1 RTT cộng một khối 256 KB (ở 10 Mbit/s
+  khối 256 KB tốn ~0,2 s, gấp đôi RTT: khối nhỏ hơn cho kiểu đọc này vẫn là việc của Backlog).
+- Ghi ngược file nhỏ còn 2 RTT (`FsWrite` + `FsCommit`), mở ghi 2 RTT (stat + `FsRead`); gộp được, ghi ở Backlog.
+- Ở loopback vẫn ~2,5 ms mỗi file nhỏ và ~6 ms mỗi lần đóng ghi: chi phí đĩa (file tạm, đổi tên, hàng đợi ghi), chưa
+  đáng tối ưu so với RTT thật.
+
 ---
 
 ## 14. Duyệt tài nguyên máy B (Remote Explorer)
