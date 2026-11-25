@@ -452,7 +452,11 @@ Lộ trình: duyệt file và ổ đĩa đi kèm M2 và M3; process, registry, s
 Câu hỏi mở đã chốt với user (2026-11-25):
 
 1. Truyền dữ liệu: chạy song song, chia nhiều kết nối càng tốt (nhiều TCP/WebSocket cho một phiên,
-   khối dữ liệu lớn chia ra nhiều kết nối). Định dạng tuần tự hoá (MessagePack/protobuf) vẫn chốt ở M2.
+   khối dữ liệu lớn chia ra nhiều kết nối). Tuần tự hoá: **MessagePack** (MessagePack-CSharp, source
+   generator, không reflection) cho message điều khiển; dữ liệu file đi dạng khung nhị phân thô (header
+   MessagePack + payload byte nguyên, không bọc lại) để không tốn copy. Lý do: độ trễ (de)serialize thấp
+   nhất trong .NET, gói nhỏ, không cần file `.proto`; độ tin cậy dựa vào framing có độ dài + mã hoá
+   AEAD (phát hiện hỏng/giả mạo), không phụ thuộc định dạng.
 2. Mã ghép cặp hiển thị trên giao diện WPF (C#) của Agent máy B.
 3. Relay ở M6 chỉ REST + CLI, không có giao diện web.
 4. Agent là app người dùng, không phải Windows Service; cần quyền cao thì user mở Agent bằng quyền
