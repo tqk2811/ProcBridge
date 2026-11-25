@@ -77,6 +77,7 @@ public sealed class BrokerHost : IAsyncDisposable
 
         var writeBack = new WriteBackQueue(client, cache, options.GetWriteQueueRoot(), options.GetWriteTarget(), options.ConflictPolicy, options.WriteRetryDelay);
         var holds = new RemoteHolds(client, options.HoldShareMode, options.LockWait);
+        writeBack.HoldIdLookup = holds.GetHoldId;
         var handler = new HookRequestHandler(cache, options.Mappings, writeBack, options.WriteThrough, holds);
         var pipe = new HookIpcServer(HookIpcProtocol.GetPipeName(options.SessionId), handler);
         pipe.Start();

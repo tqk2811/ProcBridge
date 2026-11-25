@@ -19,4 +19,10 @@ public sealed class FsCommitRequest
     /// <summary>Last write time to give the file (FILETIME UTC), null for the time of the commit.</summary>
     [Key(4)] public long? LastWriteTime { get; init; }
     [Key(5)] public ConflictPolicy Policy { get; init; }
+    /// <summary>
+    /// Held handle (<see cref="FsOpenHandleRequest"/>, M8) of the writer whose content this is, 0 when unknown: a commit
+    /// of a held file writes through it, in place. Handle ids are unique in the share, so the hold may live on another
+    /// connection.
+    /// </summary>
+    [Key(6)] public ulong HoldId { get; init; }
 }

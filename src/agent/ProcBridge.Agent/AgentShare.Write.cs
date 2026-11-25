@@ -32,6 +32,13 @@ public sealed partial class AgentShare
     private readonly Queue<(string UploadId, string Path, string? ConflictPath, FsVersion Version)> _commits = new();
     private const int RememberedCommits = 256;
 
+    /// <summary>
+    /// Uploads (id and target) that started writing in place through a held handle and did not finish (M8): the target
+    /// is half written, so a repeated commit writes it whole again instead of seeing a changed version (a conflict).
+    /// Under <see cref="_writeLock"/>.
+    /// </summary>
+    private readonly HashSet<(string UploadId, string Path)> _inPlaceStarted = [];
+
     /// <summary>Upload staging files (<c>name.pbtmp-&lt;id&gt;</c>) are hidden from listings.</summary>
     private static bool IsStagingName(string name) => name.Contains(StagingMarker, StringComparison.OrdinalIgnoreCase);
 
@@ -113,7 +120,9 @@ public sealed partial class AgentShare
     /// Swaps the staging file in. A version mismatch with <see cref="ConflictPolicy.KeepBoth"/> keeps machine B's file
     /// and saves the upload as <c>name.procbridge-conflict-&lt;UTC time&gt;</c> instead.
     /// </summary>
-    public FsCommitResponse Commit(string relativePath, string uploadId, long size, FsVersion? expectedVersion, long? lastWriteTime, ConflictPolicy policy)
+    /// <param name="holdId">Held handle of the writer whose content this is (M8), 0 when unknown: a commit of a held file
+    /// goes through that handle, the locks of the others are respected.</param>
+    public FsCommitResponse Commit(string relativePath, string uploadId, long size, FsVersion? expectedVersion, long? lastWriteTime, ConflictPolicy policy, ulong holdId = 0)
     {
         EnsureWritable();
         ArgumentOutOfRangeException.ThrowIfNegative(size);
@@ -127,15 +136,21 @@ public sealed partial class AgentShare
                 if (Directory.Exists(path))
                     throw new ProtocolStatusException(NtStatus.FileIsADirectory, "Target is a directory.");
                 using (SafeFileHandle handle = File.OpenHandle(staging, FileMode.OpenOrCreate, FileAccess.Write, FileShare.None))
+                {
+                    // Blocks missing (shorter than the size) would turn into zeros: the upload is resent instead.
+                    if (RandomAccess.GetLength(handle) < size)
+                        throw new ProtocolStatusException(NtStatus.UnexpectedNetworkError, "The upload is incomplete.");
                     RandomAccess.SetLength(handle, size);
+                }
                 if (lastWriteTime is { } time)
                     File.SetLastWriteTimeUtc(staging, DateTime.FromFileTimeUtc(time));
 
                 bool exists = File.Exists(path);
+                bool resumeInPlace = _inPlaceStarted.Contains((uploadId, path));
                 // The same commit again (its reply was lost): it is done already, do not apply it twice.
-                if (GetRepeatedCommit(relativePath, path, staging, uploadId, size, lastWriteTime) is { } repeated)
+                if (!resumeInPlace && GetRepeatedCommit(relativePath, path, staging, uploadId, size, lastWriteTime) is { } repeated)
                     return repeated;
-                if (expectedVersion is { } expected && (!exists || CurrentVersion(path) != expected) && policy == ConflictPolicy.KeepBoth)
+                if (!resumeInPlace && expectedVersion is { } expected && (!exists || CurrentVersion(path) != expected) && policy == ConflictPolicy.KeepBoth)
                 {
                     string conflict = GetConflictPath(path);
                     File.Move(staging, conflict);
@@ -144,11 +159,19 @@ public sealed partial class AgentShare
                     return new FsCommitResponse { Entry = exists ? Stat(relativePath) : Stat(relativeConflict), ConflictPath = relativeConflict };
                 }
 
-                if (exists && FindHeldWriter(path) is { } held)
+                if (exists && AcquireHeldWriter(path, holdId) is { } held)
                 {
                     // Machine A holds the file open (M8): write in place through that handle, which keeps the file's
                     // identity, its share mode and the byte range locks taken on it.
-                    CommitInPlace(held, staging, size, lastWriteTime);
+                    try
+                    {
+                        _inPlaceStarted.Add((uploadId, path));
+                        CommitInPlace(held, staging, size, lastWriteTime);
+                    }
+                    finally
+                    {
+                        held.ReleaseReference();
+                    }
                 }
                 else if (exists)
                 {
@@ -164,6 +187,7 @@ public sealed partial class AgentShare
                 {
                     File.Move(staging, path);
                 }
+                _inPlaceStarted.Remove((uploadId, path));
                 RememberCommit(uploadId, path, null);
                 return new FsCommitResponse { Entry = Stat(relativePath) };
             }
@@ -252,10 +276,17 @@ public sealed partial class AgentShare
             if (isDirectory)
                 throw new ProtocolStatusException(NtStatus.FileIsADirectory, "A directory has no size.");
             ArgumentOutOfRangeException.ThrowIfNegative(length);
-            if (FindHeldWriter(path) is { } held)
+            if (AcquireHeldWriter(path, 0) is { } held)
             {
                 // Its share mode may refuse a second writer: use the held handle itself (M8).
-                RandomAccess.SetLength(held.Handle, length);
+                try
+                {
+                    RandomAccess.SetLength(held.Handle, length);
+                }
+                finally
+                {
+                    held.ReleaseReference();
+                }
             }
             else
             {

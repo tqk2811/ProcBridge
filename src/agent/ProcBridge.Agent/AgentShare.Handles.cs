@@ -18,6 +18,10 @@ public sealed partial class AgentShare
     private const int ErrorNotLocked = 158;
 
     private readonly Dictionary<string, List<HeldFile>> _held = new(StringComparer.OrdinalIgnoreCase);
+    // Ids are unique in the share, not per connection: a commit names the held handle of its writer while the handle
+    // itself lives on another connection (the one RemoteHolds keeps).
+    private readonly Dictionary<ulong, HeldFile> _heldById = [];
+    private long _nextHeldId;
 
     /// <summary>
     /// Opens <paramref name="relativePath"/> and keeps the handle until <see cref="HeldFile.Dispose"/>. Delete sharing is
@@ -44,21 +48,43 @@ public sealed partial class AgentShare
             handle.Dispose();
             throw new ProtocolStatusException(NtStatus.ObjectNameInvalid, "Not a disk file.");
         }
-        var held = new HeldFile(this, path, handle, write);
+        var held = new HeldFile(this, (ulong)Interlocked.Increment(ref _nextHeldId), path, handle, write);
         lock (_held)
         {
             if (!_held.TryGetValue(path, out List<HeldFile>? list))
                 _held[path] = list = [];
             list.Add(held);
+            _heldById[held.Id] = held;
         }
         return held;
     }
 
-    /// <summary>A handle held for writing <paramref name="path"/> (full path), or null.</summary>
-    private HeldFile? FindHeldWriter(string path)
+    /// <summary>
+    /// The handle held for writing <paramref name="path"/> (full path) a commit goes through, acquired (the caller
+    /// releases it): the one of <paramref name="holdId"/> when it still holds that path, else any writer, else null.
+    /// </summary>
+    private HeldFile? AcquireHeldWriter(string path, ulong holdId)
     {
         lock (_held)
-            return _held.TryGetValue(path, out List<HeldFile>? list) ? list.FirstOrDefault(x => x.Write) : null;
+        {
+            if (!_held.TryGetValue(path, out List<HeldFile>? list))
+                return null;
+            if (holdId != 0 && _heldById.TryGetValue(holdId, out HeldFile? named) && named.Write && list.Contains(named) && named.TryAcquire())
+                return named;
+            foreach (HeldFile held in list)
+            {
+                if (held.Write && held.TryAcquire())
+                    return held;
+            }
+            return null;
+        }
+    }
+
+    /// <summary>Other handles held on <paramref name="held"/>'s path (their locks bind a write through it).</summary>
+    private HeldFile[] OtherHeld(HeldFile held)
+    {
+        lock (_held)
+            return _held.TryGetValue(held.Path, out List<HeldFile>? list) ? list.Where(x => x != held).ToArray() : [];
     }
 
     private void Release(HeldFile held)
@@ -67,6 +93,7 @@ public sealed partial class AgentShare
         {
             if (_held.TryGetValue(held.Path, out List<HeldFile>? list) && list.Remove(held) && list.Count == 0)
                 _held.Remove(held.Path);
+            _heldById.Remove(held.Id);
         }
     }
 
@@ -83,19 +110,37 @@ public sealed partial class AgentShare
         }
     }
 
-    /// <summary>Writes the staged upload into the held handle (the commit of a file held open, in place).</summary>
-    private static void CommitInPlace(HeldFile held, string staging, long size, long? lastWriteTime)
+    /// <summary>
+    /// Writes the staged upload into the held handle (the commit of a file held open, in place). Not atomic: the caller
+    /// remembers that the upload started writing, so a commit repeated after a failure writes it whole again. A range
+    /// locked by another held handle (or a shared lock of this one) refuses the commit with
+    /// <see cref="NtStatus.LockNotGranted"/> before anything is written; the write-back tries again later.
+    /// </summary>
+    private void CommitInPlace(HeldFile held, string staging, long size, long? lastWriteTime)
     {
+        long end = Math.Max(size, RandomAccess.GetLength(held.Handle));
+        if (held.HasLockBlockingWrite(0, end, own: true) || OtherHeld(held).Any(x => x.HasLockBlockingWrite(0, end, own: false)))
+            throw new ProtocolStatusException(NtStatus.LockNotGranted, "A locked range of the file blocks the commit; retried later.");
         using (SafeFileHandle source = File.OpenHandle(staging, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
         {
+            if (RandomAccess.GetLength(source) < size)
+                throw new ProtocolStatusException(NtStatus.UnexpectedNetworkError, "The upload is incomplete.");
             byte[] buffer = new byte[256 * 1024];
             long offset = 0;
             while (offset < size)
             {
                 int read = RandomAccess.Read(source, buffer.AsSpan(0, (int)Math.Min(buffer.Length, size - offset)), offset);
                 if (read == 0)
-                    break;
-                RandomAccess.Write(held.Handle, buffer.AsSpan(0, read), offset);
+                    throw new ProtocolStatusException(NtStatus.UnexpectedNetworkError, "The upload is incomplete.");
+                try
+                {
+                    RandomAccess.Write(held.Handle, buffer.AsSpan(0, read), offset);
+                }
+                catch (IOException e) when ((e.HResult & 0xFFFF) == ErrorLockViolation)
+                {
+                    // Locked by a user of machine B (not seen in the held handles).
+                    throw new ProtocolStatusException(NtStatus.LockNotGranted, "A locked range of the file blocks the commit; retried later.");
+                }
                 offset += read;
             }
         }
@@ -104,25 +149,66 @@ public sealed partial class AgentShare
             File.SetLastWriteTimeUtc(held.Handle, DateTime.FromFileTimeUtc(time));
     }
 
-    /// <summary>A handle machine B keeps for an open on machine A; disposing it releases its locks.</summary>
+    /// <summary>
+    /// A handle machine B keeps for an open on machine A; disposing it releases its locks. A commit writing through it
+    /// holds a reference (<see cref="TryAcquire"/>): <see cref="Dispose"/> waits for it before closing the handle.
+    /// </summary>
     public sealed class HeldFile : IDisposable
     {
         private readonly AgentShare _share;
-        private int _disposed;
+        private readonly object _gate = new();
+        private readonly List<(long Offset, long Length, bool Exclusive)> _locks = [];
+        private int _references;
+        private bool _disposed;
 
-        internal HeldFile(AgentShare share, string path, SafeFileHandle handle, bool write)
+        internal HeldFile(AgentShare share, ulong id, string path, SafeFileHandle handle, bool write)
         {
             _share = share;
+            Id = id;
             Path = path;
             Handle = handle;
             Write = write;
         }
+
+        /// <summary>Id of the handle in its share (FsHandleResponse.HandleId).</summary>
+        public ulong Id { get; }
 
         internal string Path { get; set; }
 
         internal SafeFileHandle Handle { get; }
 
         internal bool Write { get; }
+
+        /// <summary>Takes a reference keeping the handle open; false once disposing.</summary>
+        internal bool TryAcquire()
+        {
+            lock (_gate)
+            {
+                if (_disposed)
+                    return false;
+                _references++;
+                return true;
+            }
+        }
+
+        internal void ReleaseReference()
+        {
+            lock (_gate)
+            {
+                if (--_references == 0)
+                    Monitor.PulseAll(_gate);
+            }
+        }
+
+        /// <summary>
+        /// A lock of this handle that a write of [<paramref name="offset"/>, <paramref name="end"/>) runs into: any lock
+        /// of another handle, or a shared one of the writing handle itself (<paramref name="own"/>).
+        /// </summary>
+        internal bool HasLockBlockingWrite(long offset, long end, bool own)
+        {
+            lock (_gate)
+                return _locks.Any(x => (!own || !x.Exclusive) && x.Offset < end && offset < x.Offset + Math.Max(x.Length, 1));
+        }
 
         /// <summary>
         /// Locks [<paramref name="offset"/>, +<paramref name="length"/>). A conflicting lock is retried until
@@ -134,7 +220,11 @@ public sealed partial class AgentShare
             while (true)
             {
                 if (TryLock(offset, length, exclusive))
+                {
+                    lock (_gate)
+                        _locks.Add((offset, length, exclusive));
                     return;
+                }
                 if (Environment.TickCount64 >= deadline)
                     throw new ProtocolStatusException(NtStatus.LockNotGranted, "The range is locked by another open.");
                 await Task.Delay(20, cancellationToken).ConfigureAwait(false);
@@ -157,15 +247,31 @@ public sealed partial class AgentShare
         {
             var overlapped = new NativeOverlapped { OffsetLow = (int)offset, OffsetHigh = (int)(offset >> 32) };
             if (UnlockFileEx(Handle, 0, (uint)length, (uint)(length >> 32), ref overlapped))
+            {
+                lock (_gate)
+                {
+                    int index = _locks.FindIndex(x => x.Offset == offset && x.Length == length);
+                    if (index >= 0)
+                        _locks.RemoveAt(index);
+                }
                 return;
+            }
             int error = Marshal.GetLastPInvokeError();
             throw new ProtocolStatusException(error == ErrorNotLocked ? NtStatus.RangeNotLocked : NtStatus.Unsuccessful, $"UnlockFileEx failed: {error}.");
         }
 
+        /// <summary>Closes the handle once the commits writing through it are done (waits for them).</summary>
         public void Dispose()
         {
-            if (Interlocked.Exchange(ref _disposed, 1) != 0)
-                return;
+            lock (_gate)
+            {
+                if (_disposed)
+                    return;
+                _disposed = true;
+                while (_references > 0)
+                    Monitor.Wait(_gate);
+                _locks.Clear();
+            }
             _share.Release(this);
             Handle.Dispose();
         }

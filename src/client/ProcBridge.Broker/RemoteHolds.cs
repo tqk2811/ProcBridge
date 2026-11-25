@@ -63,6 +63,20 @@ public sealed class RemoteHolds : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Id on machine B of the handle a commit of <paramref name="remotePath"/> should write through: the one of
+    /// <paramref name="token"/>, else any handle held on that path, else 0.
+    /// </summary>
+    public ulong GetHoldId(ulong token, string remotePath)
+    {
+        lock (_lock)
+        {
+            if (_holds.TryGetValue(token, out Hold? own) && own.HandleId != 0 && own.RemotePath.Equals(remotePath, StringComparison.OrdinalIgnoreCase))
+                return own.HandleId;
+            return _holds.Values.FirstOrDefault(x => x.HandleId != 0 && x.RemotePath.Equals(remotePath, StringComparison.OrdinalIgnoreCase))?.HandleId ?? 0;
+        }
+    }
+
     /// <summary>NtLockFile on a handle holding <paramref name="token"/>.</summary>
     public async Task LockAsync(ulong token, long offset, long length, bool exclusive, bool failImmediately, CancellationToken cancellationToken)
     {

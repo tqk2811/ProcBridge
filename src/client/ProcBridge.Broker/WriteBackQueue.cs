@@ -59,6 +59,12 @@ public sealed class WriteBackQueue : IAsyncDisposable
         cache.SetPinnedCheck(IsBusy);
     }
 
+    /// <summary>
+    /// Held handle on machine B (M8) a commit of (write token, remote path) goes through, 0 for none; token 0 when the
+    /// commit is not tied to one writer (resend, end of session). Set once before use.
+    /// </summary>
+    public Func<ulong, string, ulong>? HoldIdLookup { get; set; }
+
     /// <summary>Conflicts seen by this Broker, oldest first.</summary>
     public IReadOnlyList<WriteConflict> Conflicts => _conflicts.ToArray();
 
@@ -138,7 +144,7 @@ public sealed class WriteBackQueue : IAsyncDisposable
         }
         try
         {
-            await SyncAsync(state, final, cancellationToken).ConfigureAwait(false);
+            await SyncAsync(state, final, cancellationToken, token).ConfigureAwait(false);
         }
         finally
         {
@@ -156,7 +162,7 @@ public sealed class WriteBackQueue : IAsyncDisposable
     }
 
     public Task FlushAsync(ulong token, CancellationToken cancellationToken)
-        => _tokens.TryGetValue(token, out TokenState? holder) ? SyncAsync(holder.State, false, cancellationToken) : Task.CompletedTask;
+        => _tokens.TryGetValue(token, out TokenState? holder) ? SyncAsync(holder.State, false, cancellationToken, token) : Task.CompletedTask;
 
     /// <summary>
     /// Takes the gates of <paramref name="paths"/> (in a fixed order): a rename or delete on machine B then cannot run
@@ -267,7 +273,8 @@ public sealed class WriteBackQueue : IAsyncDisposable
     }
 
     /// <param name="final">Last close of the file: a file whose write-back conflicted still keeps its last copy.</param>
-    private async Task SyncAsync(PathState state, bool final, CancellationToken cancellationToken)
+    /// <param name="token">Write token of the writer closing or flushing (its held handle carries the commit), 0 for none.</param>
+    private async Task SyncAsync(PathState state, bool final, CancellationToken cancellationToken, ulong token = 0)
     {
         SemaphoreSlim gate = await EnterAsync(state, cancellationToken).ConfigureAwait(false);
         try
@@ -301,7 +308,7 @@ public sealed class WriteBackQueue : IAsyncDisposable
                     DeleteEntry(older);
                 state.PendingEntryId = entry.Id;
             }
-            FsCommitResponse? response = await TryUploadAsync(entry, cancellationToken).ConfigureAwait(false);
+            FsCommitResponse? response = await TryUploadAsync(entry, cancellationToken, token).ConfigureAwait(false);
             if (response is not null)
                 Completed(state, entry, response);
         }
@@ -398,12 +405,13 @@ public sealed class WriteBackQueue : IAsyncDisposable
     }
 
     /// <summary>Uploads one entry (under its path's gate); null when it stays queued (connection) or was set aside (refused by machine B).</summary>
-    private async Task<FsCommitResponse?> TryUploadAsync(WriteBackEntry entry, CancellationToken cancellationToken)
+    private async Task<FsCommitResponse?> TryUploadAsync(WriteBackEntry entry, CancellationToken cancellationToken, ulong token = 0)
     {
         try
         {
             ConflictPolicy policy = entry.KeepBoth ? ConflictPolicy.KeepBoth : _policy;
-            FsCommitResponse response = await _client.UploadAsync(entry.RemotePath, GetDataPath(entry.Id), entry.Id, entry.ExpectedVersion, policy, cancellationToken).ConfigureAwait(false);
+            ulong holdId = HoldIdLookup?.Invoke(token, entry.RemotePath) ?? 0;
+            FsCommitResponse response = await _client.UploadAsync(entry.RemotePath, GetDataPath(entry.Id), entry.Id, entry.ExpectedVersion, policy, cancellationToken, holdId).ConfigureAwait(false);
             DeleteEntry(entry.Id);
             _cache.Update(entry.RemotePath, response.Entry);
             if (response.ConflictPath is not null)
@@ -433,7 +441,9 @@ public sealed class WriteBackQueue : IAsyncDisposable
     private static bool IsTransient(Exception e) => e switch
     {
         ProtocolStatusException p => p.IsConnectionFailure || p.Status is NtStatus.NetworkUnreachable or NtStatus.IoTimeout
-            or NtStatus.UnexpectedNetworkError or NtStatus.InvalidNetworkResponse or NtStatus.Cancelled or NtStatus.SharingViolation,
+            or NtStatus.UnexpectedNetworkError or NtStatus.InvalidNetworkResponse or NtStatus.Cancelled or NtStatus.SharingViolation
+            // A range locked on machine B blocks an in-place commit (M8): it goes through once unlocked.
+            or NtStatus.LockNotGranted,
         OperationCanceledException or IOException or TimeoutException or System.Net.Sockets.SocketException => true,
         _ => false,
     };

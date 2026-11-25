@@ -164,7 +164,7 @@ public sealed class AgentClient : IAsyncDisposable
     /// </summary>
     /// <param name="uploadId">32 lowercase hex digits, the same for every attempt of one write-back: machine B answers a
     /// commit it already applied instead of applying it again.</param>
-    public async Task<FsCommitResponse> UploadAsync(string remotePath, string sourcePath, string uploadId, FsVersion? expectedVersion, ConflictPolicy policy, CancellationToken cancellationToken)
+    public async Task<FsCommitResponse> UploadAsync(string remotePath, string sourcePath, string uploadId, FsVersion? expectedVersion, ConflictPolicy policy, CancellationToken cancellationToken, ulong holdId = 0)
     {
         int maxRead = await Pool.GetMaxReadSizeAsync(cancellationToken).ConfigureAwait(false);
         int chunkSize = Math.Max(1, Math.Min(_options.ReadChunkSize, maxRead));
@@ -187,7 +187,7 @@ public sealed class AgentClient : IAsyncDisposable
             }).ConfigureAwait(false);
         }
 
-        var commit = new FsCommitRequest { Path = remotePath, UploadId = uploadId, Size = size, ExpectedVersion = expectedVersion, LastWriteTime = lastWriteTime, Policy = policy };
+        var commit = new FsCommitRequest { Path = remotePath, UploadId = uploadId, Size = size, ExpectedVersion = expectedVersion, LastWriteTime = lastWriteTime, Policy = policy, HoldId = holdId };
         Frame frame = await Pool.SendAsync(MessageType.FsCommit, ProtocolSerializer.Serialize(commit), default, idempotent: false, cancellationToken).ConfigureAwait(false);
         return ProtocolSerializer.Deserialize<FsCommitResponse>(frame.Header);
     }

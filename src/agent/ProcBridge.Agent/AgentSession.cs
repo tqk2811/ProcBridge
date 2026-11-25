@@ -27,7 +27,6 @@ internal sealed class AgentSession
     private readonly ConcurrentDictionary<ulong, ShareTreeWalk> _walks = new();
     // M8: handles kept for opens on machine A; they live as long as this connection.
     private readonly ConcurrentDictionary<ulong, AgentShare.HeldFile> _heldFiles = new();
-    private long _nextHeldId;
     private readonly object _watchLock = new();
     private Channel<FsChangeNotification>? _notifications;
     private IDisposable? _watchSubscription;
@@ -185,7 +184,7 @@ internal sealed class AgentSession
                 case MessageType.FsCommit:
                 {
                     FsCommitRequest commit = ProtocolSerializer.Deserialize<FsCommitRequest>(request.Header);
-                    FsCommitResponse response = Share.Commit(commit.Path, commit.UploadId, commit.Size, commit.ExpectedVersion, commit.LastWriteTime, commit.Policy);
+                    FsCommitResponse response = Share.Commit(commit.Path, commit.UploadId, commit.Size, commit.ExpectedVersion, commit.LastWriteTime, commit.Policy, commit.HoldId);
                     await SendAsync(FrameKind.Response, request, ProtocolSerializer.Serialize(response), default).ConfigureAwait(false);
                     break;
                 }
@@ -214,9 +213,8 @@ internal sealed class AgentSession
                     if (_heldFiles.Count >= _options.MaxHeldFilesPerConnection)
                         throw new ProtocolStatusException(NtStatus.InsufficientResources, "Too many held files on this connection.");
                     AgentShare.HeldFile held = Share.OpenHeld(open.Path, open.ShareAccess, open.Write);
-                    ulong id = (ulong)Interlocked.Increment(ref _nextHeldId);
-                    _heldFiles[id] = held;
-                    await SendHandleAsync(request, id).ConfigureAwait(false);
+                    _heldFiles[held.Id] = held;
+                    await SendHandleAsync(request, held.Id).ConfigureAwait(false);
                     break;
                 }
                 case MessageType.FsCloseHandle:
