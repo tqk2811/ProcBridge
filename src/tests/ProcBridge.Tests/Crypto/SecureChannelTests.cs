@@ -22,6 +22,59 @@ public sealed class SecureChannelTests
     }
 
     [TestMethod]
+    public async Task SealAndWriteAsync_ConcurrentSenders_KeepWireOrder()
+    {
+        var (si, sr) = CreateSessions();
+        using (si)
+        using (sr)
+        {
+            var (a, b) = CreatePair(si, sr);
+            using (a)
+            using (b)
+            {
+                var wire = new List<byte[]>();
+                async ValueTask Write(ReadOnlyMemory<byte> frame, CancellationToken ct)
+                {
+                    // A real socket write yields; let other senders run in between.
+                    await Task.Delay(Random.Shared.Next(0, 2), ct);
+                    lock (wire)
+                        wire.Add(frame.ToArray());
+                }
+
+                var senders = Enumerable.Range(0, 64).Select(i => Task.Run(async () =>
+                {
+                    for (var j = 0; j < 4; j++)
+                        await a.SealAndWriteAsync(new[] { (byte)i, (byte)j }, ReadOnlyMemory<byte>.Empty, Write);
+                }));
+                await Task.WhenAll(senders);
+
+                Assert.HasCount(256, wire);
+                foreach (var frame in wire)
+                    b.Open(frame);
+            }
+        }
+    }
+
+    [TestMethod]
+    public async Task SealAndWriteAsync_FailedWrite_BreaksChannel()
+    {
+        var (si, sr) = CreateSessions();
+        using (si)
+        using (sr)
+        {
+            var (a, b) = CreatePair(si, sr);
+            using (a)
+            using (b)
+            {
+                await Assert.ThrowsExactlyAsync<IOException>(async () =>
+                    await a.SealAndWriteAsync("x"u8.ToArray(), ReadOnlyMemory<byte>.Empty, (_, _) => throw new IOException("socket closed")));
+                await Assert.ThrowsExactlyAsync<InvalidOperationException>(async () =>
+                    await a.SealAndWriteAsync("y"u8.ToArray(), ReadOnlyMemory<byte>.Empty, (_, _) => ValueTask.CompletedTask));
+            }
+        }
+    }
+
+    [TestMethod]
     public void SealOpen_RoundTripsBothDirections()
     {
         var (si, sr) = CreateSessions();

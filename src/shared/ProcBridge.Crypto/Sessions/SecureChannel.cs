@@ -17,7 +17,14 @@ namespace ProcBridge.Crypto.Sessions;
 /// Rekey: every <see cref="DefaultRekeyInterval"/> frames both sides replace the direction key with
 /// Noise REKEY(k), so an old key leaking does not expose later frames. The counter keeps growing.
 /// </para>
-/// Seal and Open are thread-safe (separate locks per direction). The channel owns its keys.
+/// <para>
+/// Threading: Seal and Open are thread-safe (separate locks per direction), but Seal only orders
+/// counters, not the caller's later write. Two threads that Seal then write can put frames on the
+/// wire out of counter order, and the receiver then rejects the stream for good. Concurrent senders
+/// must use <see cref="SealAndWriteAsync"/>, which holds one gate across sealing and writing; do not
+/// mix it with direct Seal calls on the same channel.
+/// </para>
+/// The channel owns its keys.
 /// </summary>
 public sealed class SecureChannel : IDisposable
 {
@@ -33,6 +40,8 @@ public sealed class SecureChannel : IDisposable
     private readonly DirectionState _send;
     private readonly DirectionState _receive;
     private readonly ulong _rekeyInterval;
+    private readonly SemaphoreSlim _writeGate = new(1, 1);
+    private bool _writeFaulted;
 
     internal SecureChannel(uint id, byte[] sendKey, byte[] receiveKey, ulong rekeyInterval)
     {
@@ -84,6 +93,44 @@ public sealed class SecureChannel : IDisposable
             _send.Counter = counter + 1;
         }
         return frameLength;
+    }
+
+    /// <summary>
+    /// Seals one frame and hands it to <paramref name="write"/> while holding a per-channel gate,
+    /// so frames reach the transport in counter order even with many concurrent senders.
+    /// The delegate gets the whole frame (it adds its own transport framing, if any) and must finish
+    /// writing before it returns. If it throws, the frame counter was already used, so the channel is
+    /// marked broken and later calls throw; close the connection.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">A previous write failed.</exception>
+    public async ValueTask SealAndWriteAsync(
+        ReadOnlyMemory<byte> plaintext,
+        ReadOnlyMemory<byte> associatedData,
+        Func<ReadOnlyMemory<byte>, CancellationToken, ValueTask> write,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(write);
+        await _writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (_writeFaulted)
+                throw new InvalidOperationException("A previous write failed; the channel is broken.");
+            var frame = new byte[plaintext.Length + Overhead];
+            Seal(plaintext.Span, associatedData.Span, frame);
+            try
+            {
+                await write(frame, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                _writeFaulted = true;
+                throw;
+            }
+        }
+        finally
+        {
+            _writeGate.Release();
+        }
     }
 
     /// <exception cref="CryptoProtocolException">Frame is forged, corrupted, replayed or out of order.</exception>
