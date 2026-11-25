@@ -17,6 +17,7 @@ public sealed class ProtocolConnection : IAsyncDisposable
     private readonly TransportOptions _options;
     private readonly ConcurrentDictionary<uint, TaskCompletionSource<Frame>> _pending = new();
     private readonly CancellationTokenSource _closing = new();
+    private readonly TaskCompletionSource _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private Task _readLoop = Task.CompletedTask;
     private int _nextRequestId;
     private long _completedRequests;
@@ -31,6 +32,15 @@ public sealed class ProtocolConnection : IAsyncDisposable
 
     /// <summary>Server answer to the Hello exchange.</summary>
     public HelloResponse Server { get; private set; } = null!;
+
+    /// <summary>
+    /// Raised on the reader thread for every notification frame (server push, see <see cref="FrameKind.Notification"/>).
+    /// Handlers must be quick and must not throw; the frame memory stays valid after the call.
+    /// </summary>
+    public event Action<Frame>? NotificationReceived;
+
+    /// <summary>Completes when the connection is dead (peer closed, I/O error or dispose).</summary>
+    public Task Closed => _closed.Task;
 
     public bool IsAlive => _alive;
 
@@ -159,6 +169,18 @@ public sealed class ProtocolConnection : IAsyncDisposable
                     reason = "Server sent a request frame.";
                     break;
                 }
+                if (frame.Value.Kind == FrameKind.Notification)
+                {
+                    try
+                    {
+                        NotificationReceived?.Invoke(frame.Value);
+                    }
+                    catch (Exception e) when (e is not OutOfMemoryException)
+                    {
+                        // A faulty handler must not kill the connection the requests share.
+                    }
+                    continue;
+                }
                 // Responses for requests that already timed out are dropped.
                 if (_pending.TryGetValue(frame.Value.RequestId, out TaskCompletionSource<Frame>? completion))
                     completion.TrySetResult(frame.Value);
@@ -189,6 +211,7 @@ public sealed class ProtocolConnection : IAsyncDisposable
     private void Fail(string reason)
     {
         _alive = false;
+        _closed.TrySetResult();
         foreach (KeyValuePair<uint, TaskCompletionSource<Frame>> pair in _pending)
             pair.Value.TrySetException(ConnectionLost(reason));
     }
