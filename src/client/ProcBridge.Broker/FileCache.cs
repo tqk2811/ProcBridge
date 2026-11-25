@@ -35,6 +35,10 @@ public sealed class FileCache
     private readonly ConcurrentDictionary<string, byte> _readAheadDirectories = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<Task, byte> _readAheadTasks = new();
     private int _readAheadDownloads;
+    // Caps the read-ahead downloads of ALL directories together, so a build opening files everywhere cannot take the whole pool.
+    private readonly SemaphoreSlim _readAheadGate;
+    private int _readAheadRunning;
+    private int _readAheadPeak;
 
     /// <summary>Test hook, called after a fetch computed its expiry and before it stores the result; lets a test invalidate in that gap.</summary>
     internal Action? BeforeMetadataStore { get; set; }
@@ -49,6 +53,7 @@ public sealed class FileCache
         _client = client;
         _cacheRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(cacheRoot));
         _options = options;
+        _readAheadGate = new SemaphoreSlim(Math.Max(1, options.ReadAheadParallelism));
         Directory.CreateDirectory(_cacheRoot);
         DeleteLeftoverTempFiles();
     }
@@ -304,6 +309,9 @@ public sealed class FileCache
     /// <summary>Files downloaded by read-ahead so far, for diagnostics, tests and benchmarks.</summary>
     public int ReadAheadDownloads => Volatile.Read(ref _readAheadDownloads);
 
+    /// <summary>Most read-ahead downloads that ran at the same time, for tests.</summary>
+    internal int ReadAheadPeakConcurrency => Volatile.Read(ref _readAheadPeak);
+
     /// <summary>Completes when every read-ahead started so far has finished.</summary>
     public Task WaitForReadAheadAsync() => Task.WhenAll(_readAheadTasks.Keys);
 
@@ -372,6 +380,12 @@ public sealed class FileCache
         var parallel = new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, _options.ReadAheadParallelism) };
         await Parallel.ForEachAsync(candidates, parallel, async (path, token) =>
         {
+            await _readAheadGate.WaitAsync(token).ConfigureAwait(false);
+            int running = Interlocked.Increment(ref _readAheadRunning);
+            int peak;
+            while (running > (peak = Volatile.Read(ref _readAheadPeak)) && Interlocked.CompareExchange(ref _readAheadPeak, running, peak) != peak)
+            {
+            }
             try
             {
                 CachedItem item = await EnsureAsync(path, readAhead: false, token).ConfigureAwait(false);
@@ -381,6 +395,11 @@ public sealed class FileCache
             }
             catch (Exception e) when (e is not OutOfMemoryException)
             {
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _readAheadRunning);
+                _readAheadGate.Release();
             }
         }).ConfigureAwait(false);
     }

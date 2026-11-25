@@ -44,7 +44,7 @@ public sealed record BrokerOptions
     public int ReadAheadMaxFiles { get; init; } = 64;
 
     /// <summary>See <see cref="FileCacheOptions.ReadAheadParallelism"/>.</summary>
-    public int ReadAheadParallelism { get; init; } = 8;
+    public int ReadAheadParallelism { get; init; } = 2;
 
     public TransportOptions Transport { get; init; } = new();
 

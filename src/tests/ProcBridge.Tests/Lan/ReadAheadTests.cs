@@ -68,6 +68,34 @@ public sealed class ReadAheadTests
     }
 
     [TestMethod]
+    public async Task ManyDirectories_ShareOneReadAheadLimit()
+    {
+        using var share = new TempFolder("ra");
+        for (int d = 0; d < 6; d++)
+        {
+            for (int f = 0; f < 20; f++)
+                share.WriteFile($@"d{d}\f{f}.cs", new byte[500]);
+        }
+        using var cacheDir = new TempFolder("cache");
+        await using AgentServer server = StartAgent(share);
+        await using AgentClient client = CreateClient(server.Port);
+        var cache = new FileCache(client, cacheDir.Path, new FileCacheOptions { ReadAheadMaxFileSize = Threshold, ReadAheadMaxFiles = 100, ReadAheadParallelism = 2 });
+
+        for (int d = 0; d < 6; d++)
+            await cache.EnsureAsync($"d{d}/f0.cs", CancellationToken.None);
+        await cache.WaitForReadAheadAsync().WaitAsync(TimeSpan.FromSeconds(20));
+
+        Assert.AreEqual(6 * 19, cache.ReadAheadDownloads);
+        Assert.IsLessThanOrEqualTo(2, cache.ReadAheadPeakConcurrency, "Read-ahead of different directories must not add up.");
+    }
+
+    [TestMethod]
+    public void DefaultReadAheadParallelism_LeavesMostOfThePoolToForegroundRequests()
+    {
+        Assert.AreEqual(2, new FileCacheOptions().ReadAheadParallelism);
+    }
+
+    [TestMethod]
     public async Task OpenBigFile_DoesNotReadAhead()
     {
         using TempFolder share = BuildShare();

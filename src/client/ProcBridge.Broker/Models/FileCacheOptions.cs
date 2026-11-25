@@ -21,6 +21,9 @@ public sealed record FileCacheOptions
     /// <summary>Most files one directory read-ahead downloads.</summary>
     public int ReadAheadMaxFiles { get; init; } = 64;
 
-    /// <summary>Read-ahead downloads running at once (they share the connection pool with foreground requests).</summary>
-    public int ReadAheadParallelism { get; init; } = 8;
+    /// <summary>
+    /// Read-ahead downloads running at once across all directories. They share the connection pool with foreground
+    /// requests, so the default leaves most of it to them.
+    /// </summary>
+    public int ReadAheadParallelism { get; init; } = 2;
 }
