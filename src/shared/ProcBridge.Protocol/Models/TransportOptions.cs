@@ -25,6 +25,18 @@ public sealed record TransportOptions
 
     public TimeSpan RequestTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// A connection that received nothing for this long is probed with <see cref="Enums.MessageType.Ping"/>; a request that
+    /// times out probes at once. <see cref="TimeSpan.Zero"/> turns keepalive off.
+    /// </summary>
+    public TimeSpan KeepAliveInterval { get; init; } = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// How long a probe waits for any frame from the peer before the connection is declared dead (its pending requests
+    /// then fail as connection failures and idempotent ones are resent on another connection).
+    /// </summary>
+    public TimeSpan KeepAliveTimeout { get; init; } = TimeSpan.FromSeconds(20);
+
     /// <summary>How many times an idempotent request is resent after its connection broke.</summary>
     public int MaxRetries { get; init; } = 2;
 }

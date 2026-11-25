@@ -296,6 +296,13 @@ sequenceDiagram
   Open, Read, Write, Rename, Delete, SetInfo, Watch), `Sys.*`, `Proc.*`, `Reg.*` cho chức năng duyệt
   (mục 14), về sau `Net.*`.
 - Mã lỗi: chuyển nguyên `NTSTATUS` từ máy B về, để process đích nhận đúng lỗi như khi chạy cục bộ.
+- Phát hiện kết nối treo (keepalive): kết nối không nhận được khung nào trong `KeepAliveInterval` (mặc định 15 s), hoặc
+  vừa có request quá hạn, thì phía A gửi `Ping` (0x0002, header rỗng). Agent trả `Ping` ngay trong vòng đọc, ngoài giới
+  hạn request đồng thời. Trong `KeepAliveTimeout` (mặc định 20 s) mà không nhận được khung nào (khung trả lời lớn đang về
+  cũng tính là còn sống) thì kết nối bị đánh dấu chết: request đang chờ lỗi kiểu mất kết nối, request idempotent được
+  pool gửi lại trên kết nối mới, thay vì mỗi request chờ đủ `RequestTimeout`. `Ping` đi đầu cuối nên qua lane relay cũng
+  vậy. Ngược lại, Agent đóng kết nối im lặng quá `IdleTimeout` (mặc định 2 phút) để máy A biến mất không giữ handle và
+  khoá mãi.
 
 ---
 

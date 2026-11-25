@@ -18,7 +18,10 @@ public sealed class ProtocolConnection : IAsyncDisposable
     private readonly ConcurrentDictionary<uint, TaskCompletionSource<Frame>> _pending = new();
     private readonly CancellationTokenSource _closing = new();
     private readonly TaskCompletionSource _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly SemaphoreSlim _probeRequested = new(0, 1);
     private Task _readLoop = Task.CompletedTask;
+    private Task _keepAliveLoop = Task.CompletedTask;
+    private long _lastReceived = Environment.TickCount64;
     private int _nextRequestId;
     private long _completedRequests;
     private volatile bool _alive = true;
@@ -77,6 +80,8 @@ public sealed class ProtocolConnection : IAsyncDisposable
             if (response.ProtocolVersion != hello.ProtocolVersion)
                 throw new ProtocolStatusException(NtStatus.RevisionMismatch, $"Server speaks protocol {response.ProtocolVersion}, client {hello.ProtocolVersion}.");
             connection.Server = response;
+            if (options.KeepAliveInterval > TimeSpan.Zero)
+                connection._keepAliveLoop = Task.Run(connection.KeepAliveLoopAsync);
             return connection;
         }
         catch (OperationCanceledException e) when (!cancellationToken.IsCancellationRequested)
@@ -96,7 +101,10 @@ public sealed class ProtocolConnection : IAsyncDisposable
     /// <see cref="ProtocolStatusException"/>; no answer within <see cref="TransportOptions.RequestTimeout"/> gives
     /// <see cref="NtStatus.IoTimeout"/>.
     /// </summary>
-    public async Task<Frame> SendAsync(MessageType type, ReadOnlyMemory<byte> header, ReadOnlyMemory<byte> payload, CancellationToken cancellationToken)
+    public Task<Frame> SendAsync(MessageType type, ReadOnlyMemory<byte> header, ReadOnlyMemory<byte> payload, CancellationToken cancellationToken)
+        => SendCoreAsync(type, header, payload, _options.RequestTimeout, cancellationToken);
+
+    private async Task<Frame> SendCoreAsync(MessageType type, ReadOnlyMemory<byte> header, ReadOnlyMemory<byte> payload, TimeSpan requestTimeout, CancellationToken cancellationToken)
     {
         if (!_alive)
             throw ConnectionLost("Connection is closed.");
@@ -112,7 +120,7 @@ public sealed class ProtocolConnection : IAsyncDisposable
         }
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(_options.RequestTimeout);
+        timeout.CancelAfter(requestTimeout);
         try
         {
             try
@@ -146,11 +154,84 @@ public sealed class ProtocolConnection : IAsyncDisposable
         }
         catch (OperationCanceledException e) when (!cancellationToken.IsCancellationRequested)
         {
+            // A slow request or a dead peer: the probe tells them apart and kills the connection in the second case.
+            if (type != MessageType.Ping)
+                RequestProbe();
             throw new ProtocolStatusException(NtStatus.IoTimeout, $"{type} request timed out.", inner: e);
         }
         finally
         {
             _pending.TryRemove(id, out _);
+        }
+    }
+
+    /// <summary>Asks the keepalive loop to probe now (no-op when keepalive is off or a probe is already asked for).</summary>
+    private void RequestProbe()
+    {
+        if (_options.KeepAliveInterval <= TimeSpan.Zero)
+            return;
+        try
+        {
+            if (_probeRequested.CurrentCount == 0)
+                _probeRequested.Release();
+        }
+        catch (SemaphoreFullException)
+        {
+            // Another caller asked at the same time.
+        }
+    }
+
+    /// <summary>
+    /// Probes the peer with <see cref="MessageType.Ping"/> once nothing came in for <see cref="TransportOptions.KeepAliveInterval"/>
+    /// (or a request timed out). Any frame received while the probe waits proves the peer alive (a large response
+    /// may hold the answer back); silence for <see cref="TransportOptions.KeepAliveTimeout"/> kills the connection.
+    /// </summary>
+    private async Task KeepAliveLoopAsync()
+    {
+        try
+        {
+            while (_alive)
+            {
+                long idle = Environment.TickCount64 - Interlocked.Read(ref _lastReceived);
+                long wait = (long)_options.KeepAliveInterval.TotalMilliseconds - idle;
+                if (wait > 0 && !await _probeRequested.WaitAsync(TimeSpan.FromMilliseconds(wait), _closing.Token).ConfigureAwait(false))
+                    continue; // Woken by the timer: frames may have arrived meanwhile, compute again.
+
+                if (!await ProbeAsync().ConfigureAwait(false))
+                {
+                    Fail($"No answer from the peer for {_options.KeepAliveTimeout.TotalSeconds:0.#} s (keepalive).");
+                    await DisposeChannelQuietlyAsync().ConfigureAwait(false);
+                    return;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Disposed.
+        }
+        catch (ObjectDisposedException)
+        {
+            // Disposed.
+        }
+    }
+
+    /// <summary>True when the peer answered or sent anything during the probe.</summary>
+    private async Task<bool> ProbeAsync()
+    {
+        long started = Environment.TickCount64;
+        try
+        {
+            await SendCoreAsync(MessageType.Ping, default, default, _options.KeepAliveTimeout, _closing.Token).ConfigureAwait(false);
+            return true;
+        }
+        catch (ProtocolStatusException e) when (e.Status == NtStatus.IoTimeout && !e.IsConnectionFailure)
+        {
+            return Interlocked.Read(ref _lastReceived) >= started;
+        }
+        catch (ProtocolStatusException)
+        {
+            // An error frame (a peer without Ping support) is an answer; a connection failure already killed it.
+            return true;
         }
     }
 
@@ -164,6 +245,7 @@ public sealed class ProtocolConnection : IAsyncDisposable
                 Frame? frame = await _channel.ReceiveAsync(_closing.Token).ConfigureAwait(false);
                 if (frame is null)
                     break;
+                Interlocked.Exchange(ref _lastReceived, Environment.TickCount64);
                 if (frame.Value.Kind == FrameKind.Request)
                 {
                     reason = "Server sent a request frame.";
@@ -234,6 +316,7 @@ public sealed class ProtocolConnection : IAsyncDisposable
         {
             // The reader reports through Fail; nothing more to do here.
         }
+        await _keepAliveLoop.ConfigureAwait(false);
         Fail("Connection disposed.");
         _closing.Dispose();
     }

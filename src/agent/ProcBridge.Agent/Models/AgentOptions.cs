@@ -51,6 +51,12 @@ public sealed record AgentOptions
     /// <summary>Time a new connection has to send Hello.</summary>
     public TimeSpan HelloTimeout { get; init; } = TimeSpan.FromSeconds(10);
 
+    /// <summary>
+    /// A connection that sent nothing (not even a keepalive Ping, see TransportOptions.KeepAliveInterval of machine A)
+    /// for this long is closed with its held files and locks. <see cref="TimeSpan.Zero"/> keeps idle connections forever.
+    /// </summary>
+    public TimeSpan IdleTimeout { get; init; } = TimeSpan.FromMinutes(2);
+
     /// <summary>Buffer of the share watcher (<c>ReadDirectoryChangesW</c>); events beyond it are lost and reported as a rescan.</summary>
     public int WatchBufferSize { get; init; } = 64 * 1024;
 

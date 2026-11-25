@@ -264,11 +264,6 @@ liệt kê theo kết nối hoặc cache danh sách ngắn hạn phía Agent.
   lược (giữ bản cũ cho handle đang mở, tải vào tên khác).
 - Thư mục giữ chỗ chưa được đặt thời gian/thuộc tính như máy B (Hook trả metadata từ `FileInfo` nên chưa cần).
 
-## [Vừa] Phát hiện kết nối treo
-
-Request quá hạn trả `STATUS_IO_TIMEOUT` nhưng kết nối vẫn được coi là sống; Agent treo hẳn thì request nào cũng
-chờ đủ `RequestTimeout`. Nên có ping/keepalive và đánh dấu kết nối chết sau vài lần quá hạn liên tiếp.
-
 ## [Thấp] Commit trên Agent và đổi thuộc tính từ máy A khác chạy xen nhau
 
 Commit (`AgentShare.Write.cs`) đọc thuộc tính, `File.Replace` (mang thuộc tính file cũ sang) rồi đặt lại read-only; một
