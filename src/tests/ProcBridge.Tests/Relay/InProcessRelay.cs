@@ -5,6 +5,7 @@ using ProcBridge.Relay.Integration.Api.Interfaces;
 using ProcBridge.Relay.Testing.Infrastructure;
 using ProcBridge.Relay.ViewModels.Accounts;
 using ProcBridge.Relay.ViewModels.Devices;
+using ProcBridge.Relay.Shared.Tunnel;
 using ProcBridge.Relay.ViewModels.Shares;
 using ProcBridge.Transport.Relay.Interfaces;
 using ProcBridge.Transport.Relay.Models;
@@ -35,8 +36,16 @@ internal sealed class InProcessRelay : IAsyncDisposable
     /// <summary>True when the relay runs on real PostgreSQL.</summary>
     public bool UsesPostgres => _database is not null;
 
+    /// <summary>
+    /// Fails (instead of quietly using the in-memory repositories) when <see cref="PostgresTestDatabase.RequireEnvironmentVariable"/>
+    /// is <c>1</c> and no PostgreSQL is configured: CI must run these tests on the real database.
+    /// </summary>
     public static InProcessRelay Start()
-        => new(PostgresTestDatabase.AdminConnectionString is null ? null : PostgresTestDatabase.Create());
+    {
+        if (PostgresTestDatabase.AdminConnectionString is null && PostgresTestDatabase.IsRequired)
+            Assert.Fail(PostgresTestDatabase.MissingMessage);
+        return new(PostgresTestDatabase.AdminConnectionString is null ? null : PostgresTestDatabase.Create());
+    }
 
     public RelayEndpoint Endpoint(string deviceToken) => new(Factory.Server.BaseAddress, deviceToken);
 
@@ -85,7 +94,7 @@ internal sealed class InProcessRelay : IAsyncDisposable
 internal sealed record RelayTopology(string OwnerToken, DeviceRegisteredVM Host, DeviceRegisteredVM Client, Guid ShareId);
 
 /// <summary>
-/// WebSockets to the in-process test server. Data lanes (no bearer token) are wrapped so every byte sent or received
+/// WebSockets to the in-process test server. Data lanes (path /tunnel) are wrapped so every byte sent or received
 /// on them is copied to <see cref="CapturedLaneBytes"/>: that is exactly what the relay forwards.
 /// </summary>
 internal sealed class RecordingSocketFactory(TestServer server) : IRelaySocketFactory
@@ -110,12 +119,14 @@ internal sealed class RecordingSocketFactory(TestServer server) : IRelaySocketFa
         if (bearerToken is not null)
             client.ConfigureRequest = request => request.Headers.Authorization = "Bearer " + bearerToken;
         WebSocket socket = await client.ConnectAsync(uri, cancellationToken);
-        if (bearerToken is not null)
+        if (!IsDataLane(uri))
             return socket;
         lock (_lock)
             LaneCount++;
         return new RecordingWebSocket(socket, Capture);
     }
+
+    private static bool IsDataLane(Uri uri) => string.Equals(uri.AbsolutePath, TunnelProtocol.DataPath, StringComparison.Ordinal);
 
     private void Capture(ReadOnlySpan<byte> bytes)
     {

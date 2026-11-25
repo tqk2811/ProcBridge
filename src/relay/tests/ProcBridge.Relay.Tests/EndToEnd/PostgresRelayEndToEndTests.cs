@@ -5,7 +5,8 @@ namespace ProcBridge.Relay.Tests.EndToEnd;
 
 /// <summary>
 /// Same scenarios on real PostgreSQL with the real EF repositories and migrations (temporary database, dropped at the
-/// end). Skipped (inconclusive) when <see cref="PostgresTestDatabase.EnvironmentVariable"/> is not set.
+/// end). Skipped (inconclusive) when <see cref="PostgresTestDatabase.EnvironmentVariable"/> is not set, and failed
+/// instead when <see cref="PostgresTestDatabase.RequireEnvironmentVariable"/> is <c>1</c> (CI).
 /// </summary>
 [TestClass]
 public sealed class PostgresRelayEndToEndTests : RelayEndToEndTestsBase
@@ -17,6 +18,8 @@ public sealed class PostgresRelayEndToEndTests : RelayEndToEndTestsBase
     {
         get
         {
+            if (_factory is null && PostgresTestDatabase.IsRequired)
+                Assert.Fail(PostgresTestDatabase.MissingMessage);
             if (_factory is null)
                 Assert.Inconclusive($"Chưa đặt {PostgresTestDatabase.EnvironmentVariable} (chuỗi kết nối PostgreSQL được tạo database).");
             return _factory;
