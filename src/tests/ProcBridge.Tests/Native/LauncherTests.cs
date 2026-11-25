@@ -3,6 +3,7 @@ using ProcBridge.Agent;
 using ProcBridge.Agent.Models;
 using ProcBridge.Launcher;
 using ProcBridge.Launcher.Models;
+using ProcBridge.Protocol.Enums;
 
 namespace ProcBridge.Tests.Native;
 
@@ -36,6 +37,20 @@ public sealed class LauncherTests
     }
 
     [TestMethod]
+    public void CommandLine_WriteOptions_AreParsed()
+    {
+        LauncherOptions defaults = LauncherCommandLine.Parse(["--agent", "h", "--share", "s", "--map", @"V:\a", "", "--", "cmd.exe"]);
+        LauncherOptions options = LauncherCommandLine.Parse(
+            ["--agent", "h", "--share", "s", "--map", @"V:\a", "", "--write-through", "--conflict", "overwrite", "--", "cmd.exe"]);
+
+        Assert.IsFalse(defaults.WriteThrough);
+        Assert.AreEqual(ConflictPolicy.KeepBoth, defaults.ConflictPolicy);
+        Assert.IsTrue(options.WriteThrough);
+        Assert.AreEqual(ConflictPolicy.Overwrite, options.ConflictPolicy);
+        Assert.ThrowsExactly<ArgumentException>(() => LauncherCommandLine.Parse(["--agent", "h", "--share", "s", "--map", @"V:\a", "", "--conflict", "x", "--", "cmd.exe"]));
+    }
+
+    [TestMethod]
     [DataRow("--share", "src", "--map", @"V:\a", "", "--", "cmd.exe")]
     [DataRow("--agent", "host", "--share", "src", "--", "cmd.exe")]
     [DataRow("--agent", "host", "--share", "src", "--map", @"V:\a", "")]
@@ -51,7 +66,7 @@ public sealed class LauncherTests
     public async Task Run_ReadsThroughAgent_AndStopsBrokerAfterwards(string platform)
     {
         using HookSandbox sandbox = new(platform);
-        await using var agent = new AgentServer([new ReadOnlyShare("share", sandbox.RealRoot)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
+        await using var agent = new AgentServer([new AgentShare("share", sandbox.RealRoot)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
         agent.Start();
         string marker = Path.Combine(sandbox.BaseDirectory, "copied.txt");
         var options = new LauncherOptions
@@ -82,7 +97,7 @@ public sealed class LauncherTests
     public async Task Run_WithOutputSink_CollectsLinesOfTheTree_InTheWorkingDirectory()
     {
         using HookSandbox sandbox = new("x64");
-        await using var agent = new AgentServer([new ReadOnlyShare("share", sandbox.RealRoot)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
+        await using var agent = new AgentServer([new AgentShare("share", sandbox.RealRoot)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
         agent.Start();
         string workingDirectory = Directory.CreateDirectory(Path.Combine(sandbox.BaseDirectory, "work")).FullName;
         var options = new LauncherOptions

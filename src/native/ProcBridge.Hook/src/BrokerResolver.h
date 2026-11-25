@@ -46,20 +46,35 @@ namespace ProcBridge::Hook
         }
 
         NTSTATUS Resolve(int mapping, const UNICODE_STRING& path, PathKind kind, const OpenIntent& intent,
-            UNICODE_STRING& realPath, HookIpc::FileInfo* info) const noexcept override;
+            UNICODE_STRING& realPath, HookIpc::FileInfo* info, uint64_t* writeToken = nullptr) const noexcept override;
         bool IsRemote() const noexcept override { return true; }
         NTSTATUS Stat(int mapping, const UNICODE_STRING& path, PathKind kind, HookIpc::FileInfo& info) const noexcept override;
         NTSTATUS List(int mapping, const UNICODE_STRING& ntPath, uint32_t startIndex, BYTE* buffer,
             DirectoryPage& page) const noexcept override;
+        NTSTATUS CloseWrite(uint64_t writeToken) const noexcept override { return SendToken(HookIpc::MessageType::Close, writeToken); }
+        NTSTATUS FlushWrite(uint64_t writeToken) const noexcept override { return SendToken(HookIpc::MessageType::Flush, writeToken); }
+        NTSTATUS RetainWrite(uint64_t writeToken) const noexcept override { return SendToken(HookIpc::MessageType::Retain, writeToken); }
+        bool IsWriteThrough() const noexcept override { return _writeThrough; }
+        NTSTATUS SetInfo(int mapping, const UNICODE_STRING& ntPath, const HookIpc::SetInfoRequest& request,
+            HookIpc::FileInfo& info) const noexcept override;
+        NTSTATUS Rename(int mapping, const UNICODE_STRING& ntPath, int newMapping, const UNICODE_STRING& newNtPath,
+            bool replaceIfExists, HookIpc::FileInfo& info, UNICODE_STRING& newRealPath) const noexcept override;
+        NTSTATUS Delete(int mapping, const UNICODE_STRING& ntPath, bool keepItem, uint64_t expectedFileId) const noexcept override;
 
     private:
         /// View of path below the virtual root ('\' separated, no leading '\'; empty for the root itself).
         UNICODE_STRING RelativePath(int mapping, const UNICODE_STRING& path, PathKind kind) const noexcept;
 
         NTSTATUS ResolveRelative(int mapping, const UNICODE_STRING& relative, const OpenIntent& intent,
-            UNICODE_STRING& realPath, HookIpc::FileInfo* info) const noexcept;
+            UNICODE_STRING& realPath, HookIpc::FileInfo* info, uint64_t* writeToken) const noexcept;
+
+        NTSTATUS SendToken(HookIpc::MessageType type, uint64_t writeToken) const noexcept;
+
+        /// Builds \??\<text> into realPath (freed with FreeString).
+        static NTSTATUS MakeNtPath(const BYTE* text, USHORT chars, UNICODE_STRING& realPath) noexcept;
 
         PathMapper _paths;
+        bool _writeThrough = false;
         // Calls are const for IPathResolver; the pool is internally synchronized.
         mutable BrokerClient _client;
     };

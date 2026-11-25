@@ -45,6 +45,13 @@ public sealed class ConnectionPool : IAsyncDisposable
         return connection.Server.MaxReadSize;
     }
 
+    /// <summary>The Hello answer of a pooled connection (opening one when none is alive).</summary>
+    public async Task<HelloResponse> GetServerHelloAsync(CancellationToken cancellationToken)
+    {
+        (_, ProtocolConnection connection) = await AcquireAsync(cancellationToken).ConfigureAwait(false);
+        return connection.Server;
+    }
+
     public async Task<Frame> SendAsync(MessageType type, ReadOnlyMemory<byte> header, ReadOnlyMemory<byte> payload, bool idempotent, CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(_disposed != 0, this);

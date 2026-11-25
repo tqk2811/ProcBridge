@@ -20,10 +20,10 @@ internal sealed class AgentSession
 {
     private readonly IFrameChannel _channel;
     private readonly TcpClient _client;
-    private readonly IReadOnlyDictionary<string, ReadOnlyShare> _shares;
+    private readonly IReadOnlyDictionary<string, AgentShare> _shares;
     private readonly AgentOptions _options;
     private readonly SemaphoreSlim _concurrency;
-    private readonly Func<ReadOnlyShare, ShareWatcher> _getWatcher;
+    private readonly Func<AgentShare, ShareWatcher> _getWatcher;
     private readonly ConcurrentDictionary<ulong, ShareTreeWalk> _walks = new();
     private readonly object _watchLock = new();
     private Channel<FsChangeNotification>? _notifications;
@@ -32,10 +32,10 @@ internal sealed class AgentSession
     private int _lostNotifications;
     private long _nextWalkId;
     private readonly ExplorerDispatcher? _explorer;
-    private ReadOnlyShare? _share;
+    private AgentShare? _share;
 
     /// <param name="explorer">Remote Explorer of the authenticated machine A; null (plain transport) refuses Explorer messages.</param>
-    public AgentSession(IFrameChannel channel, TcpClient client, IReadOnlyDictionary<string, ReadOnlyShare> shares, AgentOptions options, Func<ReadOnlyShare, ShareWatcher> getWatcher, ExplorerDispatcher? explorer = null)
+    public AgentSession(IFrameChannel channel, TcpClient client, IReadOnlyDictionary<string, AgentShare> shares, AgentOptions options, Func<AgentShare, ShareWatcher> getWatcher, ExplorerDispatcher? explorer = null)
     {
         _explorer = explorer;
         _getWatcher = getWatcher;
@@ -47,7 +47,7 @@ internal sealed class AgentSession
     }
 
     /// <summary>Share named in Hello; Explorer-only connections have none.</summary>
-    private ReadOnlyShare Share => _share ?? throw new ProtocolStatusException(NtStatus.BadNetworkName, "This connection did not open a share.");
+    private AgentShare Share => _share ?? throw new ProtocolStatusException(NtStatus.BadNetworkName, "This connection did not open a share.");
 
     /// <summary>Closes the socket, which ends <see cref="RunAsync"/>.</summary>
     public void Abort() => _client.Dispose();
@@ -105,6 +105,7 @@ internal sealed class AgentSession
                 ServerName = _options.ServerName,
                 MaxFrameSize = _options.MaxFrameSize,
                 MaxReadSize = _options.MaxReadSize,
+                Writable = _share?.IsWritable == true, // no share: Remote Explorer only connection
             };
             await SendAsync(FrameKind.Response, hello, ProtocolSerializer.Serialize(response), default).ConfigureAwait(false);
             return true;
@@ -160,6 +161,45 @@ internal sealed class AgentSession
                         throw new ProtocolStatusException(NtStatus.AccessDenied, "The Remote Explorer needs an authenticated, encrypted connection.");
                     (byte[] header, ReadOnlyMemory<byte> payload) = _explorer.Handle(request);
                     await SendAsync(FrameKind.Response, request, header, payload).ConfigureAwait(false);
+                    break;
+                }
+                case MessageType.FsCreate:
+                {
+                    FsCreateRequest create = ProtocolSerializer.Deserialize<FsCreateRequest>(request.Header);
+                    await SendStatAsync(request, Share.Create(create.Path, create.IsDirectory, create.Attributes)).ConfigureAwait(false);
+                    break;
+                }
+                case MessageType.FsWrite:
+                {
+                    FsWriteRequest write = ProtocolSerializer.Deserialize<FsWriteRequest>(request.Header);
+                    int count = Share.WriteBlock(write.Path, write.UploadId, write.Offset, request.Payload.Span);
+                    await SendAsync(FrameKind.Response, request, ProtocolSerializer.Serialize(new FsWriteResponse { Count = count }), default).ConfigureAwait(false);
+                    break;
+                }
+                case MessageType.FsCommit:
+                {
+                    FsCommitRequest commit = ProtocolSerializer.Deserialize<FsCommitRequest>(request.Header);
+                    FsCommitResponse response = Share.Commit(commit.Path, commit.UploadId, commit.Size, commit.ExpectedVersion, commit.LastWriteTime, commit.Policy);
+                    await SendAsync(FrameKind.Response, request, ProtocolSerializer.Serialize(response), default).ConfigureAwait(false);
+                    break;
+                }
+                case MessageType.FsSetInfo:
+                {
+                    FsSetInfoRequest set = ProtocolSerializer.Deserialize<FsSetInfoRequest>(request.Header);
+                    await SendStatAsync(request, Share.SetInfo(set.Path, set.Attributes, set.CreationTime, set.LastAccessTime, set.LastWriteTime, set.EndOfFile)).ConfigureAwait(false);
+                    break;
+                }
+                case MessageType.FsRename:
+                {
+                    FsRenameRequest rename = ProtocolSerializer.Deserialize<FsRenameRequest>(request.Header);
+                    await SendStatAsync(request, Share.Rename(rename.Path, rename.NewPath, rename.ReplaceIfExists)).ConfigureAwait(false);
+                    break;
+                }
+                case MessageType.FsDelete:
+                {
+                    FsDeleteRequest delete = ProtocolSerializer.Deserialize<FsDeleteRequest>(request.Header);
+                    var response = new FsDeleteResponse { Deleted = Share.Delete(delete.Path, delete.ExpectedFileId) };
+                    await SendAsync(FrameKind.Response, request, ProtocolSerializer.Serialize(response), default).ConfigureAwait(false);
                     break;
                 }
                 default:
@@ -313,6 +353,9 @@ internal sealed class AgentSession
             ArrayPool<byte>.Shared.Return(buffer);
         }
     }
+
+    private Task SendStatAsync(Frame request, FsEntry entry)
+        => SendAsync(FrameKind.Response, request, ProtocolSerializer.Serialize(new FsStatResponse { Entry = entry }), default);
 
     private Task SendErrorAsync(Frame request, Exception exception)
     {

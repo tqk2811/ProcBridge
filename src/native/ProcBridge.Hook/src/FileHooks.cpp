@@ -9,6 +9,11 @@
 // folder they need no rewriting in M1. With the Broker (M2) a virtual directory handle is a handle to an
 // empty placeholder folder: its listings are built from machine B (RemoteHandleTable), attributes
 // by path come from Stat, and every open asks the Broker to bring the file into the cache first.
+//
+// M3 (writable share): the Broker creates missing names on machine B before the real create of the cache copy, and
+// hands out a write token for opens that may change content; the last close (or a flush) of a handle with a token
+// asks the Broker to write the cache copy back. Rename, delete (disposition, delete-on-close, NtDeleteFile) and
+// attribute/time changes on virtual handles go to machine B first, then to the cache copy.
 #include "FileHooks.h"
 #include "DirectoryNameCache.h"
 #include "HandleInheritance.h"
@@ -17,6 +22,7 @@
 #include "PathString.h"
 #include "RemoteHandles.h"
 #include <MinHook.h>
+#include <algorithm>
 #include <cstring>
 
 namespace ProcBridge::Hook
@@ -58,6 +64,8 @@ namespace ProcBridge::Hook
         NtQueryInformationByNameFn g_ntQueryInformationByName = nullptr;
         NtDeleteFileFn g_ntDeleteFile = nullptr;
         NtDuplicateObjectFn g_ntDuplicateObject = nullptr;
+        NtFlushBuffersFileFn g_ntFlushBuffersFile = nullptr;
+        NtWriteFileFn g_ntWriteFile = nullptr;
 
         // Caller memory: hooks read and write pointers that the kernel would probe and answer with
         // STATUS_ACCESS_VIOLATION. Every access to caller memory goes through these SEH-guarded copies
@@ -140,12 +148,27 @@ namespace ProcBridge::Hook
                 else
                 {
                     const int mapping = g_resolver->FindMapping(_nameCopy);
-                    if (mapping < 0)
+                    if (mapping >= 0)
+                    {
+                        _mapping = mapping;
+                        Translate(_nameCopy, PathKind::Nt);
+                    }
+                    else if (IsDevicePath(_nameCopy))
+                    {
+                        // \Device\HarddiskVolumeN\... (the name NtQueryObject reports): advapi32 opens the parent folder
+                        // of a file through it when it applies inherited ACEs (ReplaceFile, SetSecurityInfo).
+                        const int deviceMapping = g_resolver->FindMappingByDevicePath(_nameCopy);
+                        if (deviceMapping < 0)
+                        {
+                            return;
+                        }
+                        _mapping = deviceMapping;
+                        Translate(_nameCopy, PathKind::Device);
+                    }
+                    else
                     {
                         return;
                     }
-                    _mapping = mapping;
-                    Translate(_nameCopy, PathKind::Nt);
                 }
                 if (_rewritten)
                 {
@@ -181,8 +204,28 @@ namespace ProcBridge::Hook
             PathKind MatchedKind() const noexcept { return _kind; }
             /// Machine B's metadata from the resolve (Attributes 0 when the resolver has none).
             const HookIpc::FileInfo& Info() const noexcept { return _info; }
+            /// The Broker's write token of this open (0 when none).
+            uint64_t WriteToken() const noexcept { return _writeToken; }
 
         private:
+            static bool IsDevicePath(const UNICODE_STRING& name) noexcept
+            {
+                constexpr wchar_t prefix[] = L"\\Device\\";
+                constexpr USHORT prefixChars = 8;
+                if (name.Length < prefixChars * sizeof(wchar_t))
+                {
+                    return false;
+                }
+                for (USHORT i = 0; i < prefixChars; ++i)
+                {
+                    if (RtlUpcaseUnicodeChar(name.Buffer[i]) != RtlUpcaseUnicodeChar(prefix[i]))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
             /// Copies the caller's name text; short names stay in the inline buffer.
             bool CopyName(const UNICODE_STRING& name) noexcept
             {
@@ -217,7 +260,7 @@ namespace ProcBridge::Hook
                 {
                     return;
                 }
-                const NTSTATUS status = g_resolver->Resolve(_mapping, path, kind, *_intent, _name, &_info);
+                const NTSTATUS status = g_resolver->Resolve(_mapping, path, kind, *_intent, _name, &_info, &_writeToken);
                 _rewritten = NT_SUCCESS(status);
                 _error = _rewritten ? STATUS_SUCCESS : status;
             }
@@ -332,6 +375,7 @@ namespace ProcBridge::Hook
             UNICODE_STRING _ownedMatch{};
             PathKind _kind = PathKind::Nt;
             HookIpc::FileInfo _info{};
+            uint64_t _writeToken = 0;
             wchar_t _inlineName[260];
             wchar_t* _heapName = nullptr;
             int _mapping = -1;
@@ -339,9 +383,24 @@ namespace ProcBridge::Hook
             NTSTATUS _error = STATUS_SUCCESS;
         };
 
+        /// The matched virtual path as an NT path (\??\...), copied into ntPath (freed with FreeString). A device
+        /// spelling (joined with the current directory) is moved under the NT root of its mapping.
+        bool ToVirtualNtPath(const RedirectedAttributes& redirect, UNICODE_STRING& ntPath) noexcept
+        {
+            const UNICODE_STRING& matched = redirect.MatchedPath();
+            if (redirect.MatchedKind() == PathKind::Nt)
+            {
+                return ConcatString(ntPath, matched, nullptr, 0);
+            }
+            const PathMapping& map = g_resolver->GetMapping(redirect.Mapping());
+            return ConcatString(ntPath, map.VirtualNt,
+                reinterpret_cast<const wchar_t*>(reinterpret_cast<const BYTE*>(matched.Buffer) + map.VirtualDevicePath.Length),
+                static_cast<size_t>(matched.Length) - map.VirtualDevicePath.Length);
+        }
+
         /// Remote resolver: a handle opened through a virtual path reports machine B's metadata, and a directory
-        /// gets its listings from machine B.
-        void TrackRemoteHandle(HANDLE handle, const RedirectedAttributes& redirect) noexcept
+        /// gets its listings from machine B. It also keeps the open's write token and delete-on-close (M3).
+        void TrackRemoteHandle(HANDLE handle, const RedirectedAttributes& redirect, bool deleteOnClose) noexcept
         {
             const UNICODE_STRING& matched = redirect.MatchedPath();
             if (!g_resolver->IsRemote() || !redirect.Matched() || matched.Length == 0)
@@ -349,30 +408,35 @@ namespace ProcBridge::Hook
                 g_remoteHandles.Remove(handle);
                 return;
             }
-            if (redirect.MatchedKind() == PathKind::Nt)
-            {
-                g_remoteHandles.Add(handle, redirect.Mapping(), matched, redirect.Info());
-                return;
-            }
-            // Device spelling (joined with the current directory): the same path under the NT root.
-            const PathMapping& map = g_resolver->GetMapping(redirect.Mapping());
             UNICODE_STRING ntPath{};
-            if (ConcatString(ntPath, map.VirtualNt,
-                    reinterpret_cast<const wchar_t*>(reinterpret_cast<const BYTE*>(matched.Buffer) + map.VirtualDevicePath.Length),
-                    static_cast<size_t>(matched.Length) - map.VirtualDevicePath.Length))
+            if (ToVirtualNtPath(redirect, ntPath))
             {
-                g_remoteHandles.Add(handle, redirect.Mapping(), ntPath, redirect.Info());
+                g_remoteHandles.Add(handle, redirect.Mapping(), ntPath, redirect.Info(), redirect.WriteToken(), deleteOnClose);
                 FreeString(ntPath);
+            }
+            else if (redirect.WriteToken() != 0)
+            {
+                g_resolver->CloseWrite(redirect.WriteToken());
+            }
+        }
+
+        /// A failed open gives its write token back so the Broker does not keep the file busy.
+        void ReleaseUnusedToken(const RedirectedAttributes& redirect) noexcept
+        {
+            if (redirect.WriteToken() != 0)
+            {
+                g_resolver->CloseWrite(redirect.WriteToken());
             }
         }
 
         /// A new handle value may equal a handle that was closed without NtClose (NtDuplicateObject with
         /// DUPLICATE_CLOSE_SOURCE, kernel): replace or drop stale entries.
-        void TrackOpenedHandle(PHANDLE handlePointer, const RedirectedAttributes& redirect) noexcept
+        void TrackOpenedHandle(PHANDLE handlePointer, const RedirectedAttributes& redirect, bool deleteOnClose) noexcept
         {
             HANDLE handle = nullptr;
             if (!SafeCopy(&handle, handlePointer, sizeof(handle)))
             {
+                ReleaseUnusedToken(redirect);
                 return;
             }
             g_directoryNames.Remove(handle);
@@ -384,7 +448,7 @@ namespace ProcBridge::Hook
             {
                 g_handles.Remove(handle);
             }
-            TrackRemoteHandle(handle, redirect);
+            TrackRemoteHandle(handle, redirect, deleteOnClose);
         }
 
         NTSTATUS NTAPI HookNtCreateFile(PHANDLE fileHandle, ACCESS_MASK desiredAccess, POBJECT_ATTRIBUTES objectAttributes,
@@ -397,7 +461,7 @@ namespace ProcBridge::Hook
                 return g_ntCreateFile(fileHandle, desiredAccess, objectAttributes, ioStatusBlock, allocationSize,
                     fileAttributes, shareAccess, createDisposition, createOptions, eaBuffer, eaLength);
             }
-            const OpenIntent intent{ desiredAccess, createDisposition, createOptions };
+            const OpenIntent intent{ desiredAccess, createDisposition, createOptions, fileAttributes };
             RedirectedAttributes redirect(objectAttributes, &intent);
             if (redirect.Error() != STATUS_SUCCESS)
             {
@@ -407,7 +471,11 @@ namespace ProcBridge::Hook
                 allocationSize, fileAttributes, shareAccess, createDisposition, createOptions, eaBuffer, eaLength);
             if (NT_SUCCESS(status))
             {
-                TrackOpenedHandle(fileHandle, redirect);
+                TrackOpenedHandle(fileHandle, redirect, (createOptions & FileDeleteOnCloseOption) != 0);
+            }
+            else
+            {
+                ReleaseUnusedToken(redirect);
             }
             return status;
         }
@@ -429,7 +497,11 @@ namespace ProcBridge::Hook
             const NTSTATUS status = g_ntOpenFile(fileHandle, desiredAccess, redirect.Get(), ioStatusBlock, shareAccess, openOptions);
             if (NT_SUCCESS(status))
             {
-                TrackOpenedHandle(fileHandle, redirect);
+                TrackOpenedHandle(fileHandle, redirect, (openOptions & FileDeleteOnCloseOption) != 0);
+            }
+            else
+            {
+                ReleaseUnusedToken(redirect);
             }
             return status;
         }
@@ -618,6 +690,27 @@ namespace ProcBridge::Hook
             {
                 return g_ntDeleteFile(objectAttributes);
             }
+            if (g_resolver->IsRemote())
+            {
+                // Machine B deletes; the cache copy goes with it (the Broker removes it).
+                RedirectedAttributes match(objectAttributes, nullptr);
+                if (match.Error() != STATUS_SUCCESS)
+                {
+                    return match.Error();
+                }
+                if (match.MatchedPath().Length == 0)
+                {
+                    return g_ntDeleteFile(match.Get());
+                }
+                UNICODE_STRING ntPath{};
+                if (!ToVirtualNtPath(match, ntPath))
+                {
+                    return STATUS_NO_MEMORY;
+                }
+                const NTSTATUS status = g_resolver->Delete(match.Mapping(), ntPath, false, 0);
+                FreeString(ntPath);
+                return status;
+            }
             const OpenIntent intent{ DELETE, FileOpenDisposition, 0 };
             RedirectedAttributes redirect(objectAttributes, &intent);
             if (redirect.Error() != STATUS_SUCCESS)
@@ -676,6 +769,13 @@ namespace ProcBridge::Hook
             if (!g_remoteHandles.GetInfo(fileHandle, info))
             {
                 return;
+            }
+            if (g_remoteHandles.GetWriteToken(fileHandle) != 0)
+            {
+                // The cache copy holds this handle's writes and times: only the identity stays machine B's.
+                times = -1;
+                attributes = -1;
+                allocation = -1;
             }
             BYTE* target = static_cast<BYTE*>(information);
             const auto patch = [&](int offset, const void* value, ULONG bytes) noexcept
@@ -767,12 +867,303 @@ namespace ProcBridge::Hook
                 || informationClass == FileRenameInformationEx || informationClass == FileLinkInformationEx;
         }
 
+        /// Copies the rename/link target of a FILE_RENAME_INFORMATION into text (at least 0xFFFE bytes).
+        NTSTATUS ReadRenameTarget(PVOID information, ULONG length, FileRenameInfo& header, HeapBuffer& text, UNICODE_STRING& target) noexcept
+        {
+            constexpr size_t headerBytes = offsetof(FileRenameInfo, FileName);
+            if (!SafeCopy(&header, information, headerBytes))
+            {
+                return STATUS_ACCESS_VIOLATION;
+            }
+            if (header.FileNameLength > 0xFFFC || header.FileNameLength % sizeof(wchar_t) != 0 || headerBytes + header.FileNameLength > length)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+            if (!text)
+            {
+                return STATUS_NO_MEMORY;
+            }
+            if (!SafeCopy(text.Get(), static_cast<const BYTE*>(information) + headerBytes, header.FileNameLength))
+            {
+                return STATUS_ACCESS_VIOLATION;
+            }
+            target.Buffer = reinterpret_cast<PWSTR>(text.Get());
+            target.Length = static_cast<USHORT>(header.FileNameLength);
+            target.MaximumLength = target.Length;
+            return STATUS_SUCCESS;
+        }
+
+        /// Virtual NT path a rename target names, into owned (freed with FreeString); mapping -1 when it is not virtual.
+        /// A bare name (no '\', no root directory) renames inside the source's folder.
+        NTSTATUS ResolveRenameTarget(const FileRenameInfo& header, const UNICODE_STRING& target, bool sourceTracked,
+            const UNICODE_STRING& sourcePath, int sourceMapping, int& mapping, UNICODE_STRING& owned) noexcept
+        {
+            mapping = -1;
+            const auto join = [&](const UNICODE_STRING& folder, int folderMapping) noexcept -> NTSTATUS
+            {
+                const size_t bytes = static_cast<size_t>(folder.Length) + sizeof(wchar_t) + target.Length;
+                if (bytes > MaxUnicodeStringBytes || !AllocateString(owned, bytes))
+                {
+                    return bytes > MaxUnicodeStringBytes ? STATUS_OBJECT_NAME_INVALID : STATUS_NO_MEMORY;
+                }
+                BYTE* cursor = reinterpret_cast<BYTE*>(owned.Buffer);
+                memcpy(cursor, folder.Buffer, folder.Length);
+                *reinterpret_cast<wchar_t*>(cursor + folder.Length) = L'\\';
+                memcpy(cursor + folder.Length + sizeof(wchar_t), target.Buffer, target.Length);
+                owned.Length = static_cast<USHORT>(bytes);
+                mapping = folderMapping;
+                return STATUS_SUCCESS;
+            };
+            if (header.RootDirectory != nullptr)
+            {
+                int rootMapping = -1;
+                UNICODE_STRING rootPath{};
+                if (!g_remoteHandles.GetDirectoryPath(header.RootDirectory, rootMapping, rootPath))
+                {
+                    return STATUS_SUCCESS; // relative to a real folder
+                }
+                const NTSTATUS status = join(rootPath, rootMapping);
+                FreeString(rootPath);
+                return status;
+            }
+            if (target.Length > 0 && target.Buffer[0] == L'\\')
+            {
+                const int found = g_resolver->FindMapping(target);
+                if (found >= 0)
+                {
+                    if (!ConcatString(owned, target, nullptr, 0))
+                    {
+                        return STATUS_NO_MEMORY;
+                    }
+                    mapping = found;
+                }
+                return STATUS_SUCCESS;
+            }
+            if (!sourceTracked)
+            {
+                return STATUS_SUCCESS;
+            }
+            UNICODE_STRING folder = sourcePath;
+            while (folder.Length > 0 && folder.Buffer[folder.Length / sizeof(wchar_t) - 1] != L'\\')
+            {
+                folder.Length -= sizeof(wchar_t);
+            }
+            if (folder.Length > 0)
+            {
+                folder.Length -= sizeof(wchar_t);
+            }
+            return join(folder, sourceMapping);
+        }
+
+        /// NtSetInformationFile with a remote resolver (M3). handled=false lets the system (or the M1 path) answer.
+        NTSTATUS SetRemoteInformation(HANDLE fileHandle, PIO_STATUS_BLOCK ioStatusBlock, PVOID information, ULONG length,
+            ULONG informationClass, bool& handled) noexcept
+        {
+            handled = false;
+            const bool rename = IsRenameClass(informationClass);
+            if (!rename && informationClass != FileBasicInformation && informationClass != FileDispositionInformation
+                && informationClass != FileDispositionInformationEx)
+            {
+                return STATUS_SUCCESS;
+            }
+            int mapping = -1;
+            UNICODE_STRING path{};
+            HookIpc::FileInfo info{};
+            bool tracked = !g_remoteHandles.IsEmpty() && g_remoteHandles.GetEntry(fileHandle, mapping, path, info);
+            if (tracked && g_remoteHandles.IsOrphaned(fileHandle))
+            {
+                // Replaced by a rename: the file has no name on machine B, only its cache copy is left.
+                if (!rename)
+                {
+                    FreeString(path);
+                    return STATUS_SUCCESS;
+                }
+                tracked = false;
+            }
+            struct PathOwner
+            {
+                UNICODE_STRING& Value;
+                ~PathOwner() { FreeString(Value); }
+            } pathOwner{ path };
+            if (!tracked && !rename)
+            {
+                return STATUS_SUCCESS;
+            }
+
+            if (rename)
+            {
+                if (length < offsetof(FileRenameInfo, FileName))
+                {
+                    return STATUS_SUCCESS;
+                }
+                FileRenameInfo header{};
+                HeapBuffer text(0x10000);
+                UNICODE_STRING target{};
+                NTSTATUS status = ReadRenameTarget(information, length, header, text, target);
+                if (!NT_SUCCESS(status))
+                {
+                    if (!tracked)
+                    {
+                        return STATUS_SUCCESS; // let the system report it
+                    }
+                    handled = true;
+                    return status;
+                }
+                int targetMapping = -1;
+                UNICODE_STRING virtualTarget{};
+                status = ResolveRenameTarget(header, target, tracked, path, mapping, targetMapping, virtualTarget);
+                struct TargetOwner
+                {
+                    UNICODE_STRING& Value;
+                    ~TargetOwner() { FreeString(Value); }
+                } targetOwner{ virtualTarget };
+                if (!NT_SUCCESS(status))
+                {
+                    handled = true;
+                    return status;
+                }
+                if (!tracked && targetMapping < 0)
+                {
+                    return STATUS_SUCCESS; // real to real
+                }
+                handled = true;
+                if (informationClass == FileLinkInformation || informationClass == FileLinkInformationEx)
+                {
+                    return STATUS_NOT_SUPPORTED; // hard links on machine B: backlog
+                }
+                if (!tracked || targetMapping < 0)
+                {
+                    return STATUS_NOT_SAME_DEVICE; // MoveFileEx then copies and deletes
+                }
+                const bool replace = informationClass == FileRenameInformationEx ? (header.Flags & 0x1) != 0 : header.ReplaceIfExists != FALSE;
+                HookIpc::FileInfo newInfo{};
+                UNICODE_STRING newReal{};
+                status = g_resolver->Rename(mapping, path, targetMapping, virtualTarget, replace, newInfo, newReal);
+                if (!NT_SUCCESS(status))
+                {
+                    return status;
+                }
+                constexpr size_t headerBytes = offsetof(FileRenameInfo, FileName);
+                const size_t newLength = headerBytes + newReal.Length;
+                HeapBuffer buffer(newLength + sizeof(wchar_t));
+                if (!buffer)
+                {
+                    FreeString(newReal);
+                    return STATUS_NO_MEMORY;
+                }
+                memcpy(buffer.Get(), &header, headerBytes);
+                auto* newRename = reinterpret_cast<FileRenameInfo*>(buffer.Get());
+                newRename->RootDirectory = nullptr;
+                newRename->FileNameLength = newReal.Length;
+                memcpy(newRename->FileName, newReal.Buffer, newReal.Length);
+                FreeString(newReal);
+                status = g_ntSetInformationFile(fileHandle, ioStatusBlock, buffer.Get(), static_cast<ULONG>(newLength), informationClass);
+                if (NT_SUCCESS(status))
+                {
+                    g_remoteHandles.OrphanPath(virtualTarget, fileHandle);
+                    g_remoteHandles.Update(fileHandle, &virtualTarget, &newInfo);
+                }
+                return status;
+            }
+
+            if (informationClass == FileDispositionInformation || informationClass == FileDispositionInformationEx)
+            {
+                ULONG flags = 0;
+                if (informationClass == FileDispositionInformation)
+                {
+                    BOOLEAN deleteFile = FALSE;
+                    if (length < sizeof(deleteFile) || !SafeCopy(&deleteFile, information, sizeof(deleteFile)))
+                    {
+                        return STATUS_SUCCESS;
+                    }
+                    flags = deleteFile ? FileDispositionDelete : 0;
+                }
+                else if (length < sizeof(flags) || !SafeCopy(&flags, information, sizeof(flags)))
+                {
+                    return STATUS_SUCCESS;
+                }
+                handled = true;
+                if ((flags & FileDispositionOnClose) != 0)
+                {
+                    const NTSTATUS status = g_ntSetInformationFile(fileHandle, ioStatusBlock, information, length, informationClass);
+                    if (NT_SUCCESS(status))
+                    {
+                        g_remoteHandles.SetDeleteOnClose(fileHandle, (flags & FileDispositionDelete) != 0);
+                    }
+                    return status;
+                }
+                if ((flags & FileDispositionDelete) != 0)
+                {
+                    // Machine B decides (directory not empty, read only...). Undoing it later is not possible (backlog).
+                    const NTSTATUS status = g_resolver->Delete(mapping, path, true, 0);
+                    if (!NT_SUCCESS(status))
+                    {
+                        return status;
+                    }
+                }
+                return g_ntSetInformationFile(fileHandle, ioStatusBlock, information, length, informationClass);
+            }
+
+            // FileBasicInformation: times (0 = keep, -1/-2 = stop/resume automatic updates) and attributes (0 = keep).
+            BYTE basic[BasicInfoSize] = {};
+            if (length < BasicInfoSize || !SafeCopy(basic, information, BasicInfoSize))
+            {
+                return STATUS_SUCCESS;
+            }
+            HookIpc::SetInfoRequest request{};
+            int64_t times[3] = {};
+            memcpy(times, basic, sizeof(times));
+            const uint16_t timeFields[3] = { HookIpc::SetCreationTime, HookIpc::SetLastAccessTime, HookIpc::SetLastWriteTime };
+            for (int i = 0; i < 3; ++i)
+            {
+                if (times[i] > 0)
+                {
+                    request.Fields |= timeFields[i];
+                }
+            }
+            request.CreationTime = times[0];
+            request.LastAccessTime = times[1];
+            request.LastWriteTime = times[2];
+            memcpy(&request.Attributes, basic + 32, sizeof(request.Attributes));
+            if (request.Attributes != 0)
+            {
+                request.Fields |= HookIpc::SetAttributes;
+            }
+            if (request.Fields == 0)
+            {
+                return STATUS_SUCCESS;
+            }
+            handled = true;
+            HookIpc::FileInfo newInfo{};
+            NTSTATUS status = g_resolver->SetInfo(mapping, path, request, newInfo);
+            if (!NT_SUCCESS(status))
+            {
+                return status;
+            }
+            status = g_ntSetInformationFile(fileHandle, ioStatusBlock, information, length, informationClass);
+            if (NT_SUCCESS(status))
+            {
+                g_remoteHandles.Update(fileHandle, nullptr, &newInfo);
+            }
+            return status;
+        }
+
         NTSTATUS NTAPI HookNtSetInformationFile(HANDLE fileHandle, PIO_STATUS_BLOCK ioStatusBlock, PVOID information,
             ULONG length, ULONG informationClass)
         {
             constexpr size_t headerBytes = offsetof(FileRenameInfo, FileName);
             ReentryGuard guard;
-            if (!guard.IsOutermost() || !IsRenameClass(informationClass) || information == nullptr || length < headerBytes)
+            if (!guard.IsOutermost() || information == nullptr)
+            {
+                return g_ntSetInformationFile(fileHandle, ioStatusBlock, information, length, informationClass);
+            }
+            if (g_resolver->IsRemote())
+            {
+                bool handled = false;
+                const NTSTATUS status = SetRemoteInformation(fileHandle, ioStatusBlock, information, length, informationClass, handled);
+                return handled ? status : g_ntSetInformationFile(fileHandle, ioStatusBlock, information, length, informationClass);
+            }
+            if (!IsRenameClass(informationClass) || length < headerBytes)
             {
                 return g_ntSetInformationFile(fileHandle, ioStatusBlock, information, length, informationClass);
             }
@@ -899,7 +1290,52 @@ namespace ProcBridge::Hook
                 g_directoryNames.Remove(handle);
                 if (remote)
                 {
-                    g_remoteHandles.Remove(handle, remoteGeneration);
+                    RemovedRemoteHandle removed;
+                    g_remoteHandles.Remove(handle, remoteGeneration, &removed);
+                    if (removed.DeleteOnClose)
+                    {
+                        // The system deleted the cache copy with the handle; machine B follows, unless another file
+                        // took the name on machine B since the open (the file id differs).
+                        g_resolver->Delete(removed.Mapping, removed.Path, true, removed.FileId);
+                        FreeString(removed.Path);
+                    }
+                    if (removed.WriteToken != 0)
+                    {
+                        g_resolver->CloseWrite(removed.WriteToken);
+                    }
+                }
+            }
+            return status;
+        }
+
+        /// A flush of a handle with a write token writes the cache copy back to machine B (plan 4.5).
+        NTSTATUS NTAPI HookNtFlushBuffersFile(HANDLE fileHandle, PIO_STATUS_BLOCK ioStatusBlock)
+        {
+            const NTSTATUS status = g_ntFlushBuffersFile(fileHandle, ioStatusBlock);
+            ReentryGuard guard;
+            if (NT_SUCCESS(status) && guard.IsOutermost())
+            {
+                const uint64_t token = g_remoteHandles.GetWriteToken(fileHandle);
+                if (token != 0)
+                {
+                    g_resolver->FlushWrite(token);
+                }
+            }
+            return status;
+        }
+
+        /// Write-through mode only (installed when the Broker asks): each completed write is sent to machine B.
+        NTSTATUS NTAPI HookNtWriteFile(HANDLE fileHandle, HANDLE event, PIO_APC_ROUTINE apcRoutine, PVOID apcContext,
+            PIO_STATUS_BLOCK ioStatusBlock, PVOID buffer, ULONG length, PLARGE_INTEGER byteOffset, PULONG key)
+        {
+            const NTSTATUS status = g_ntWriteFile(fileHandle, event, apcRoutine, apcContext, ioStatusBlock, buffer, length, byteOffset, key);
+            ReentryGuard guard;
+            if (status == STATUS_SUCCESS && guard.IsOutermost())
+            {
+                const uint64_t token = g_remoteHandles.GetWriteToken(fileHandle);
+                if (token != 0)
+                {
+                    g_resolver->FlushWrite(token);
                 }
             }
             return status;
@@ -998,8 +1434,10 @@ namespace ProcBridge::Hook
             int remoteMapping = -1;
             UNICODE_STRING remotePath{};
             HookIpc::FileInfo remoteInfo{};
+            uint64_t remoteToken = 0;
+            bool remoteDeleteOnClose = false;
             const bool remote = sourceIsSelf && !g_remoteHandles.IsEmpty()
-                && g_remoteHandles.GetEntry(sourceHandle, remoteMapping, remotePath, remoteInfo);
+                && g_remoteHandles.GetEntry(sourceHandle, remoteMapping, remotePath, remoteInfo, &remoteToken, &remoteDeleteOnClose);
             const NTSTATUS status = g_ntDuplicateObject(sourceProcess, sourceHandle, targetProcess, targetHandle, desiredAccess,
                 handleAttributes, options);
             if (!NT_SUCCESS(status))
@@ -1031,7 +1469,8 @@ namespace ProcBridge::Hook
                 }
                 if (remote)
                 {
-                    g_remoteHandles.Add(copy, remoteMapping, remotePath, remoteInfo);
+                    // Same file object: the copy shares the write token (counted) and delete-on-close.
+                    g_remoteHandles.Add(copy, remoteMapping, remotePath, remoteInfo, remoteToken, remoteDeleteOnClose);
                 }
                 else
                 {
@@ -1082,13 +1521,17 @@ namespace ProcBridge::Hook
                 informationClass, queryFlags, fileName);
         }
 
-        /// Extra record of an inherited remote handle (init block): machine B's metadata, then the virtual
-        /// NT path (PathBytes bytes, no terminator). Read with memcpy: records are not aligned.
+        /// Extra record of an inherited remote handle (init block): machine B's metadata and the Broker's write
+        /// token, then the virtual NT path (PathBytes bytes, no terminator). Read with memcpy: records are not
+        /// aligned. Same layout in x86 and x64 (a child may have the other architecture).
         struct InheritedRemoteRecord
         {
             HookIpc::FileInfo Info;
-            ULONG PathBytes;
+            uint32_t PathBytes;
+            uint32_t Reserved;
+            uint64_t WriteToken; // retained for the child by RetainForChild; 0 = none
         };
+        static_assert(sizeof(InheritedRemoteRecord) == HookIpc::FileInfoSize + 16, "record layout must not depend on the architecture");
 
         /// Handle inheritance (plan 5.5): entries travel in the child's init block (see HandleInheritance.h).
         /// With the Broker the record of a remote handle also carries its virtual path and machine B's
@@ -1153,8 +1596,38 @@ namespace ProcBridge::Hook
                     }
                     memcpy(path.Buffer, extra + pathOffset, record.PathBytes);
                     path.Length = static_cast<USHORT>(record.PathBytes);
-                    g_remoteHandles.Add(handle, mapping, path, record.Info);
+                    // The parent retained the token for this process: its last close sends Close like the parent's.
+                    g_remoteHandles.Add(handle, mapping, path, record.Info, record.WriteToken);
                     FreeString(path);
+                }
+            }
+
+            void RetainForChild(const std::vector<Inject::InheritedHandle>& handles, const std::vector<BYTE>& extra) const noexcept override
+            {
+                // One retain per token, as the child's table counts its copies and closes the token once.
+                std::vector<uint64_t> retained;
+                for (const Inject::InheritedHandle& handle : handles)
+                {
+                    InheritedRemoteRecord record{};
+                    const size_t offset = handle.ExtraOffset;
+                    if (offset == Inject::NoExtra || offset > extra.size() || extra.size() - offset < sizeof(record))
+                    {
+                        continue;
+                    }
+                    memcpy(&record, extra.data() + offset, sizeof(record));
+                    if (record.WriteToken == 0 || std::find(retained.begin(), retained.end(), record.WriteToken) != retained.end())
+                    {
+                        continue;
+                    }
+                    try
+                    {
+                        retained.push_back(record.WriteToken);
+                    }
+                    catch (...)
+                    {
+                        // Out of memory: retain anyway (a duplicate retain only keeps the file open until the session ends).
+                    }
+                    g_resolver->RetainWrite(record.WriteToken);
                 }
             }
 
@@ -1168,7 +1641,7 @@ namespace ProcBridge::Hook
                 InheritedRemoteRecord record{};
                 int mapping = -1;
                 UNICODE_STRING path{};
-                if (!g_remoteHandles.GetEntry(handle, mapping, path, record.Info))
+                if (!g_remoteHandles.GetEntry(handle, mapping, path, record.Info, &record.WriteToken))
                 {
                     return;
                 }
@@ -1226,9 +1699,17 @@ namespace ProcBridge::Hook
             { "NtQueryDirectoryFile", reinterpret_cast<void*>(&HookNtQueryDirectoryFile), reinterpret_cast<void**>(&g_ntQueryDirectoryFile) },
             { "NtQueryDirectoryFileEx", reinterpret_cast<void*>(&HookNtQueryDirectoryFileEx),
                 reinterpret_cast<void**>(&g_ntQueryDirectoryFileEx), true },
+            { "NtFlushBuffersFile", reinterpret_cast<void*>(&HookNtFlushBuffersFile), reinterpret_cast<void**>(&g_ntFlushBuffersFile) },
+            // Write-through only: NtWriteFile is the hottest call, leave it alone otherwise.
+            { resolver.IsWriteThrough() ? "NtWriteFile" : nullptr, reinterpret_cast<void*>(&HookNtWriteFile),
+                reinterpret_cast<void**>(&g_ntWriteFile), true },
         };
         for (const HookEntry& hook : hooks)
         {
+            if (hook.Name == nullptr)
+            {
+                continue;
+            }
             void* target = reinterpret_cast<void*>(GetProcAddress(ntdll, hook.Name));
             if (target == nullptr)
             {

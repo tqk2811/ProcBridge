@@ -1,4 +1,5 @@
 using ProcBridge.Protocol;
+using ProcBridge.Protocol.Enums;
 using ProcBridge.Protocol.Models;
 
 namespace ProcBridge.Broker.Models;
@@ -53,6 +54,27 @@ public sealed record BrokerOptions
 
     /// <summary>Development and old tests only: talk plain frames when <see cref="Security"/> is null. Off by default.</summary>
     public bool AllowPlaintextTransport { get; init; }
+    /// <summary>What a write-back does when the file changed on machine B meanwhile (plan section 10).</summary>
+    public ConflictPolicy ConflictPolicy { get; init; } = ConflictPolicy.KeepBoth;
+
+    /// <summary>
+    /// Write-through: hooks send a flush after every write on a handle that may change content, so machine B gets each
+    /// write at once instead of at close or flush (slow; for data that must not wait).
+    /// </summary>
+    public bool WriteThrough { get; init; }
+
+    /// <summary>Folder of pending write-backs; default <c>%LOCALAPPDATA%\ProcBridge\queue</c>. Shared by sessions so a later
+    /// Broker for the same Agent and share resends what an earlier one could not.</summary>
+    public string? WriteQueueRoot { get; init; }
+
+    /// <summary>How often failed write-backs are tried again while the Broker runs.</summary>
+    public TimeSpan WriteRetryDelay { get; init; } = TimeSpan.FromSeconds(10);
+
+    public string GetWriteQueueRoot() => WriteQueueRoot ?? Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ProcBridge", "queue");
+
+    /// <summary>Key of the Agent and share in write queue entries.</summary>
+    public string GetWriteTarget() => $"{AgentHost}:{AgentPort}/{ShareName}";
 
     public string GetCacheRoot() => CacheRoot ?? Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ProcBridge", "cache", SessionId);

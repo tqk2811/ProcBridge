@@ -101,6 +101,70 @@ public sealed class AgentClient : IAsyncDisposable
         }).ConfigureAwait(false);
     }
 
+    /// <summary>True when the share accepts writes (from the Hello of a pooled connection).</summary>
+    public async Task<bool> IsWritableAsync(CancellationToken cancellationToken)
+    {
+        HelloResponse hello = await Pool.GetServerHelloAsync(cancellationToken).ConfigureAwait(false);
+        return hello.Writable;
+    }
+
+    public Task<FsEntry> CreateAsync(string remotePath, bool isDirectory, uint attributes, CancellationToken cancellationToken)
+        => SendStatAsync(MessageType.FsCreate, ProtocolSerializer.Serialize(new FsCreateRequest { Path = remotePath, IsDirectory = isDirectory, Attributes = attributes }), cancellationToken);
+
+    public Task<FsEntry> SetInfoAsync(FsSetInfoRequest request, CancellationToken cancellationToken)
+        => SendStatAsync(MessageType.FsSetInfo, ProtocolSerializer.Serialize(request), cancellationToken);
+
+    public Task<FsEntry> RenameAsync(string remotePath, string newRemotePath, bool replaceIfExists, CancellationToken cancellationToken)
+        => SendStatAsync(MessageType.FsRename, ProtocolSerializer.Serialize(new FsRenameRequest { Path = remotePath, NewPath = newRemotePath, ReplaceIfExists = replaceIfExists }), cancellationToken);
+
+    /// <summary>Deletes on machine B; false when <paramref name="expectedFileId"/> was given and another file has the name.</summary>
+    public async Task<bool> DeleteAsync(string remotePath, ulong? expectedFileId, CancellationToken cancellationToken)
+    {
+        var request = new FsDeleteRequest { Path = remotePath, ExpectedFileId = expectedFileId };
+        Frame frame = await Pool.SendAsync(MessageType.FsDelete, ProtocolSerializer.Serialize(request), default, idempotent: false, cancellationToken).ConfigureAwait(false);
+        return ProtocolSerializer.Deserialize<FsDeleteResponse>(frame.Header).Deleted;
+    }
+
+    private async Task<FsEntry> SendStatAsync(MessageType type, byte[] header, CancellationToken cancellationToken)
+    {
+        Frame frame = await Pool.SendAsync(type, header, default, idempotent: false, cancellationToken).ConfigureAwait(false);
+        return ProtocolSerializer.Deserialize<FsStatResponse>(frame.Header).Entry;
+    }
+
+    /// <summary>
+    /// Uploads <paramref name="sourcePath"/> as the new content of <paramref name="remotePath"/>: blocks in parallel into
+    /// machine B's staging file, then one commit that checks <paramref name="expectedVersion"/> (plan section 10).
+    /// </summary>
+    /// <param name="uploadId">32 lowercase hex digits, the same for every attempt of one write-back: machine B answers a
+    /// commit it already applied instead of applying it again.</param>
+    public async Task<FsCommitResponse> UploadAsync(string remotePath, string sourcePath, string uploadId, FsVersion? expectedVersion, ConflictPolicy policy, CancellationToken cancellationToken)
+    {
+        int maxRead = await Pool.GetMaxReadSizeAsync(cancellationToken).ConfigureAwait(false);
+        int chunkSize = Math.Max(1, Math.Min(_options.ReadChunkSize, maxRead));
+        long size;
+        long lastWriteTime;
+        using (var handle = File.OpenHandle(sourcePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, FileOptions.Asynchronous))
+        {
+            size = RandomAccess.GetLength(handle);
+            lastWriteTime = File.GetLastWriteTimeUtc(handle).ToFileTimeUtc();
+            long chunkCount = (size + chunkSize - 1) / chunkSize;
+            var parallel = new ParallelOptions { MaxDegreeOfParallelism = _options.MaxParallelChunks, CancellationToken = cancellationToken };
+            await Parallel.ForEachAsync(LongRange(chunkCount), parallel, async (index, token) =>
+            {
+                long offset = index * chunkSize;
+                byte[] buffer = new byte[(int)Math.Min(chunkSize, size - offset)];
+                int read = await RandomAccess.ReadAsync(handle, buffer, offset, token).ConfigureAwait(false);
+                var request = new FsWriteRequest { Path = remotePath, UploadId = uploadId, Offset = offset };
+                // Writing the same block twice gives the same staging file, so a resend after a lost connection is safe.
+                await Pool.SendAsync(MessageType.FsWrite, ProtocolSerializer.Serialize(request), buffer.AsMemory(0, read), idempotent: true, token).ConfigureAwait(false);
+            }).ConfigureAwait(false);
+        }
+
+        var commit = new FsCommitRequest { Path = remotePath, UploadId = uploadId, Size = size, ExpectedVersion = expectedVersion, LastWriteTime = lastWriteTime, Policy = policy };
+        Frame frame = await Pool.SendAsync(MessageType.FsCommit, ProtocolSerializer.Serialize(commit), default, idempotent: false, cancellationToken).ConfigureAwait(false);
+        return ProtocolSerializer.Deserialize<FsCommitResponse>(frame.Header);
+    }
+
     private static IEnumerable<long> LongRange(long count)
     {
         for (long i = 0; i < count; i++)

@@ -34,7 +34,7 @@ public sealed class SecureTransportTests
     private static AgentServer StartAgent(TempFolder share, AgentSecurity? security, int port = 0)
     {
         var options = new AgentOptions { BindAddress = IPAddress.Loopback, Port = port, AllowPlaintextTransport = security is null };
-        var server = new AgentServer([new ReadOnlyShare("src", share.Path)], options, security);
+        var server = new AgentServer([new AgentShare("src", share.Path)], options, security);
         server.Start();
         return server;
     }
@@ -226,7 +226,7 @@ public sealed class SecureTransportTests
     public void PlainTransport_IsOffByDefault()
     {
         using var share = new TempFolder("sec");
-        Assert.ThrowsExactly<ArgumentException>(() => new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 }));
+        Assert.ThrowsExactly<ArgumentException>(() => new AgentServer([new AgentShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 }));
         Assert.ThrowsExactly<ArgumentException>(() => BrokerHost.CreateConnectionFactory(new BrokerOptions
         {
             SessionId = "x",

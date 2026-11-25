@@ -20,7 +20,7 @@ public sealed class PairingTransportTests
     {
         public Machines(TempFolder share, bool allowPairing = true)
         {
-            Server = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0, PairingTimeout = TimeSpan.FromSeconds(20) },
+            Server = new AgentServer([new AgentShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0, PairingTimeout = TimeSpan.FromSeconds(20) },
                 new AgentSecurity { Identity = AgentKey, PairedMachines = AgentTrust, AllowPairing = allowPairing });
             Server.Start();
             Client = new PairingClient(BrokerKey, BrokerTrust, "machine-a");

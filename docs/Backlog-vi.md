@@ -17,7 +17,9 @@ Plan 4.3 cho phép thư mục ảo nằm trên ổ không tồn tại. M1 chưa 
 
 ## [Vừa] Đường dẫn dạng khác chưa nhận diện
 
-- `\Device\HarddiskVolumeN\...`, `\DosDevices\...`, `\GLOBAL??\...` chưa được đưa về dạng `\??\` trước khi so.
+- `\DosDevices\...`, `\GLOBAL??\...` chưa được đưa về dạng `\??\` trước khi so. `\Device\HarddiskVolumeN\...` tuyệt đối
+  được nhận khi mở (M3, advapi32 mở thư mục cha qua dạng này khi áp ACE kế thừa), các hàm khác theo đường dẫn
+  (`NtQueryAttributesFile`, `NtDeleteFile`...) cũng đi qua cùng lối dịch.
 - Tên ngắn 8.3 (`RUNNER~1`) trong đường dẫn ảo hoặc thật: so tiền tố theo chuỗi nên không khớp với dạng tên
   dài, và tên trả về từ `FileNameInformation` có thể không đổi ngược được.
 - Mở theo file ID (`FILE_OPEN_BY_FILE_ID`) không qua đường dẫn nên không được ghi vào bảng handle.
@@ -109,6 +111,39 @@ IOCP sẽ không nhận được gói hoàn tất. Bỏ qua `SL_INDEX_SPECIFIED`
 - Thư mục cha của gốc ảo không có trên máy B: mục `..` khi liệt kê gốc ảo lặp lại thông tin của chính gốc.
 - Volume (serial, cờ, tên hệ thống file) vẫn là của volume chứa cache; `FileIdInformation` chỉ có 64 bit thấp
   (file index của máy B), chưa đúng với ReFS.
+
+## [Vừa] Ghi (M3): các ca chưa phủ
+
+- Phát hiện thay đổi theo kích thước + thời gian ghi của file cache: tiến trình ghi rồi đặt lại đúng thời gian và
+  kích thước cũ thì không được ghi ngược. Cân nhắc hook `NtWriteFile`/`NtCreateSection` (ghi) để đánh dấu dirty.
+- Ghi ngược trọn file mỗi lần đóng; chưa gửi theo khối thay đổi (file lớn sửa vài byte vẫn tải lên cả file).
+- Xoá qua disposition gửi sang máy B ngay lúc đặt cờ: đặt lại `DeleteFile = FALSE` sau đó chỉ huỷ trên bản cache.
+  Delete-on-close xoá máy B khi handle có cờ đóng, kể cả khi handle khác của file còn mở.
+- Handle có write token kế thừa sang con: token đi theo bản ghi trong khối khởi tạo và cha gửi `Retain` cho Broker
+  lúc tạo con, nên lần đóng cuối của con cũng ghi ngược. Còn hở: con bị kết thúc trước khi nhận khối khởi tạo (inject
+  thất bại) thì phần giữ của nó không bao giờ được trả, file coi như còn mở tới hết phiên; nhân bản handle sang
+  process khác (`DuplicateHandle`) vẫn không mang token. Process thoát không đóng handle (kể cả con giữ handle kế thừa)
+  thì Broker ghi ngược khi phiên kết thúc (`SyncOpenAsync`), không phải lúc process thoát.
+- Hết phiên chỉ ghi ngược file còn token mở; chưa quét mọi file cache đã đổi so với version đã tải (`_versions`):
+  file tạo mới hay ghi đè không có version để so, nên cách quét này chỉ phủ được một phần.
+- Delete-on-close mang file ID máy B lúc mở: Agent không xoá nếu tên đã sang file khác. `File.Replace` của commit ghi
+  ngược có thể đổi file ID của tên trên máy B, khi đó delete-on-close sau một lần ghi ngược sẽ không xoá (an toàn,
+  nhưng file còn lại).
+- Hard link (`FileLinkInformation`) trên thư mục ảo trả `STATUS_NOT_SUPPORTED`; đổi tên giữa thư mục ảo và thư mục
+  thật trả `STATUS_NOT_SAME_DEVICE` (MoveFileEx tự sao chép rồi xoá).
+- Tên trần trong `FILE_RENAME_INFORMATION` (không `\`, không `RootDirectory`): Hook hiểu là cùng thư mục với nguồn,
+  nhưng trên NTFS thật `SetFileInformationByHandle` trả `ERROR_ALREADY_EXISTS` trong kịch bản thử; chưa rõ ngữ nghĩa
+  nên NativeProbe không kiểm.
+- Handle khác đang mở file bị một rename thay thế được đánh dấu mồ côi trong cùng process (ReplaceFile); process khác
+  vẫn giữ đường dẫn cũ.
+- Xung đột KeepBoth: bản của máy A lưu thành `*.procbridge-conflict-<UTC>` và Broker ghi log, Launcher chưa hiện cảnh
+  báo; handle còn mở trên máy A tiếp tục dùng bản cache của mình tới khi đóng hết.
+- File staging `*.pbtmp-<id>` của upload dở dang (Agent chết giữa chừng) không được Agent dọn khi khởi động.
+- Lỗi vĩnh viễn từ máy B khi ghi ngược (quyền, thư mục đã mất) để lại `<id>.json.failed` + `<id>.data` trong thư mục
+  hàng đợi, chưa có công cụ xem/gửi lại.
+- Chế độ ghi xuyên gửi Flush sau mỗi `NtWriteFile` xong đồng bộ; ghi overlapped (`STATUS_PENDING`) chỉ được gửi lúc
+  flush/đóng. Chưa có cấu hình ghi xuyên theo thư mục (Plan 10).
+- Remote Explorer (Plan 14) chưa có thao tác file.
 
 ## [Vừa] Thời hạn IPC cho file lớn
 

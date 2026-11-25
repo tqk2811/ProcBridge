@@ -121,7 +121,7 @@ public sealed class SharedStoreTests
         agentTrust.Add(brokerKey.PublicKey, "machine-a");
         var brokerTrust = new PairedMachineStore();
         brokerTrust.Add(agentKey.PublicKey, "machine-b");
-        await using var server = new AgentServer([new ReadOnlyShare("src", share.Path)],
+        await using var server = new AgentServer([new AgentShare("src", share.Path)],
             new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0, TrustRefreshInterval = TimeSpan.FromMilliseconds(50) },
             new AgentSecurity { Identity = agentKey, PairedMachines = agentTrust });
         server.Start();
@@ -152,7 +152,7 @@ public sealed class SharedStoreTests
         agentTrust.Add(brokerKey.PublicKey, "machine-a");
         var brokerTrust = new PairedMachineStore();
         brokerTrust.Add(agentKey.PublicKey, "machine-b");
-        await using var server = new AgentServer([new ReadOnlyShare("src", share.Path)],
+        await using var server = new AgentServer([new AgentShare("src", share.Path)],
             new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0, TrustRefreshInterval = TimeSpan.FromMilliseconds(50) },
             new AgentSecurity { Identity = agentKey, PairedMachines = agentTrust, ExplorerPolicies = policies });
         server.Start();

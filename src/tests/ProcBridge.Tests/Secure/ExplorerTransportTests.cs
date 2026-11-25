@@ -29,7 +29,7 @@ public sealed class ExplorerTransportTests
         {
             if (policy is not null)
                 Policies.Set(Peers.BrokerKey.Fingerprint, policy);
-            Server = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 },
+            Server = new AgentServer([new AgentShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 },
                 Peers.Agent() with { ExplorerPolicies = Policies, ExplorerAudit = audit });
             Server.Start();
             _factory = new SecureConnectionFactory(new TcpStreamConnector("127.0.0.1", Server.Port), Peers.BrokerKey, Peers.BrokerTrust, Peers.AgentKey.PublicKey, Transport);
@@ -148,7 +148,7 @@ public sealed class ExplorerTransportTests
     public async Task PlainTransport_RefusesTheExplorer()
     {
         using var root = new TempFolder("exp");
-        await using var server = new AgentServer([new ReadOnlyShare("src", root.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0, AllowPlaintextTransport = true });
+        await using var server = new AgentServer([new AgentShare("src", root.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0, AllowPlaintextTransport = true });
         server.Start();
         await using var client = new ExplorerClient(new TcpConnectionFactory("127.0.0.1", server.Port, Transport), Transport);
 

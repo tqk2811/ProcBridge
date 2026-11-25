@@ -21,6 +21,7 @@ namespace ProcBridge::Hook
         ACCESS_MASK DesiredAccess;
         ULONG CreateDisposition;
         ULONG CreateOptions;
+        ULONG FileAttributes = 0; // given to a file the open creates
     };
 
     /// How a path given to the resolver is spelled.
@@ -71,11 +72,16 @@ namespace ProcBridge::Hook
 
         /// Makes the backing file of path available for an open with these arguments and builds its NT path
         /// (freed by the caller with FreeString). Returns the NTSTATUS the hooked call fails with otherwise.
-        /// info (optional) receives machine B's metadata when the resolver has it (left untouched otherwise).
+        /// info (optional) receives machine B's metadata when the resolver has it (left untouched otherwise);
+        /// writeToken (optional) the Broker's write token of an open that may change content (0 when none, M3).
         /// M1 (local folder): a plain translation.
         virtual NTSTATUS Resolve(int mapping, const UNICODE_STRING& path, PathKind kind, const OpenIntent& /*intent*/,
-            UNICODE_STRING& realPath, HookIpc::FileInfo* /*info*/) const noexcept
+            UNICODE_STRING& realPath, HookIpc::FileInfo* /*info*/, uint64_t* writeToken = nullptr) const noexcept
         {
+            if (writeToken != nullptr)
+            {
+                *writeToken = 0;
+            }
             const bool translated = kind == PathKind::Nt ? TranslateToReal(mapping, path, realPath)
                                                          : TranslateDeviceToReal(mapping, path, realPath);
             return translated ? STATUS_SUCCESS : STATUS_NO_MEMORY;
@@ -94,6 +100,40 @@ namespace ProcBridge::Hook
         /// buffer (HookIpc::MaxMessageSize bytes). STATUS_NOT_SUPPORTED for a local resolver.
         virtual NTSTATUS List(int /*mapping*/, const UNICODE_STRING& /*ntPath*/, uint32_t /*startIndex*/, BYTE* /*buffer*/,
             DirectoryPage& /*page*/) const noexcept
+        {
+            return STATUS_NOT_SUPPORTED;
+        }
+
+        // Write operations of a remote resolver (M3, plan 4.5). ntPath arguments are virtual NT paths matched by
+        // FindMapping. A local resolver never gets these calls (the backing folder is changed directly).
+
+        /// The last handle holding writeToken was closed (Close) or flushed (Flush): write back if changed.
+        virtual NTSTATUS CloseWrite(uint64_t /*writeToken*/) const noexcept { return STATUS_NOT_SUPPORTED; }
+        virtual NTSTATUS FlushWrite(uint64_t /*writeToken*/) const noexcept { return STATUS_NOT_SUPPORTED; }
+        /// A child inherited a handle holding writeToken: the Broker then expects one more CloseWrite (the child's).
+        virtual NTSTATUS RetainWrite(uint64_t /*writeToken*/) const noexcept { return STATUS_NOT_SUPPORTED; }
+
+        /// True when every write on a handle with a write token must be followed by FlushWrite.
+        virtual bool IsWriteThrough() const noexcept { return false; }
+
+        /// Applies the fields set in HookIpc::SetInfoRequest::Fields on machine B; info receives the new metadata.
+        virtual NTSTATUS SetInfo(int /*mapping*/, const UNICODE_STRING& /*ntPath*/, const HookIpc::SetInfoRequest& /*request*/,
+            HookIpc::FileInfo& /*info*/) const noexcept
+        {
+            return STATUS_NOT_SUPPORTED;
+        }
+
+        /// Renames on machine B; newRealPath (freed with FreeString) is the NT path the cache handle must be renamed to.
+        virtual NTSTATUS Rename(int /*mapping*/, const UNICODE_STRING& /*ntPath*/, int /*newMapping*/, const UNICODE_STRING& /*newNtPath*/,
+            bool /*replaceIfExists*/, HookIpc::FileInfo& /*info*/, UNICODE_STRING& /*newRealPath*/) const noexcept
+        {
+            return STATUS_NOT_SUPPORTED;
+        }
+
+        /// Deletes on machine B. keepItem: the caller deletes the cache copy itself through its handle. expectedFileId
+        /// (non-zero): machine B's file id the handle was opened on; another file now under the name is left alone.
+        virtual NTSTATUS Delete(int /*mapping*/, const UNICODE_STRING& /*ntPath*/, bool /*keepItem*/,
+            uint64_t /*expectedFileId*/) const noexcept
         {
             return STATUS_NOT_SUPPORTED;
         }

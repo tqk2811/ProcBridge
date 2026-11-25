@@ -1,5 +1,6 @@
 using ProcBridge.Broker.Models;
 using ProcBridge.Launcher.Models;
+using ProcBridge.Protocol.Enums;
 
 namespace ProcBridge.Launcher;
 
@@ -10,13 +11,15 @@ public static class LauncherCommandLine
         @"Usage: ProcBridge.Launcher --agent <host>[:port] --share <name> --map <virtual dir> <remote dir> [--map ...]" + "\n" +
         @"                           [--cache <dir>] [--arch x64|x86] [--spawn <ProcBridge.Spawn.exe>]" + "\n" +
         @"                           [--no-build-servers] [--cwd <dir>] [--agent-fingerprint <fp>] [--data <dir>]" + "\n" +
-        @"                           [--plaintext]" + "\n" +
+        @"                           [--plaintext] [--write-through] [--conflict keep|overwrite]" + "\n" +
         @"                           -- <program> [arguments]" + "\n" +
         @"       ProcBridge.Launcher --pair --agent <host>[:port] [--data <dir>]" + "\n" +
         @"       ProcBridge.Launcher --list-paired [--data <dir>] | --revoke <fingerprint> [--data <dir>]" + "\n" +
         @"  <remote dir> is relative to the share, '/' separated ("""" for the share root)." + "\n" +
         @"  The Agent must be paired first (--pair); --plaintext talks to an unencrypted Agent (development only)." + "\n" +
-        @"  --no-build-servers keeps MSBuild/Roslyn/dotnet build servers out of the run (they would outlive it).";
+        @"  --no-build-servers keeps MSBuild/Roslyn/dotnet build servers out of the run (they would outlive it)." + "\n" +
+        @"  --write-through sends every write to machine B at once (default: on close or flush)." + "\n" +
+        @"  --conflict: when machine B changed a file meanwhile, keep both (default) or let this machine win.";
 
     /// <summary>Throws <see cref="ArgumentException"/> with a message for the user when the line is wrong.</summary>
     public static LauncherOptions Parse(IReadOnlyList<string> args)
@@ -31,6 +34,8 @@ public static class LauncherCommandLine
         string? agentFingerprint = null;
         string? dataDirectory = null;
         string? workingDirectory = null;
+        bool writeThrough = false;
+        ConflictPolicy conflictPolicy = ConflictPolicy.KeepBoth;
         string architecture = Environment.Is64BitOperatingSystem ? "x64" : "x86";
         var mappings = new List<VirtualMapping>();
         int index = 0;
@@ -77,6 +82,17 @@ public static class LauncherCommandLine
                 case "--cwd":
                     workingDirectory = Next(option);
                     break;
+                case "--write-through":
+                    writeThrough = true;
+                    break;
+                case "--conflict":
+                    conflictPolicy = Next(option) switch
+                    {
+                        "keep" => ConflictPolicy.KeepBoth,
+                        "overwrite" => ConflictPolicy.Overwrite,
+                        _ => throw new ArgumentException("--conflict expects keep or overwrite."),
+                    };
+                    break;
                 default:
                     throw new ArgumentException($"Unknown argument {option}.");
             }
@@ -99,6 +115,8 @@ public static class LauncherCommandLine
             AgentFingerprint = agentFingerprint,
             DataDirectory = dataDirectory,
             WorkingDirectory = workingDirectory,
+            WriteThrough = writeThrough,
+            ConflictPolicy = conflictPolicy,
             CommandLine = string.Join(' ', args.Skip(index + 1).Select(Quote)),
         };
     }

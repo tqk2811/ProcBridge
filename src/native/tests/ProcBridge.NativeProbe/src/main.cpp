@@ -4,6 +4,7 @@
 //
 // Usage: ProcBridge.NativeProbe.<arch>.exe <root>
 //        ProcBridge.NativeProbe.<arch>.exe --<command> <arguments>   (single checks, see RunCommand)
+//        ProcBridge.NativeProbe.<arch>.exe --write <new folder>     (M3 write scenario, see WriteScenario)
 // Expected tree under <root> (created by the test): a.txt, sub\b.txt, sub\deep\c.bin, empty\,
 // ro.txt (read-only), unicode file name. Last access times are never printed (they drift), nor the times
 // of ".." entries (the parent of a virtual root is not part of the virtual folder).
@@ -13,6 +14,7 @@
 #include <ntstatus.h>
 #include <winternl.h>
 #include <algorithm>
+#include <cstring>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -1209,6 +1211,54 @@ namespace
         return static_cast<int>(WaitExitCode(child.Process));
     }
 
+    /// --write-handle <handle> <text>: writes text at the current position of an inherited handle, then closes it.
+    int WriteHandle(const wchar_t* value, const wchar_t* text)
+    {
+        const HANDLE handle = ParseHandleValue(value);
+        std::string bytes;
+        for (const wchar_t* c = text; *c != 0; ++c)
+        {
+            bytes.push_back(static_cast<char>(*c));
+        }
+        DWORD written = 0;
+        if (!WriteFile(handle, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr))
+        {
+            WriteLine(L"child write: " + Error(GetLastError()));
+            return 1;
+        }
+        return CloseHandle(handle) ? 0 : 1;
+    }
+
+    /// --child inherit-write <virtual file>: creates the file for writing on an inheritable handle, writes "parent",
+    /// starts a child suspended that inherits it, closes its own handle, then lets the child append "+child" and
+    /// close. Both writes must reach machine B (the child holds the write token after the parent closed).
+    int ChildInheritWrite(const wchar_t* virtualFile)
+    {
+        SECURITY_ATTRIBUTES inherit{ sizeof(inherit), nullptr, TRUE };
+        const HANDLE handle = CreateFileW(virtualFile, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &inherit, CREATE_ALWAYS, 0, nullptr);
+        if (handle == INVALID_HANDLE_VALUE)
+        {
+            WriteLine(L"open: " + Error(GetLastError()));
+            return 1;
+        }
+        DWORD written = 0;
+        if (!WriteFile(handle, "parent", 6, &written, nullptr))
+        {
+            WriteLine(L"write: " + Error(GetLastError()));
+            return 1;
+        }
+        ChildProcess child;
+        if (!StartProbe(L"", L"--write-handle " + HandleText(handle) + L" +child", TRUE, CREATE_SUSPENDED, nullptr, child))
+        {
+            return 1;
+        }
+        CloseHandle(handle);
+        ResumeThread(child.Thread);
+        const DWORD code = WaitExitCode(child.Process);
+        WriteLine(L"child: " + std::to_wstring(code));
+        return static_cast<int>(code);
+    }
+
     /// --child handle-list|parent-process <virtual file> <real file>: the child does not inherit the
     /// virtual handle (a handle list without it, or another parent process), so it must not receive
     /// its entry: the same value in the child, holding the real file, must show the real name. Prints
@@ -1524,6 +1574,309 @@ namespace
         return 0;
     }
 
+    /// M3 write scenario (plan 12): creates <root> and changes files in it with the Win32 and NT write APIs. Every
+    /// step prints its error code and what it observed, so a run on a real folder and one through a writable virtual
+    /// folder print the same text. Times are only printed where the scenario set them.
+    class WriteScenario final
+    {
+    public:
+        explicit WriteScenario(const std::wstring& root) : _root(root), _output(root) {}
+
+        int Run()
+        {
+            Step(L"mkdir", Result(CreateDirectoryW(_root.c_str(), nullptr)));
+            CreateWriteAppendTruncate();
+            RenameAndReplace();
+            OverwriteAndSupersede();
+            Directories();
+            AttributesAndTimes();
+            DeleteOnCloseAndDisposition();
+            ShareModes();
+            ReplaceFileLikeEditors();
+            Listing();
+            return 0;
+        }
+
+    private:
+        std::wstring Path(const wchar_t* name) const { return _root + L"\\" + name; }
+
+        void Step(const std::wstring& step, const std::wstring& text) const { _output.Line(L"Write." + step, text); }
+
+        static std::wstring Result(BOOL ok) { return ok ? L"ok" : Error(GetLastError()); }
+
+        HANDLE Open(const wchar_t* name, DWORD access, DWORD share, DWORD disposition, DWORD flags = FILE_ATTRIBUTE_NORMAL) const
+        {
+            return CreateFileW(Path(name).c_str(), access, share, nullptr, disposition, flags, nullptr);
+        }
+
+        static std::wstring WriteText(HANDLE handle, const char* text)
+        {
+            DWORD written = 0;
+            const BOOL ok = WriteFile(handle, text, static_cast<DWORD>(strlen(text)), &written, nullptr);
+            return ok ? L"wrote=" + Num(written) : Error(GetLastError());
+        }
+
+        /// Content and size of a file read through a new handle.
+        std::wstring ReadAll(const wchar_t* name) const
+        {
+            Handle file(Open(name, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, OPEN_EXISTING));
+            if (!file.IsValid())
+            {
+                return Error(GetLastError());
+            }
+            char buffer[256] = {};
+            DWORD read = 0;
+            if (!ReadFile(file.Get(), buffer, sizeof(buffer) - 1, &read, nullptr))
+            {
+                return Error(GetLastError());
+            }
+            LARGE_INTEGER size{};
+            GetFileSizeEx(file.Get(), &size);
+            std::wstring text;
+            for (DWORD i = 0; i < read; ++i)
+            {
+                text += static_cast<wchar_t>(buffer[i]);
+            }
+            return L"size=" + Num(size.QuadPart) + L" text=[" + text + L"]";
+        }
+
+        std::wstring Attributes(const wchar_t* name) const
+        {
+            const DWORD attributes = GetFileAttributesW(Path(name).c_str());
+            return attributes == INVALID_FILE_ATTRIBUTES ? Error(GetLastError()) : L"attr=" + Hex(attributes & ~FILE_ATTRIBUTE_ARCHIVE);
+        }
+
+        void CreateFileWithText(const wchar_t* name, const char* text) const
+        {
+            Handle file(Open(name, GENERIC_WRITE, 0, CREATE_NEW));
+            Step(std::wstring(L"create ") + name, file.IsValid() ? WriteText(file.Get(), text) : Error(GetLastError()));
+        }
+
+        void CreateWriteAppendTruncate()
+        {
+            CreateFileWithText(L"a.txt", "hello");
+            Handle again(Open(L"a.txt", GENERIC_WRITE, 0, CREATE_NEW));
+            Step(L"create-new existing", again.IsValid() ? L"opened" : Error(GetLastError()));
+            {
+                Handle append(Open(L"a.txt", FILE_APPEND_DATA | SYNCHRONIZE, FILE_SHARE_READ, OPEN_EXISTING));
+                Step(L"append", append.IsValid() ? WriteText(append.Get(), " world") : Error(GetLastError()));
+            }
+            Step(L"read appended", ReadAll(L"a.txt"));
+            {
+                Handle truncate(Open(L"a.txt", GENERIC_WRITE, 0, OPEN_EXISTING));
+                LARGE_INTEGER position{};
+                position.QuadPart = 5;
+                const BOOL ok = truncate.IsValid() && SetFilePointerEx(truncate.Get(), position, nullptr, FILE_BEGIN) && SetEndOfFile(truncate.Get());
+                Step(L"truncate", Result(ok));
+            }
+            Step(L"read truncated", ReadAll(L"a.txt"));
+            {
+                // Grow through FileEndOfFileInformation, then write past the old end.
+                Handle grow(Open(L"a.txt", GENERIC_WRITE, 0, OPEN_EXISTING));
+                FILE_END_OF_FILE_INFO end{};
+                end.EndOfFile.QuadPart = 8;
+                Step(L"set end of file", Result(grow.IsValid() && SetFileInformationByHandle(grow.Get(), FileEndOfFileInfo, &end, sizeof(end))));
+            }
+            Step(L"read grown", ReadAll(L"a.txt").substr(0, 6));
+        }
+
+        void RenameAndReplace()
+        {
+            Step(L"rename a->b", Result(MoveFileExW(Path(L"a.txt").c_str(), Path(L"b.txt").c_str(), 0)));
+            Step(L"old name", Attributes(L"a.txt"));
+            Step(L"read b", ReadAll(L"b.txt").substr(0, 6));
+            CreateFileWithText(L"c.txt", "ccc");
+            Step(L"rename onto existing", Result(MoveFileExW(Path(L"b.txt").c_str(), Path(L"c.txt").c_str(), 0)));
+            Step(L"rename replace", Result(MoveFileExW(Path(L"b.txt").c_str(), Path(L"c.txt").c_str(), MOVEFILE_REPLACE_EXISTING)));
+            Step(L"read c", ReadAll(L"c.txt").substr(0, 6));
+        }
+
+        void OverwriteAndSupersede()
+        {
+            {
+                Handle file(Open(L"c.txt", GENERIC_WRITE, 0, CREATE_ALWAYS));
+                const DWORD error = GetLastError();
+                Step(L"create always", file.IsValid() ? L"last=" + Num(error) + L" " + WriteText(file.Get(), "new") : Error(error));
+            }
+            Step(L"read overwritten", ReadAll(L"c.txt"));
+            {
+                Handle file(Open(L"c.txt", GENERIC_WRITE, 0, TRUNCATE_EXISTING));
+                Step(L"truncate existing", file.IsValid() ? WriteText(file.Get(), "tr") : Error(GetLastError()));
+            }
+            Step(L"read truncated existing", ReadAll(L"c.txt"));
+            Handle missing(Open(L"none.txt", GENERIC_WRITE, 0, TRUNCATE_EXISTING));
+            Step(L"truncate missing", missing.IsValid() ? L"opened" : Error(GetLastError()));
+
+            const auto ntCreateFile = reinterpret_cast<NtCreateFileFn>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtCreateFile"));
+            UNICODE_STRING name{};
+            const std::wstring ntPath = L"\\??\\" + Path(L"c.txt");
+            name.Buffer = const_cast<PWSTR>(ntPath.c_str());
+            name.Length = static_cast<USHORT>(ntPath.size() * sizeof(wchar_t));
+            name.MaximumLength = name.Length;
+            OBJECT_ATTRIBUTES attributes{};
+            InitializeObjectAttributes(&attributes, &name, OBJ_CASE_INSENSITIVE, nullptr, nullptr);
+            IO_STATUS_BLOCK io{};
+            HANDLE raw = nullptr;
+            constexpr ULONG FileSupersede = 0;
+            constexpr ULONG SynchronousNonAlert = 0x20;
+            const NTSTATUS status = ntCreateFile(&raw, GENERIC_WRITE | SYNCHRONIZE, &attributes, &io, nullptr, FILE_ATTRIBUTE_NORMAL, 0,
+                FileSupersede, SynchronousNonAlert | 0x40 /* FILE_NON_DIRECTORY_FILE */, nullptr, 0);
+            Handle superseded(NT_SUCCESS(status) ? raw : INVALID_HANDLE_VALUE);
+            Step(L"supersede", Status(status) + L" info=" + Num(static_cast<long long>(io.Information))
+                + (superseded.IsValid() ? L" " + WriteText(superseded.Get(), "sup") : L""));
+            superseded.Reset();
+            Step(L"read superseded", ReadAll(L"c.txt"));
+        }
+
+        void Directories()
+        {
+            Step(L"mkdir dir", Result(CreateDirectoryW(Path(L"dir").c_str(), nullptr)));
+            Step(L"mkdir existing", Result(CreateDirectoryW(Path(L"dir").c_str(), nullptr)));
+            Step(L"mkdir missing parent", Result(CreateDirectoryW(Path(L"nope\\dir").c_str(), nullptr)));
+            CreateFileWithText(L"dir\\f.txt", "f");
+            Step(L"rmdir not empty", Result(RemoveDirectoryW(Path(L"dir").c_str())));
+            Step(L"rename dir", Result(MoveFileExW(Path(L"dir").c_str(), Path(L"dir2").c_str(), 0)));
+            Step(L"read moved child", ReadAll(L"dir2\\f.txt"));
+            Step(L"delete child", Result(DeleteFileW(Path(L"dir2\\f.txt").c_str())));
+            Step(L"delete missing", Result(DeleteFileW(Path(L"dir2\\f.txt").c_str())));
+            Step(L"rmdir", Result(RemoveDirectoryW(Path(L"dir2").c_str())));
+            Step(L"rmdir gone", Attributes(L"dir2"));
+            Step(L"mkdir kept", Result(CreateDirectoryW(Path(L"kept").c_str(), nullptr)));
+        }
+
+        void AttributesAndTimes()
+        {
+            Step(L"set hidden+readonly", Result(SetFileAttributesW(Path(L"c.txt").c_str(), FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_READONLY)));
+            Step(L"attributes", Attributes(L"c.txt"));
+            Step(L"delete readonly", Result(DeleteFileW(Path(L"c.txt").c_str())));
+            Handle write(Open(L"c.txt", GENERIC_WRITE, 0, OPEN_EXISTING));
+            Step(L"open readonly for write", write.IsValid() ? L"opened" : Error(GetLastError()));
+            Step(L"set normal", Result(SetFileAttributesW(Path(L"c.txt").c_str(), FILE_ATTRIBUTE_NORMAL)));
+            Step(L"attributes normal", Attributes(L"c.txt"));
+
+            FILETIME created{};
+            FILETIME written{};
+            ULARGE_INTEGER value{};
+            value.QuadPart = 130000000000000000ull; // 2012
+            created.dwLowDateTime = value.LowPart;
+            created.dwHighDateTime = value.HighPart;
+            value.QuadPart = 131000000000000000ull; // 2016
+            written.dwLowDateTime = value.LowPart;
+            written.dwHighDateTime = value.HighPart;
+            {
+                Handle file(Open(L"c.txt", FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ, OPEN_EXISTING));
+                Step(L"set times", Result(file.IsValid() && SetFileTime(file.Get(), &created, nullptr, &written)));
+            }
+            WIN32_FILE_ATTRIBUTE_DATA data{};
+            Step(L"times by name", GetFileAttributesExW(Path(L"c.txt").c_str(), GetFileExInfoStandard, &data)
+                ? L"created=" + Time(data.ftCreationTime) + L" written=" + Time(data.ftLastWriteTime) : Error(GetLastError()));
+            Handle file(Open(L"c.txt", FILE_READ_ATTRIBUTES, FILE_SHARE_READ, OPEN_EXISTING));
+            FILETIME c{};
+            FILETIME a{};
+            FILETIME w{};
+            Step(L"times by handle", file.IsValid() && GetFileTime(file.Get(), &c, &a, &w) ? L"created=" + Time(c) + L" written=" + Time(w)
+                                                                                            : Error(GetLastError()));
+        }
+
+        void DeleteOnCloseAndDisposition()
+        {
+            {
+                Handle temp(Open(L"t.tmp", GENERIC_WRITE | DELETE, FILE_SHARE_READ | FILE_SHARE_DELETE, CREATE_NEW, FILE_FLAG_DELETE_ON_CLOSE));
+                Step(L"delete-on-close create", temp.IsValid() ? WriteText(temp.Get(), "tmp") : Error(GetLastError()));
+                Step(L"delete-on-close while open", Attributes(L"t.tmp"));
+            }
+            Step(L"delete-on-close after close", Attributes(L"t.tmp"));
+
+            CreateFileWithText(L"e.txt", "e");
+            {
+                Handle file(Open(L"e.txt", DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, OPEN_EXISTING));
+                FILE_DISPOSITION_INFO disposition{};
+                disposition.DeleteFile = TRUE;
+                Step(L"disposition", Result(file.IsValid() && SetFileInformationByHandle(file.Get(), FileDispositionInfo, &disposition, sizeof(disposition))));
+            }
+            Step(L"disposition after close", Attributes(L"e.txt"));
+            CreateFileWithText(L"kept\\k.txt", "k");
+            {
+                Handle dir(CreateFileW(Path(L"kept").c_str(), DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+                FILE_DISPOSITION_INFO disposition{};
+                disposition.DeleteFile = TRUE;
+                Step(L"disposition non-empty dir", Result(dir.IsValid() && SetFileInformationByHandle(dir.Get(), FileDispositionInfo, &disposition, sizeof(disposition))));
+            }
+        }
+
+        void ShareModes()
+        {
+            Handle reader(Open(L"c.txt", GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING));
+            Step(L"share open reader", reader.IsValid() ? L"opened" : Error(GetLastError()));
+            Handle writer(Open(L"c.txt", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_EXISTING));
+            Step(L"share writer denied", writer.IsValid() ? L"opened" : Error(GetLastError()));
+            Handle second(Open(L"c.txt", GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING));
+            Step(L"share second reader", second.IsValid() ? L"opened" : Error(GetLastError()));
+            Handle both(Open(L"s.txt", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, CREATE_NEW));
+            Handle other(Open(L"s.txt", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_EXISTING));
+            Step(L"share two writers", both.IsValid() && other.IsValid() ? WriteText(both.Get(), "one") + L" " + WriteText(other.Get(), "TWO!")
+                                                                       : Error(GetLastError()));
+            both.Reset();
+            other.Reset();
+            Step(L"read two writers", ReadAll(L"s.txt"));
+        }
+
+        void ReplaceFileLikeEditors()
+        {
+            CreateFileWithText(L"d.txt", "version 1");
+            CreateFileWithText(L"d.txt.tmp", "version 2");
+            Step(L"replace file", Result(ReplaceFileW(Path(L"d.txt").c_str(), Path(L"d.txt.tmp").c_str(), nullptr, 0, nullptr, nullptr)));
+            Step(L"read replaced", ReadAll(L"d.txt"));
+            Step(L"replacement gone", Attributes(L"d.txt.tmp"));
+            // Save through a temp file and a rename over the original (MOVEFILE_REPLACE_EXISTING).
+            CreateFileWithText(L"d.txt.new", "version 3");
+            Step(L"save by rename", Result(MoveFileExW(Path(L"d.txt.new").c_str(), Path(L"d.txt").c_str(), MOVEFILE_REPLACE_EXISTING)));
+            Step(L"read saved", ReadAll(L"d.txt"));
+        }
+
+        void Listing()
+        {
+            WIN32_FIND_DATAW data{};
+            HANDLE find = FindFirstFileW(Path(L"*").c_str(), &data);
+            if (find == INVALID_HANDLE_VALUE)
+            {
+                Step(L"list", Error(GetLastError()));
+                return;
+            }
+            std::vector<std::wstring> lines;
+            do
+            {
+                if (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0)
+                {
+                    continue;
+                }
+                const long long size = (static_cast<long long>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+                lines.push_back(std::wstring(data.cFileName) + L" size=" + Num(size) + L" attr=" + Hex(data.dwFileAttributes & ~FILE_ATTRIBUTE_ARCHIVE));
+            } while (FindNextFileW(find, &data));
+            FindClose(find);
+            std::sort(lines.begin(), lines.end());
+            for (const std::wstring& line : lines)
+            {
+                Step(L"list", line);
+            }
+        }
+
+        std::wstring _root;
+        ProbeOutput _output;
+    };
+
+    int WriteScenarioCommand(const wchar_t* rootArgument)
+    {
+        wchar_t full[MAX_PATH];
+        const DWORD length = GetFullPathNameW(rootArgument, MAX_PATH, full, nullptr);
+        if (length == 0 || length >= MAX_PATH)
+        {
+            return 2;
+        }
+        return WriteScenario(std::wstring(full, length)).Run();
+    }
+
     int RunCommand(int argc, wchar_t** argv)
     {
         const std::wstring command = argv[1];
@@ -1546,6 +1899,10 @@ namespace
             {
                 return ChildSuspendedClose(argv[3]);
             }
+            if (mode == L"inherit-write" && argc == 4)
+            {
+                return ChildInheritWrite(argv[3]);
+            }
             if ((mode == L"handle-list" || mode == L"parent-process") && argc == 5)
             {
                 return ChildWithoutVirtualHandle(mode == L"handle-list", argv[3], argv[4]);
@@ -1566,6 +1923,10 @@ namespace
             {
                 return ChildSiblingLeak(argv[3], argv[4]);
             }
+        }
+        if (command == L"--write-handle" && argc == 4)
+        {
+            return WriteHandle(argv[2], argv[3]);
         }
         if (command == L"--stale-handle" && argc == 4)
         {
@@ -1594,6 +1955,10 @@ namespace
         if (command == L"--file-id" && argc == 3)
         {
             return FileIdentity(argv[2]);
+        }
+        if (command == L"--write" && argc == 3)
+        {
+            return WriteScenarioCommand(argv[2]);
         }
         if (command == L"--threads" && argc == 4)
         {

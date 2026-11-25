@@ -67,11 +67,11 @@ internal sealed class ShareTreeWalk
                     break;
                 }
                 FileSystemInfo info = _currentEntries[_currentIndex];
-                int cost = ReadOnlyShare.EntryCost(info.Name);
+                int cost = AgentShare.EntryCost(info.Name);
                 if (budget - cost < 0 && anyEntry)
                     break;
                 budget -= cost;
-                part.Add(ReadOnlyShare.ToEntry(info, info.Name, _currentDetails.TryGetValue(info.Name, out FileDetailsReader.FileDetails d) ? d : null));
+                part.Add(AgentShare.ToEntry(info, info.Name, _currentDetails.TryGetValue(info.Name, out FileDetailsReader.FileDetails d) ? d : null));
                 anyEntry = true;
                 _remainingEntries--;
                 _currentIndex++;
@@ -96,7 +96,7 @@ internal sealed class ShareTreeWalk
             try
             {
                 // Same order as FsList so a cached listing looks the same whichever message filled it.
-                _currentEntries = new DirectoryInfo(next.FullPath).EnumerateFileSystemInfos("*", ReadOnlyShare.ListOptions)
+                _currentEntries = new DirectoryInfo(next.FullPath).EnumerateFileSystemInfos("*", AgentShare.ListOptions)
                     .OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
                     .ToArray();
                 // File ids and change times of the whole directory in one scan, like FsList.

@@ -45,4 +45,13 @@ public enum MessageType : ushort
     ExplorerSysInfo = 0x1404,
     /// <summary>The profile machine B keeps for the caller (ExplorerPolicyResponse); never refused.</summary>
     ExplorerSysPolicy = 0x1405,
+    /// <summary>Creates a file or directory (M3).</summary>
+    FsCreate = 0x0107,
+    /// <summary>One block of an upload; the request payload is the bytes.</summary>
+    FsWrite = 0x0108,
+    /// <summary>Ends an upload with the version check (plan section 10).</summary>
+    FsCommit = 0x0109,
+    FsSetInfo = 0x010A,
+    FsRename = 0x010B,
+    FsDelete = 0x010C,
 }

@@ -52,7 +52,7 @@ public sealed class AgentHost : IAgentHost
         if (_server is not null)
             throw new InvalidOperationException("The Agent is already running.");
         // Write is not served yet (M3): ShareSettings.AllowWrite is only saved.
-        var readOnlyShares = shares.Select(x => new ReadOnlyShare(x.Name, x.Path)).ToList();
+        var readOnlyShares = shares.Select(x => new AgentShare(x.Name, x.Path)).ToList();
         var security = new AgentSecurity
         {
             Identity = _identity,

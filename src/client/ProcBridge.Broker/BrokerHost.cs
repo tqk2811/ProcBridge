@@ -20,13 +20,14 @@ public sealed class BrokerHost : IAsyncDisposable
     private readonly IDisposable? _factory;
     private int _disposed;
 
-    private BrokerHost(AgentClient client, FileCache cache, ChangeWatcher? watcher, HookIpcServer pipe, Task preload, CancellationTokenSource stopping, IDisposable? factory)
+    private BrokerHost(AgentClient client, FileCache cache, ChangeWatcher? watcher, WriteBackQueue writeBack, HookIpcServer pipe, Task preload, CancellationTokenSource stopping, IDisposable? factory)
     {
         _factory = factory;
         _stopping = stopping;
         Client = client;
         Cache = cache;
         Watcher = watcher;
+        WriteBack = writeBack;
         Pipe = pipe;
         PreloadTask = preload;
     }
@@ -37,6 +38,9 @@ public sealed class BrokerHost : IAsyncDisposable
 
     /// <summary>Change watcher, or null when <see cref="BrokerOptions.WatchChanges"/> is off.</summary>
     public ChangeWatcher? Watcher { get; }
+
+    /// <summary>Write-back of changed cache copies and its persistent queue (M3).</summary>
+    public WriteBackQueue WriteBack { get; }
 
     public HookIpcServer Pipe { get; }
 
@@ -64,12 +68,15 @@ public sealed class BrokerHost : IAsyncDisposable
             watcher.Start();
         }
 
-        var pipe = new HookIpcServer(HookIpcProtocol.GetPipeName(options.SessionId), new HookRequestHandler(cache, options.Mappings));
+        var writeBack = new WriteBackQueue(client, cache, options.GetWriteQueueRoot(), options.GetWriteTarget(), options.ConflictPolicy, options.WriteRetryDelay);
+        var handler = new HookRequestHandler(cache, options.Mappings, writeBack, options.WriteThrough);
+        var pipe = new HookIpcServer(HookIpcProtocol.GetPipeName(options.SessionId), handler);
         pipe.Start();
+        writeBack.StartRecovery();
 
         var stopping = new CancellationTokenSource();
         Task preload = options.PreloadTree ? PreloadAsync(cache, watcher, options, stopping.Token) : Task.CompletedTask;
-        return new BrokerHost(client, cache, watcher, pipe, preload, stopping, factory as IDisposable);
+        return new BrokerHost(client, cache, watcher, writeBack, pipe, preload, stopping, factory as IDisposable);
     }
 
     /// <summary>Encrypted factory when <see cref="BrokerOptions.Security"/> is set; plain only when explicitly allowed.</summary>
@@ -129,6 +136,16 @@ public sealed class BrokerHost : IAsyncDisposable
             return;
         _stopping.Cancel();
         await Pipe.DisposeAsync().ConfigureAwait(false);
+        // Last write-backs first, while the connection is still up.
+        try
+        {
+            await WriteBack.SyncOpenAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception e) when (e is not OutOfMemoryException)
+        {
+            Trace.TraceError($"ProcBridge: final write-back failed: {e.Message}");
+        }
+        await WriteBack.DisposeAsync().ConfigureAwait(false);
         if (Watcher is not null)
             await Watcher.DisposeAsync().ConfigureAwait(false);
         try

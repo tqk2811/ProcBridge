@@ -18,7 +18,7 @@ namespace ProcBridge.Agent;
 /// </summary>
 public sealed class AgentServer : IAsyncDisposable
 {
-    private readonly IReadOnlyDictionary<string, ReadOnlyShare> _shares;
+    private readonly IReadOnlyDictionary<string, AgentShare> _shares;
     private readonly AgentOptions _options;
     private readonly TcpListener _listener;
     private readonly CancellationTokenSource _stopping = new();
@@ -32,7 +32,7 @@ public sealed class AgentServer : IAsyncDisposable
 
     /// <param name="security">Identity and paired machines; null serves plain frames and needs <see cref="AgentOptions.AllowPlaintextTransport"/>.</param>
     /// <exception cref="ArgumentException">No security and plain transport not allowed.</exception>
-    public AgentServer(IEnumerable<ReadOnlyShare> shares, AgentOptions options, AgentSecurity? security = null)
+    public AgentServer(IEnumerable<AgentShare> shares, AgentOptions options, AgentSecurity? security = null)
     {
         if (security is null && !options.AllowPlaintextTransport)
             throw new ArgumentException("The Agent needs an identity and paired machines (AgentSecurity); plain transport is for development only.", nameof(security));
@@ -97,7 +97,7 @@ public sealed class AgentServer : IAsyncDisposable
         }).ToList();
 
     /// <summary>The watcher of <paramref name="share"/>, created on first use and shared by every connection.</summary>
-    internal ShareWatcher GetWatcher(ReadOnlyShare share)
+    internal ShareWatcher GetWatcher(AgentShare share)
         => _watchers.GetOrAdd(share.Name, _ => new Lazy<ShareWatcher>(() => new ShareWatcher(share.RootPath, _options.WatchBufferSize, _options.WatchBatchDelay))).Value;
 
     public void Start()

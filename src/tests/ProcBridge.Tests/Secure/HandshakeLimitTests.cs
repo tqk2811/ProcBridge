@@ -136,7 +136,7 @@ public sealed class HandshakeLimitTests
     {
         public PairingMachines(TempFolder share)
         {
-            Server = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0, PairingTimeout = TimeSpan.FromSeconds(20) },
+            Server = new AgentServer([new AgentShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0, PairingTimeout = TimeSpan.FromSeconds(20) },
                 new AgentSecurity { Identity = AgentKey, PairedMachines = AgentTrust, AllowPairing = true });
             Server.Start();
             Client = new PairingClient(BrokerKey, BrokerTrust, "machine-a");

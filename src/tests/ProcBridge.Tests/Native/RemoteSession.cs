@@ -37,10 +37,14 @@ internal sealed class RemoteSession : IAsyncDisposable
     /// <summary>The Broker's cache folder (inside the sandbox, so on the same volume as the real folder).</summary>
     public string CacheRoot => _broker.Cache.CacheRoot;
 
-    public static RemoteSession Start(HookSandbox sandbox)
+    /// <summary>The Broker of this session (write-back queue, conflicts).</summary>
+    public BrokerHost Broker => _broker;
+
+    /// <param name="writable">Serve the real folder read/write (M3) instead of read only.</param>
+    public static RemoteSession Start(HookSandbox sandbox, bool writable = false, bool writeThrough = false)
     {
         var peers = new SecurePeers();
-        var agent = new AgentServer([new ReadOnlyShare("share", sandbox.RealRoot)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 }, peers.Agent());
+        var agent = new AgentServer([new AgentShare("share", sandbox.RealRoot, writable)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 }, peers.Agent());
         agent.Start();
         string sessionId = HookIpcProtocol.NewSessionId();
         BrokerHost broker = BrokerHost.Start(new BrokerOptions
@@ -52,6 +56,8 @@ internal sealed class RemoteSession : IAsyncDisposable
             Mappings = [new VirtualMapping(sandbox.VirtualRoot, "")],
             CacheRoot = Path.Combine(sandbox.BaseDirectory, "cache"),
             Security = peers.Broker,
+            WriteQueueRoot = Path.Combine(sandbox.BaseDirectory, "queue"),
+            WriteThrough = writeThrough,
         });
         return new RemoteSession(sandbox, agent, broker, sessionId, peers);
     }

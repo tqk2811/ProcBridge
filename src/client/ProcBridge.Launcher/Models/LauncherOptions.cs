@@ -1,5 +1,6 @@
 using ProcBridge.Broker.Models;
 using ProcBridge.Protocol;
+using ProcBridge.Protocol.Enums;
 
 namespace ProcBridge.Launcher.Models;
 
@@ -38,6 +39,11 @@ public sealed record LauncherOptions
 
     /// <summary><c>--data</c>: folder of the identity key and paired machine list; null for <c>%LOCALAPPDATA%\ProcBridge\launcher</c>.</summary>
     public string? DataDirectory { get; init; }
+    /// <summary>Write-through (<see cref="BrokerOptions.WriteThrough"/>).</summary>
+    public bool WriteThrough { get; init; }
+
+    /// <summary>What a write-back does when the file changed on machine B (<see cref="BrokerOptions.ConflictPolicy"/>).</summary>
+    public ConflictPolicy ConflictPolicy { get; init; } = ConflictPolicy.KeepBoth;
 
     /// <summary>Target command line, passed to CreateProcess as is (cmd.exe has its own quoting rules).</summary>
     public required string CommandLine { get; init; }

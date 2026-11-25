@@ -17,4 +17,16 @@ public enum HookIpcMessageType : ushort
     WaitChanges = 6,
     /// <summary>Stops a watch (the directory handle was closed).</summary>
     Unwatch = 7,
+    /// <summary>A handle holding a write token was closed: write the cache copy back to machine B when it changed (M3).</summary>
+    Close = 8,
+    /// <summary>NtFlushBuffersFile (or a write in write-through mode) on a handle with a write token.</summary>
+    Flush = 9,
+    /// <summary>Attributes or times set through a virtual handle (FileBasicInformation).</summary>
+    SetInfo = 10,
+    /// <summary>Rename or move inside the virtual folders.</summary>
+    Rename = 11,
+    /// <summary>Delete a virtual file or empty directory (disposition, delete-on-close, NtDeleteFile).</summary>
+    Delete = 12,
+    /// <summary>A child process inherited a handle holding a write token: the token stays open until the child closes it too.</summary>
+    Retain = 13,
 }

@@ -25,7 +25,7 @@ public sealed class BrokerWatchTests
 
     private static AgentServer StartAgent(TempFolder share)
     {
-        var server = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
+        var server = new AgentServer([new AgentShare("src", share.Path)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
         server.Start();
         return server;
     }
@@ -135,7 +135,7 @@ public sealed class BrokerWatchTests
         await cache.StatAsync("a.txt", CancellationToken.None);
         long before = Requests(client);
 
-        server.GetWatcher(new ReadOnlyShare("src", share.Path)).OnError(new InternalBufferOverflowException());
+        server.GetWatcher(new AgentShare("src", share.Path)).OnError(new InternalBufferOverflowException());
 
         await rescans.Task.WaitAsync(TimeSpan.FromSeconds(10));
         await cache.StatAsync("a.txt", CancellationToken.None);
@@ -160,7 +160,7 @@ public sealed class BrokerWatchTests
         await server.DisposeAsync();
         await WaitUntilAsync(() => Task.FromResult(!cache.IsWatchActive), TimeSpan.FromSeconds(2));
 
-        await using var restarted = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = port });
+        await using var restarted = new AgentServer([new AgentShare("src", share.Path)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = port });
         restarted.Start();
         await watcher.WaitActiveAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
         Assert.IsTrue(cache.IsWatchActive);
@@ -354,7 +354,7 @@ public sealed class BrokerWatchTests
         // The share root vanishes and the Agent's watcher dies: the Broker must stop trusting its cache.
         string root = share.Path;
         string moved = root + "-moved";
-        var readOnlyShare = new ReadOnlyShare("src", root);
+        var readOnlyShare = new AgentShare("src", root);
         Directory.Move(root, moved);
         server.GetWatcher(readOnlyShare).OnError(new IOException("The watcher stopped."));
         await WaitUntilAsync(() => Task.FromResult(!cache.IsWatchActive), TimeSpan.FromSeconds(3));

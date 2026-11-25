@@ -17,7 +17,7 @@ public sealed class AgentWatchTreeTests
 
     private static AgentServer StartAgent(TempFolder share, AgentOptions? options = null)
     {
-        var server = new AgentServer([new ReadOnlyShare("src", share.Path)], (options ?? new AgentOptions()) with { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
+        var server = new AgentServer([new AgentShare("src", share.Path)], (options ?? new AgentOptions()) with { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
         server.Start();
         return server;
     }
@@ -84,7 +84,7 @@ public sealed class AgentWatchTreeTests
         BlockingCollection<FsChangeNotification> received = await WatchAsync(connection);
 
         // FileSystemWatcher reports a ReadDirectoryChangesW overflow through its Error event with this exception.
-        server.GetWatcher(new ReadOnlyShare("src", share.Path)).OnError(new InternalBufferOverflowException());
+        server.GetWatcher(new AgentShare("src", share.Path)).OnError(new InternalBufferOverflowException());
 
         FsChangeNotification rescan = WaitFor(received, x => x.Rescan, TimeSpan.FromSeconds(5));
         Assert.IsEmpty(rescan.Changes);

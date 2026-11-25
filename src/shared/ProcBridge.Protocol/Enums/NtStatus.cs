@@ -30,7 +30,12 @@ public enum NtStatus : uint
     NotSupported = 0xC00000BB,
     /// <summary>The share name in Hello is unknown on machine B.</summary>
     BadNetworkName = 0xC00000CC,
+    DirectoryNotEmpty = 0xC0000101,
     NotADirectory = 0xC0000103,
+    NotSameDevice = 0xC00000D4,
+    CannotDelete = 0xC0000121,
+    DeletePending = 0xC0000056,
+    DiskFull = 0xC000007F,
     Cancelled = 0xC0000120,
     /// <summary>Standard status the Hook gets for a transport or protocol failure that has no closer match.</summary>
     InvalidNetworkResponse = 0xC00000C3,

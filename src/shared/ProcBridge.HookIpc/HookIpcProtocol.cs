@@ -14,7 +14,7 @@ namespace ProcBridge.HookIpc;
 /// </remarks>
 public static class HookIpcProtocol
 {
-    public const ushort Version = 1;
+    public const ushort Version = 2;
 
     public const int HeaderSize = 16;
 
@@ -41,6 +41,8 @@ public static class HookIpcProtocol
 
     /// <summary>WaitChanges timeout meaning "wait until a change or until the watch is removed".</summary>
     public const uint InfiniteTimeout = 0xFFFFFFFF;
+    /// <summary>Bit 0 of the HelloReply flags: send Flush after every write on a handle with a write token.</summary>
+    public const ushort HelloFlagWriteThrough = 1;
 
     public static string GetPipeName(string sessionId) => PipeNamePrefix + sessionId;
 

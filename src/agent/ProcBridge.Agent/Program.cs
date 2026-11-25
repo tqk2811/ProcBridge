@@ -9,7 +9,7 @@ using ProcBridge.Transport.Secure.Models;
 namespace ProcBridge.Agent;
 
 /// <summary>
-/// Console host. Serve: <c>ProcBridge.Agent --share name=D:\folder [--share ...] [--port 47800] [--bind 0.0.0.0]
+/// Console host. Serve: <c>ProcBridge.Agent --share name=D:\folder [--share ...] [--write-share name=D:\folder] [--port 47800] [--bind 0.0.0.0]
 /// [--allow-pairing] [--data dir] [--plaintext]</c>. Manage paired machines: <c>--list-paired</c>, <c>--revoke &lt;fingerprint&gt;</c>.
 /// Remote Explorer profile of a paired machine: <c>--explorer &lt;fingerprint&gt; [--file-root dir]... [--registry-root key]...
 /// [--permissions FileRead,ProcessRead|None]</c> replaces it, <c>--show-explorer</c> prints it.
@@ -18,7 +18,7 @@ namespace ProcBridge.Agent;
 internal static class Program
 {
     private const string Usage =
-        @"Usage: ProcBridge.Agent --share name=D:\folder [--share ...] [--port 47800] [--bind 0.0.0.0] [--allow-pairing] [--data <dir>] [--plaintext]" + "\n" +
+        @"Usage: ProcBridge.Agent --share name=D:\folder [--share ...] [--write-share name=D:\folder] [--port 47800] [--bind 0.0.0.0] [--allow-pairing] [--data <dir>] [--plaintext]" + "\n" +
         @"       ProcBridge.Agent --list-paired [--data <dir>]" + "\n" +
         @"       ProcBridge.Agent --revoke <fingerprint> [--data <dir>]" + "\n" +
         @"       ProcBridge.Agent --explorer <fingerprint> [--file-root <dir>]... [--registry-root <key>]... [--permissions <flag,flag|None>] [--data <dir>]" + "\n" +
@@ -28,7 +28,7 @@ internal static class Program
 
     private static async Task<int> Main(string[] args)
     {
-        var shares = new List<ReadOnlyShare>();
+        var shares = new List<AgentShare>();
         var options = new AgentOptions();
         bool allowPairing = false;
         bool listPaired = false;
@@ -47,11 +47,12 @@ internal static class Program
                 switch (args[i])
                 {
                     case "--share":
+                    case "--write-share":
                         string value = Next();
                         int separator = value.IndexOf('=');
                         if (separator <= 0)
-                            throw new ArgumentException("--share expects name=path.");
-                        shares.Add(new ReadOnlyShare(value[..separator], value[(separator + 1)..]));
+                            throw new ArgumentException($"{args[i]} expects name=path.");
+                        shares.Add(new AgentShare(value[..separator], value[(separator + 1)..], writable: args[i] == "--write-share"));
                         break;
                     case "--port":
                         options = options with { Port = int.Parse(Next()) };
@@ -147,10 +148,10 @@ internal static class Program
         server.PairingRequested += AskUserToPair;
         server.Start();
         Console.WriteLine(security is null
-            ? $"ProcBridge.Agent listening on {options.BindAddress}:{server.Port} (read only, NOT encrypted: development only)."
-            : $"ProcBridge.Agent listening on {options.BindAddress}:{server.Port} (read only, encrypted). Fingerprint {server.Fingerprint}.");
-        foreach (ReadOnlyShare share in shares)
-            Console.WriteLine($"  share '{share.Name}' -> {share.RootPath}");
+            ? $"ProcBridge.Agent listening on {options.BindAddress}:{server.Port} (NOT encrypted: development only)."
+            : $"ProcBridge.Agent listening on {options.BindAddress}:{server.Port} (encrypted). Fingerprint {server.Fingerprint}.");
+        foreach (AgentShare share in shares)
+            Console.WriteLine($"  share '{share.Name}' -> {share.RootPath} ({(share.IsWritable ? "read/write" : "read only")})");
 
         var stop = new TaskCompletionSource();
         Console.CancelKeyPress += (_, e) =>
