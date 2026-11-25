@@ -1,0 +1,39 @@
+<Window x:Class="ProcBridge.Launcher.Wpf.Views.RemoteFolderPickerWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="clr-namespace:ProcBridge.Launcher.Wpf.ViewModels"
+        Title="{Binding Title}" Width="640" Height="520" MinWidth="420" MinHeight="300"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+    <DockPanel Margin="10">
+        <TextBlock DockPanel.Dock="Top" TextWrapping="Wrap" Margin="0,0,0,6"
+                   Text="Cây thư mục máy B (chỉ những gốc máy B cho phép). Mở rộng để tải thư mục con." />
+        <TextBlock DockPanel.Dock="Top" Margin="0,0,0,6" Foreground="Gray"
+                   Text="{Binding InitialPath, StringFormat=Lần trước: {0}, TargetNullValue=''}" />
+        <TextBlock DockPanel.Dock="Top" Style="{StaticResource ErrorText}" Text="{Binding Tree.ErrorText}"
+                   Visibility="{Binding Tree.HasError, Converter={StaticResource BoolToVisibility}}" />
+        <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
+            <TextBlock VerticalAlignment="Center" Margin="0,0,10,0" Text="{Binding Tree.SelectedPath}" />
+            <Button Content="Làm mới" Command="{Binding Tree.RefreshCommand}" />
+            <Button Content="Chọn" IsDefault="True" Click="OnChoose" />
+            <Button Content="Huỷ" IsCancel="True" Margin="0" />
+        </StackPanel>
+        <TreeView x:Name="FolderTree" ItemsSource="{Binding Tree.Roots}">
+            <TreeView.ItemContainerStyle>
+                <Style TargetType="TreeViewItem">
+                    <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}" />
+                    <Setter Property="IsSelected" Value="{Binding IsSelected, Mode=TwoWay}" />
+                </Style>
+            </TreeView.ItemContainerStyle>
+            <TreeView.Resources>
+                <HierarchicalDataTemplate DataType="{x:Type vm:RemoteFolderNodeViewModel}" ItemsSource="{Binding Children}">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="{Binding Name}" />
+                        <TextBlock Text=" (đang tải…)" Foreground="Gray" Visibility="{Binding IsLoading, Converter={StaticResource BoolToVisibility}}" />
+                        <TextBlock Text="{Binding ErrorText, StringFormat=' — {0}'}" Foreground="Firebrick"
+                                   Visibility="{Binding HasError, Converter={StaticResource BoolToVisibility}}" />
+                    </StackPanel>
+                </HierarchicalDataTemplate>
+            </TreeView.Resources>
+        </TreeView>
+    </DockPanel>
+</Window>

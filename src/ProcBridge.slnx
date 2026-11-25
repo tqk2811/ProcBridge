@@ -9,6 +9,7 @@
     <Project Path="client/ProcBridge.Launcher/ProcBridge.Launcher.csproj" />
     <Project Path="client/ProcBridge.Broker/ProcBridge.Broker.csproj" />
     <Project Path="client/ProcBridge.Explorer.Client/ProcBridge.Explorer.Client.csproj" />
+    <Project Path="client/ProcBridge.Launcher.Wpf/ProcBridge.Launcher.Wpf.csproj" />
   </Folder>
   <Folder Name="/agent/">
     <Project Path="agent/ProcBridge.Agent/ProcBridge.Agent.csproj" />
@@ -19,6 +20,7 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/ProcBridge.Tests/ProcBridge.Tests.csproj" />
+    <Project Path="tests/ProcBridge.Launcher.Wpf.Tests/ProcBridge.Launcher.Wpf.Tests.csproj" />
   </Folder>
   <Folder Name="/Solution Items/">
     <File Path="Directory.Build.props" />
