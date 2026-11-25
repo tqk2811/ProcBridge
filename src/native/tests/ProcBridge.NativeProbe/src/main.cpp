@@ -33,6 +33,9 @@ namespace
         PLARGE_INTEGER, ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
     using NtQueryDirectoryFileFn = NTSTATUS(NTAPI*)(HANDLE, HANDLE, PIO_APC_ROUTINE, PVOID, PIO_STATUS_BLOCK,
         PVOID, ULONG, ULONG, BOOLEAN, PUNICODE_STRING, BOOLEAN);
+    using NtQueryObjectFn = NTSTATUS(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+    using NtSetInformationFileFn = NTSTATUS(NTAPI*)(HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG, ULONG);
+    using NtQueryAttributesFileFn = NTSTATUS(NTAPI*)(POBJECT_ATTRIBUTES, PVOID);
 
     std::wstring Hex(unsigned long long value)
     {
@@ -175,6 +178,9 @@ namespace
             _ntOpenFile = reinterpret_cast<NtOpenFileFn>(GetProcAddress(ntdll, "NtOpenFile"));
             _ntCreateFile = reinterpret_cast<NtCreateFileFn>(GetProcAddress(ntdll, "NtCreateFile"));
             _ntQueryDirectoryFile = reinterpret_cast<NtQueryDirectoryFileFn>(GetProcAddress(ntdll, "NtQueryDirectoryFile"));
+            _ntQueryObject = reinterpret_cast<NtQueryObjectFn>(GetProcAddress(ntdll, "NtQueryObject"));
+            _ntSetInformationFile = reinterpret_cast<NtSetInformationFileFn>(GetProcAddress(ntdll, "NtSetInformationFile"));
+            _ntQueryAttributesFile = reinterpret_cast<NtQueryAttributesFileFn>(GetProcAddress(ntdll, "NtQueryAttributesFile"));
         }
 
         void Run()
@@ -195,6 +201,7 @@ namespace
             RelativeNtOpen();
             OverlappedRead();
             Errors();
+            BadPointers();
         }
 
     private:
@@ -656,12 +663,62 @@ namespace
             Line(L"OpenError[create-new-existing]", created.IsValid() ? L"opened" : Error(GetLastError()));
         }
 
+        /// Unreadable caller pointers: the system answers STATUS_ACCESS_VIOLATION and so must the hooks
+        /// (instead of crashing the process).
+        void BadPointers() const
+        {
+            // Reserved, never committed: any access faults.
+            void* bad = VirtualAlloc(nullptr, 0x10000, MEM_RESERVE, PAGE_NOACCESS);
+            Handle file(CreateFileW(Path(L"a.txt").c_str(), GENERIC_READ | DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                nullptr, OPEN_EXISTING, 0, nullptr));
+            if (bad == nullptr || !file.IsValid())
+            {
+                Line(L"BadPointers", Error(GetLastError()));
+                return;
+            }
+            alignas(8) BYTE buffer[4096];
+            IO_STATUS_BLOCK io{};
+            Line(L"BadPointers.QueryName.buffer", Status(_ntQueryInformationFile(file.Get(), &io, bad, 4096, FileNameInformationClass)));
+            Line(L"BadPointers.QueryName.io", Status(_ntQueryInformationFile(file.Get(), static_cast<PIO_STATUS_BLOCK>(bad), buffer,
+                sizeof(buffer), FileNameInformationClass)));
+            Line(L"BadPointers.QueryObject.buffer", Status(_ntQueryObject(file.Get(), 1, bad, 4096, nullptr)));
+            Line(L"BadPointers.QueryObject.length", Status(_ntQueryObject(file.Get(), 1, buffer, sizeof(buffer), static_cast<PULONG>(bad))));
+            Line(L"BadPointers.Rename.buffer", Status(_ntSetInformationFile(file.Get(), &io, bad, 64, 10)));
+
+            HANDLE raw = nullptr;
+            Line(L"BadPointers.Open.attributes", Status(_ntOpenFile(&raw, FILE_GENERIC_READ, static_cast<POBJECT_ATTRIBUTES>(bad), &io,
+                FILE_SHARE_READ, FILE_SYNCHRONOUS_IO_NONALERT)));
+            OBJECT_ATTRIBUTES attributes{};
+            InitializeObjectAttributes(&attributes, static_cast<PUNICODE_STRING>(bad), OBJ_CASE_INSENSITIVE, nullptr, nullptr);
+            Line(L"BadPointers.Open.name", Status(_ntOpenFile(&raw, FILE_GENERIC_READ, &attributes, &io, FILE_SHARE_READ,
+                FILE_SYNCHRONOUS_IO_NONALERT)));
+            UNICODE_STRING name{};
+            name.Buffer = static_cast<PWSTR>(bad);
+            name.Length = 40;
+            name.MaximumLength = 40;
+            InitializeObjectAttributes(&attributes, &name, OBJ_CASE_INSENSITIVE, nullptr, nullptr);
+            Line(L"BadPointers.Open.text", Status(_ntOpenFile(&raw, FILE_GENERIC_READ, &attributes, &io, FILE_SHARE_READ,
+                FILE_SYNCHRONOUS_IO_NONALERT)));
+            alignas(8) BYTE basic[40]{};
+            Line(L"BadPointers.QueryAttributes.name", Status(_ntQueryAttributesFile(&attributes, basic)));
+            // Valid virtual name, unreadable handle pointer for the result.
+            const std::wstring ntPath = L"\\??\\" + Path(L"a.txt");
+            RtlInitUnicodeString(&name, ntPath.c_str());
+            InitializeObjectAttributes(&attributes, &name, OBJ_CASE_INSENSITIVE, nullptr, nullptr);
+            Line(L"BadPointers.Open.handle", Status(_ntOpenFile(static_cast<PHANDLE>(bad), FILE_GENERIC_READ, &attributes, &io,
+                FILE_SHARE_READ, FILE_SYNCHRONOUS_IO_NONALERT)));
+            VirtualFree(bad, 0, MEM_RELEASE);
+        }
+
         std::wstring _root;
         const ProbeOutput& _out;
         NtQueryInformationFileFn _ntQueryInformationFile;
         NtOpenFileFn _ntOpenFile;
         NtCreateFileFn _ntCreateFile;
         NtQueryDirectoryFileFn _ntQueryDirectoryFile;
+        NtQueryObjectFn _ntQueryObject;
+        NtSetInformationFileFn _ntSetInformationFile;
+        NtQueryAttributesFileFn _ntQueryAttributesFile;
     };
 }
 

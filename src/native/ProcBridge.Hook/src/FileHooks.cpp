@@ -38,6 +38,38 @@ namespace ProcBridge::Hook
 
         thread_local unsigned t_hookDepth = 0;
 
+        // Caller memory: hooks read and write pointers that the kernel would probe and answer with
+        // STATUS_ACCESS_VIOLATION. Every access to caller memory goes through these SEH-guarded copies
+        // (no C++ objects in them, so __try is allowed).
+        int AccessFilter(DWORD code) noexcept
+        {
+            return code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_DATATYPE_MISALIGNMENT || code == EXCEPTION_IN_PAGE_ERROR
+                ? EXCEPTION_EXECUTE_HANDLER
+                : EXCEPTION_CONTINUE_SEARCH;
+        }
+
+        bool SafeCopy(void* destination, const void* source, size_t bytes) noexcept
+        {
+            __try
+            {
+                memcpy(destination, source, bytes);
+                return true;
+            }
+            __except (AccessFilter(GetExceptionCode()))
+            {
+                return false;
+            }
+        }
+
+        /// Writes the IO_STATUS_BLOCK of a hook that answered by itself.
+        bool SafeSetIoStatus(PIO_STATUS_BLOCK ioStatusBlock, NTSTATUS status, ULONG_PTR information) noexcept
+        {
+            IO_STATUS_BLOCK value{};
+            value.Status = status;
+            value.Information = information;
+            return SafeCopy(ioStatusBlock, &value, sizeof(value));
+        }
+
         /// Per-thread re-entry guard (plan 4.6): a hook that ends up calling a hooked function again
         /// on the same thread goes straight to the original.
         class ReentryGuard final
@@ -55,41 +87,56 @@ namespace ProcBridge::Hook
         };
 
         /// Resolves OBJECT_ATTRIBUTES against the virtual roots and owns the rewritten name.
+        /// The caller's structures are read once into a snapshot (SEH-guarded); an unreadable pointer
+        /// makes Error() STATUS_ACCESS_VIOLATION, as the kernel would answer.
         class RedirectedAttributes final
         {
         public:
             explicit RedirectedAttributes(POBJECT_ATTRIBUTES source) noexcept
                 : _source(source)
             {
-                if (source == nullptr || source->ObjectName == nullptr || source->ObjectName->Buffer == nullptr)
+                if (source == nullptr)
                 {
                     return;
                 }
-                if (source->RootDirectory != nullptr)
+                UNICODE_STRING name{};
+                if (!SafeCopy(&_attributes, source, sizeof(_attributes))
+                    || (_attributes.ObjectName != nullptr && !SafeCopy(&name, _attributes.ObjectName, sizeof(name))))
+                {
+                    _error = STATUS_ACCESS_VIOLATION;
+                    return;
+                }
+                if (_attributes.ObjectName == nullptr || name.Buffer == nullptr || name.Length % sizeof(wchar_t) != 0)
+                {
+                    return; // nothing to translate; the system validates the rest
+                }
+                if (!CopyName(name))
+                {
+                    return;
+                }
+                if (_attributes.RootDirectory != nullptr)
                 {
                     // Relative to a virtual directory handle: that handle already points at the backing
                     // folder, so the name stays as is; only the result has to be tracked.
-                    _mapping = g_handles.Find(source->RootDirectory);
+                    _mapping = g_handles.Find(_attributes.RootDirectory);
                     if (_mapping < 0)
                     {
-                        ResolveBelowRealDirectory(source->RootDirectory, *source->ObjectName);
+                        ResolveBelowRealDirectory(_attributes.RootDirectory, _nameCopy);
                     }
                 }
                 else
                 {
-                    const int mapping = g_resolver->FindMapping(*source->ObjectName);
+                    const int mapping = g_resolver->FindMapping(_nameCopy);
                     if (mapping < 0)
                     {
                         return;
                     }
                     _mapping = mapping;
-                    _failed = !g_resolver->TranslateToReal(mapping, *source->ObjectName, _name);
-                    _rewritten = !_failed;
+                    SetTranslated(g_resolver->TranslateToReal(mapping, _nameCopy, _name));
                 }
                 if (_rewritten)
                 {
                     // Always an absolute backing path: RootDirectory (if any) is dropped.
-                    _attributes = *source;
                     _attributes.RootDirectory = nullptr;
                     _attributes.ObjectName = &_name;
                 }
@@ -101,17 +148,52 @@ namespace ProcBridge::Hook
                 {
                     FreeString(_name);
                 }
+                if (_heapName != nullptr)
+                {
+                    HeapFree(GetProcessHeap(), 0, _heapName);
+                }
             }
 
             RedirectedAttributes(const RedirectedAttributes&) = delete;
             RedirectedAttributes& operator=(const RedirectedAttributes&) = delete;
 
             bool Matched() const noexcept { return _mapping >= 0; }
-            bool Failed() const noexcept { return _failed; }
+            /// STATUS_SUCCESS, or the status the hook returns without calling the system.
+            NTSTATUS Error() const noexcept { return _error; }
             int Mapping() const noexcept { return _mapping; }
             POBJECT_ATTRIBUTES Get() noexcept { return _rewritten ? &_attributes : _source; }
 
         private:
+            /// Copies the caller's name text; short names stay in the inline buffer.
+            bool CopyName(const UNICODE_STRING& name) noexcept
+            {
+                wchar_t* text = _inlineName;
+                if (name.Length > sizeof(_inlineName))
+                {
+                    _heapName = static_cast<wchar_t*>(HeapAlloc(GetProcessHeap(), 0, name.Length));
+                    if (_heapName == nullptr)
+                    {
+                        return false; // leave the call untouched rather than failing it
+                    }
+                    text = _heapName;
+                }
+                if (!SafeCopy(text, name.Buffer, name.Length))
+                {
+                    _error = STATUS_ACCESS_VIOLATION;
+                    return false;
+                }
+                _nameCopy.Buffer = text;
+                _nameCopy.Length = name.Length;
+                _nameCopy.MaximumLength = name.Length;
+                return true;
+            }
+
+            void SetTranslated(bool translated) noexcept
+            {
+                _rewritten = translated;
+                _error = translated ? STATUS_SUCCESS : STATUS_NO_MEMORY;
+            }
+
             /// RootDirectory is a real directory (typically the current directory handle): join its name
             /// with the relative name and translate when the result lies inside a virtual root.
             void ResolveBelowRealDirectory(HANDLE root, const UNICODE_STRING& relative) noexcept
@@ -155,7 +237,7 @@ namespace ProcBridge::Hook
                 UNICODE_STRING joined{};
                 if (!AllocateString(joined, joinedBytes))
                 {
-                    _failed = true;
+                    _error = STATUS_NO_MEMORY;
                     return;
                 }
                 BYTE* cursor = reinterpret_cast<BYTE*>(joined.Buffer);
@@ -171,8 +253,7 @@ namespace ProcBridge::Hook
                 if (mapping >= 0)
                 {
                     _mapping = mapping;
-                    _failed = !g_resolver->TranslateDeviceToReal(mapping, joined, _name);
-                    _rewritten = !_failed;
+                    SetTranslated(g_resolver->TranslateDeviceToReal(mapping, joined, _name));
                 }
                 FreeString(joined);
             }
@@ -180,15 +261,23 @@ namespace ProcBridge::Hook
             POBJECT_ATTRIBUTES _source;
             OBJECT_ATTRIBUTES _attributes{};
             UNICODE_STRING _name{};
+            UNICODE_STRING _nameCopy{};
+            wchar_t _inlineName[260];
+            wchar_t* _heapName = nullptr;
             int _mapping = -1;
             bool _rewritten = false;
-            bool _failed = false;
+            NTSTATUS _error = STATUS_SUCCESS;
         };
 
         /// A new handle value may equal a handle that was closed without NtClose (NtDuplicateObject with
         /// DUPLICATE_CLOSE_SOURCE, kernel): replace or drop stale entries.
-        void TrackOpenedHandle(HANDLE handle, const RedirectedAttributes& redirect) noexcept
+        void TrackOpenedHandle(PHANDLE handlePointer, const RedirectedAttributes& redirect) noexcept
         {
+            HANDLE handle = nullptr;
+            if (!SafeCopy(&handle, handlePointer, sizeof(handle)))
+            {
+                return;
+            }
             g_directoryNames.Remove(handle);
             if (redirect.Matched())
             {
@@ -211,15 +300,15 @@ namespace ProcBridge::Hook
                     fileAttributes, shareAccess, createDisposition, createOptions, eaBuffer, eaLength);
             }
             RedirectedAttributes redirect(objectAttributes);
-            if (redirect.Failed())
+            if (redirect.Error() != STATUS_SUCCESS)
             {
-                return STATUS_NO_MEMORY;
+                return redirect.Error();
             }
             const NTSTATUS status = g_ntCreateFile(fileHandle, desiredAccess, redirect.Get(), ioStatusBlock,
                 allocationSize, fileAttributes, shareAccess, createDisposition, createOptions, eaBuffer, eaLength);
             if (NT_SUCCESS(status))
             {
-                TrackOpenedHandle(*fileHandle, redirect);
+                TrackOpenedHandle(fileHandle, redirect);
             }
             return status;
         }
@@ -233,14 +322,14 @@ namespace ProcBridge::Hook
                 return g_ntOpenFile(fileHandle, desiredAccess, objectAttributes, ioStatusBlock, shareAccess, openOptions);
             }
             RedirectedAttributes redirect(objectAttributes);
-            if (redirect.Failed())
+            if (redirect.Error() != STATUS_SUCCESS)
             {
-                return STATUS_NO_MEMORY;
+                return redirect.Error();
             }
             const NTSTATUS status = g_ntOpenFile(fileHandle, desiredAccess, redirect.Get(), ioStatusBlock, shareAccess, openOptions);
             if (NT_SUCCESS(status))
             {
-                TrackOpenedHandle(*fileHandle, redirect);
+                TrackOpenedHandle(fileHandle, redirect);
             }
             return status;
         }
@@ -253,9 +342,9 @@ namespace ProcBridge::Hook
                 return original(objectAttributes, information);
             }
             RedirectedAttributes redirect(objectAttributes);
-            if (redirect.Failed())
+            if (redirect.Error() != STATUS_SUCCESS)
             {
-                return STATUS_NO_MEMORY;
+                return redirect.Error();
             }
             return original(redirect.Get(), information);
         }
@@ -328,10 +417,11 @@ namespace ProcBridge::Hook
 
             const size_t required = headerBytes + newBytes;
             const size_t copied = required <= length ? required : length;
-            memcpy(information, rewritten.Get(), copied);
             const NTSTATUS result = required <= length ? STATUS_SUCCESS : STATUS_BUFFER_OVERFLOW;
-            ioStatusBlock->Status = result;
-            ioStatusBlock->Information = copied;
+            if (!SafeCopy(information, rewritten.Get(), copied) || !SafeSetIoStatus(ioStatusBlock, result, copied))
+            {
+                return STATUS_ACCESS_VIOLATION;
+            }
             return result;
         }
 
@@ -350,14 +440,28 @@ namespace ProcBridge::Hook
             {
                 return g_ntSetInformationFile(fileHandle, ioStatusBlock, information, length, informationClass);
             }
-            const auto* rename = static_cast<const FileRenameInfo*>(information);
-            if (rename->RootDirectory != nullptr || rename->FileNameLength > 0xFFFC || headerBytes + rename->FileNameLength > length)
+            FileRenameInfo header{};
+            if (!SafeCopy(&header, information, headerBytes))
+            {
+                return STATUS_ACCESS_VIOLATION;
+            }
+            if (header.RootDirectory != nullptr || header.FileNameLength > 0xFFFC || header.FileNameLength % sizeof(wchar_t) != 0
+                || headerBytes + header.FileNameLength > length)
             {
                 return g_ntSetInformationFile(fileHandle, ioStatusBlock, information, length, informationClass);
             }
+            HeapBuffer targetText(header.FileNameLength + sizeof(wchar_t));
+            if (!targetText)
+            {
+                return STATUS_NO_MEMORY;
+            }
+            if (!SafeCopy(targetText.Get(), static_cast<const BYTE*>(information) + headerBytes, header.FileNameLength))
+            {
+                return STATUS_ACCESS_VIOLATION;
+            }
             UNICODE_STRING target{};
-            target.Buffer = const_cast<PWSTR>(rename->FileName);
-            target.Length = static_cast<USHORT>(rename->FileNameLength);
+            target.Buffer = reinterpret_cast<PWSTR>(targetText.Get());
+            target.Length = static_cast<USHORT>(header.FileNameLength);
             target.MaximumLength = target.Length;
             const int mapping = g_resolver->FindMapping(target);
             if (mapping < 0)
@@ -376,7 +480,7 @@ namespace ProcBridge::Hook
                 FreeString(realTarget);
                 return STATUS_NO_MEMORY;
             }
-            memcpy(buffer.Get(), information, headerBytes);
+            memcpy(buffer.Get(), &header, headerBytes);
             auto* newRename = reinterpret_cast<FileRenameInfo*>(buffer.Get());
             newRename->FileNameLength = realTarget.Length;
             memcpy(newRename->FileName, realTarget.Buffer, realTarget.Length);
@@ -415,22 +519,25 @@ namespace ProcBridge::Hook
                 return g_ntQueryObject(handle, informationClass, information, length, returnLength);
             }
             const size_t required = sizeof(ObjectNameInfo) + newBytes + sizeof(wchar_t);
-            if (returnLength != nullptr)
+            const ULONG requiredLength = static_cast<ULONG>(required);
+            if (returnLength != nullptr && !SafeCopy(returnLength, &requiredLength, sizeof(requiredLength)))
             {
-                *returnLength = static_cast<ULONG>(required);
+                return STATUS_ACCESS_VIOLATION;
             }
             if (required > length)
             {
                 return STATUS_BUFFER_OVERFLOW;
             }
-            auto* result = static_cast<ObjectNameInfo*>(information);
-            auto* text = reinterpret_cast<wchar_t*>(static_cast<BYTE*>(information) + sizeof(ObjectNameInfo));
+            // Build the answer in the scratch buffer (header + text), then copy it out in one guarded step.
+            BYTE* answer = real.Get();
+            auto* result = reinterpret_cast<ObjectNameInfo*>(answer);
+            auto* text = reinterpret_cast<wchar_t*>(answer + sizeof(ObjectNameInfo));
             memcpy(text, newText, newBytes);
             text[newBytes / sizeof(wchar_t)] = L'\0';
-            result->Name.Buffer = text;
+            result->Name.Buffer = reinterpret_cast<wchar_t*>(static_cast<BYTE*>(information) + sizeof(ObjectNameInfo));
             result->Name.Length = static_cast<USHORT>(newBytes);
             result->Name.MaximumLength = static_cast<USHORT>(newBytes + sizeof(wchar_t));
-            return STATUS_SUCCESS;
+            return SafeCopy(information, answer, required) ? STATUS_SUCCESS : STATUS_ACCESS_VIOLATION;
         }
 
         NTSTATUS NTAPI HookNtClose(HANDLE handle)
