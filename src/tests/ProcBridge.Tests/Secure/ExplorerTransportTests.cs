@@ -155,6 +155,51 @@ public sealed class ExplorerTransportTests
         Assert.AreEqual(ExplorerPermissions.None, new ExplorerPolicyStore(path, protector).Get("fp-a").Permissions);
     }
 
+    [TestMethod]
+    public async Task NarrowingTheProfile_ClosesTheOpenConnection_AndNewOnesGetTheNarrowProfile()
+    {
+        using var root = new TempFolder("exp");
+        root.WriteFile("a.txt", [1, 2, 3]);
+        await using var s = new Setup(root, new ExplorerPolicy { FileRoots = [root.Path], Permissions = ExplorerPermissions.FileRead });
+        Assert.AreEqual(ExplorerStatus.Ok, (await s.Client.StatAsync(root.Combine("a.txt"), CancellationToken.None)).Status);
+        Assert.AreEqual(1, s.Server.ActiveSessionCount);
+
+        s.Policies.Set(s.Peers.BrokerKey.Fingerprint, new ExplorerPolicy());
+
+        await WaitUntilAsync(() => s.Server.ActiveSessionCount == 0);
+        await using var fresh = new ExplorerClient(new SecureConnectionFactory(new TcpStreamConnector("127.0.0.1", s.Server.Port), s.Peers.BrokerKey, s.Peers.BrokerTrust, s.Peers.AgentKey.PublicKey, Transport), Transport);
+        Assert.AreEqual(ExplorerStatus.PermissionDenied, (await fresh.StatAsync(root.Combine("a.txt"), CancellationToken.None)).Status);
+    }
+
+    [TestMethod]
+    public async Task Revoking_AMachine_DeletesItsProfile_SoPairingAgainStartsWithNothing()
+    {
+        using var root = new TempFolder("exp");
+        root.WriteFile("a.txt", [1]);
+        await using var s = new Setup(root, new ExplorerPolicy { FileRoots = [root.Path], Permissions = ExplorerPermissions.FileRead });
+        string fingerprint = s.Peers.BrokerKey.Fingerprint;
+        Assert.AreEqual(ExplorerPermissions.FileRead, s.Policies.Get(fingerprint).Permissions);
+
+        Assert.IsTrue(s.Peers.AgentTrust.Revoke(fingerprint));
+        Assert.AreEqual(ExplorerPermissions.None, s.Policies.Get(fingerprint).Permissions);
+
+        // Paired again later (same key): no profile comes back with it.
+        s.Peers.AgentTrust.Add(s.Peers.BrokerKey.PublicKey, "machine-a");
+        await using var fresh = new ExplorerClient(new SecureConnectionFactory(new TcpStreamConnector("127.0.0.1", s.Server.Port), s.Peers.BrokerKey, s.Peers.BrokerTrust, s.Peers.AgentKey.PublicKey, Transport), Transport);
+        Assert.AreEqual(ExplorerStatus.PermissionDenied, (await fresh.StatAsync(root.Combine("a.txt"), CancellationToken.None)).Status);
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        DateTime deadline = DateTime.UtcNow.AddSeconds(10);
+        while (!condition())
+        {
+            if (DateTime.UtcNow > deadline)
+                Assert.Fail("Condition not reached in time.");
+            await Task.Delay(20);
+        }
+    }
+
     private sealed class ListAudit : IExplorerAuditLog
     {
         private readonly List<ExplorerAuditEntry> _entries = [];

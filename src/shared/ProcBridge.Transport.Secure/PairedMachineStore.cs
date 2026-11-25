@@ -12,16 +12,23 @@ namespace ProcBridge.Transport.Secure;
 /// connection. Persisted as JSON wrapped by an <see cref="IKeyProtector"/> (DPAPI in production): the keys are public,
 /// the protector keeps other users from slipping a machine into the list. The parameterless constructor keeps the list
 /// in memory (tests). Thread-safe. The protector is borrowed.
+/// <para>
+/// The file is the truth, not the memory: other instances or processes (a settings tool revoking a machine while the
+/// Agent runs) may change it. Every read first compares the file stamp and reloads when it changed, raising
+/// <see cref="Revoked"/> for machines that disappeared; every write takes an inter-process lock, re-reads the file and
+/// applies only its own change, so a stale list in memory never brings back a revoked machine. A running service calls
+/// <see cref="Refresh"/> on a timer to notice a revocation while it sits idle.
+/// </para>
 /// </summary>
 public sealed class PairedMachineStore
 {
     private const byte FormatVersion = 1;
     private static readonly byte[] _magic = "PBPM"u8.ToArray();
 
-    private readonly string? _path;
+    private readonly SharedStoreFile? _file;
     private readonly IKeyProtector? _protector;
     private readonly Lock _lock = new();
-    private readonly Dictionary<string, PairedMachine> _machines = new(StringComparer.Ordinal);
+    private Dictionary<string, PairedMachine> _machines = new(StringComparer.Ordinal);
 
     /// <summary>In-memory store.</summary>
     public PairedMachineStore()
@@ -33,37 +40,58 @@ public sealed class PairedMachineStore
     /// <exception cref="CryptographicException">The file cannot be unwrapped (other user, corrupted).</exception>
     public PairedMachineStore(string path, IKeyProtector protector)
     {
-        _path = path;
+        _file = new SharedStoreFile(path, _magic, FormatVersion);
         _protector = protector;
-        if (File.Exists(path))
-            Load();
+        _machines = ReadFile();
     }
 
-    /// <summary>Raised after <see cref="Revoke"/> removed a machine, outside the store lock.</summary>
+    /// <summary>
+    /// Raised after a machine was removed, by <see cref="Revoke"/> here or by another instance or process that changed
+    /// the file; outside the store lock. A handler that throws is ignored for machines found by a reload.
+    /// </summary>
     public event Action<PairedMachine>? Revoked;
 
     public IReadOnlyList<PairedMachine> List()
     {
+        IReadOnlyList<PairedMachine> result;
+        IReadOnlyList<PairedMachine> removed;
         lock (_lock)
-            return _machines.Values.OrderBy(x => x.PairedAtUtc).ToArray();
+        {
+            removed = RefreshLocked();
+            result = _machines.Values.OrderBy(x => x.PairedAtUtc).ToArray();
+        }
+        Raise(removed);
+        return result;
     }
 
     public PairedMachine? Find(string fingerprint)
     {
+        PairedMachine? result;
+        IReadOnlyList<PairedMachine> removed;
         lock (_lock)
-            return _machines.GetValueOrDefault(fingerprint);
+        {
+            removed = RefreshLocked();
+            result = _machines.GetValueOrDefault(fingerprint);
+        }
+        Raise(removed);
+        return result;
     }
 
     /// <summary>The machine paired at <paramref name="address"/> (<c>host:port</c>, case-insensitive), the latest if several.</summary>
     public PairedMachine? FindByAddress(string address)
     {
+        PairedMachine? result;
+        IReadOnlyList<PairedMachine> removed;
         lock (_lock)
         {
-            return _machines.Values
+            removed = RefreshLocked();
+            result = _machines.Values
                 .Where(x => string.Equals(x.Address, address, StringComparison.OrdinalIgnoreCase))
                 .OrderByDescending(x => x.PairedAtUtc)
                 .FirstOrDefault();
         }
+        Raise(removed);
+        return result;
     }
 
     /// <summary>True when <paramref name="publicKey"/> is paired (handshake verifier).</summary>
@@ -72,14 +100,37 @@ public sealed class PairedMachineStore
         if (publicKey.Length != IdentityKey.PublicKeySize)
             return false;
         string fingerprint = KeyFingerprint.Compute(publicKey);
+        bool result;
+        IReadOnlyList<PairedMachine> removed;
         lock (_lock)
-            return _machines.TryGetValue(fingerprint, out PairedMachine? machine) && CryptographicOperations.FixedTimeEquals(machine.PublicKey, publicKey);
+        {
+            removed = RefreshLocked();
+            result = _machines.TryGetValue(fingerprint, out PairedMachine? machine) && CryptographicOperations.FixedTimeEquals(machine.PublicKey, publicKey);
+        }
+        Raise(removed);
+        return result;
     }
 
     public bool IsTrusted(string fingerprint)
     {
+        bool result;
+        IReadOnlyList<PairedMachine> removed;
         lock (_lock)
-            return _machines.ContainsKey(fingerprint);
+        {
+            removed = RefreshLocked();
+            result = _machines.ContainsKey(fingerprint);
+        }
+        Raise(removed);
+        return result;
+    }
+
+    /// <summary>Reloads the file when another instance or process changed it, raising <see cref="Revoked"/> for machines it dropped.</summary>
+    public void Refresh()
+    {
+        IReadOnlyList<PairedMachine> removed;
+        lock (_lock)
+            removed = RefreshLocked();
+        Raise(removed);
     }
 
     /// <summary>Adds or replaces the entry of <paramref name="publicKey"/> and saves the list; returns the entry.</summary>
@@ -95,70 +146,107 @@ public sealed class PairedMachineStore
             Address = address,
             PairedAtUtc = DateTime.UtcNow,
         };
-        lock (_lock)
+        Mutate(machines =>
         {
-            _machines[machine.Fingerprint] = machine;
-            SaveLocked();
-        }
+            machines[machine.Fingerprint] = machine;
+            return true;
+        }, out IReadOnlyList<PairedMachine> removed);
+        Raise(removed);
         return machine;
     }
 
     /// <summary>Removes the machine; its next handshake or channel is refused. False when it was not paired.</summary>
     public bool Revoke(string fingerprint)
     {
-        PairedMachine? removed;
-        lock (_lock)
-        {
-            if (!_machines.Remove(fingerprint, out removed))
-                return false;
-            SaveLocked();
-        }
-        Revoked?.Invoke(removed);
-        return true;
+        bool revoked = Mutate(machines => machines.Remove(fingerprint), out IReadOnlyList<PairedMachine> removed);
+        Raise(removed, rethrow: true);
+        return revoked;
     }
 
-    private void Load()
+    /// <summary>Applies <paramref name="change"/> to the current content of the file (not to the copy in memory) and saves it.</summary>
+    private bool Mutate(Func<Dictionary<string, PairedMachine>, bool> change, out IReadOnlyList<PairedMachine> removed)
     {
-        byte[] data = File.ReadAllBytes(_path!);
-        if (data.Length <= _magic.Length + 1 || !data.AsSpan(0, _magic.Length).SequenceEqual(_magic))
-            throw new InvalidDataException("Not a ProcBridge paired machine file.");
-        if (data[_magic.Length] != FormatVersion)
-            throw new InvalidDataException($"Unsupported paired machine file version {data[_magic.Length]}.");
-        byte[] json = _protector!.Unprotect(data[(_magic.Length + 1)..]);
-        PairedMachine[] machines = JsonSerializer.Deserialize<PairedMachine[]>(json) ?? [];
-        foreach (PairedMachine machine in machines)
+        lock (_lock)
+        {
+            if (_file is null)
+            {
+                PairedMachine[] before = _machines.Values.ToArray();
+                bool applied = change(_machines);
+                removed = before.Where(x => !_machines.ContainsKey(x.Fingerprint)).ToArray();
+                return applied;
+            }
+
+            using (_file.Lock())
+            {
+                Dictionary<string, PairedMachine> current = ReadFile();
+                bool applied = change(current);
+                if (applied)
+                    WriteFile(current);
+                removed = _machines.Values.Where(x => !current.ContainsKey(x.Fingerprint)).ToArray();
+                _machines = current;
+                return applied;
+            }
+        }
+    }
+
+    private IReadOnlyList<PairedMachine> RefreshLocked()
+    {
+        if (_file is null || !_file.HasChanged())
+            return [];
+        Dictionary<string, PairedMachine> fresh;
+        try
+        {
+            fresh = ReadFile();
+        }
+        catch (Exception e) when (e is IOException or InvalidDataException or CryptographicException or JsonException)
+        {
+            // A file that cannot be read now (being replaced, damaged) leaves the list as it was; the next change retries.
+            return [];
+        }
+        PairedMachine[] removed = _machines.Values.Where(x => !fresh.ContainsKey(x.Fingerprint)).ToArray();
+        _machines = fresh;
+        return removed;
+    }
+
+    private void Raise(IReadOnlyList<PairedMachine> removed, bool rethrow = false)
+    {
+        Action<PairedMachine>? handler = Revoked;
+        if (handler is null)
+            return;
+        foreach (PairedMachine machine in removed)
+        {
+            if (rethrow)
+            {
+                handler(machine);
+                continue;
+            }
+            try
+            {
+                handler(machine);
+            }
+            catch (Exception e) when (e is not OutOfMemoryException)
+            {
+            }
+        }
+    }
+
+    private Dictionary<string, PairedMachine> ReadFile()
+    {
+        var machines = new Dictionary<string, PairedMachine>(StringComparer.Ordinal);
+        byte[]? body = _file!.ReadBody();
+        if (body is null)
+            return machines;
+        byte[] json = _protector!.Unprotect(body);
+        PairedMachine[] list = JsonSerializer.Deserialize<PairedMachine[]>(json) ?? [];
+        foreach (PairedMachine machine in list)
         {
             if (machine.PublicKey is not { Length: IdentityKey.PublicKeySize } || KeyFingerprint.Compute(machine.PublicKey) != machine.Fingerprint)
                 throw new InvalidDataException("Paired machine file holds an invalid entry.");
-            _machines[machine.Fingerprint] = machine;
+            machines[machine.Fingerprint] = machine;
         }
+        return machines;
     }
 
-    /// <summary>Atomic write (temp file then replace) so a crash never leaves a half-written list.</summary>
-    private void SaveLocked()
-    {
-        if (_path is null)
-            return;
-        byte[] blob = _protector!.Protect(JsonSerializer.SerializeToUtf8Bytes(_machines.Values.ToArray()));
-        string? directory = Path.GetDirectoryName(Path.GetFullPath(_path));
-        if (!string.IsNullOrEmpty(directory))
-            Directory.CreateDirectory(directory);
-        string tempPath = $"{_path}.{Guid.NewGuid():N}.tmp";
-        try
-        {
-            using (var stream = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
-            {
-                stream.Write(_magic);
-                stream.WriteByte(FormatVersion);
-                stream.Write(blob);
-                stream.Flush(flushToDisk: true);
-            }
-            File.Move(tempPath, _path, overwrite: true);
-        }
-        catch
-        {
-            File.Delete(tempPath);
-            throw;
-        }
-    }
+    private void WriteFile(Dictionary<string, PairedMachine> machines)
+        => _file!.WriteBody(_protector!.Protect(JsonSerializer.SerializeToUtf8Bytes(machines.Values.ToArray())));
 }

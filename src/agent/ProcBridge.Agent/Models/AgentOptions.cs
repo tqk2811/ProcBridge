@@ -32,6 +32,13 @@ public sealed record AgentOptions
     /// <summary>Time a new connection has to finish the secure handshake (or join) before it is dropped.</summary>
     public TimeSpan HandshakeTimeout { get; init; } = TimeSpan.FromSeconds(10);
 
+    /// <summary>
+    /// How often a secure Agent checks that the paired machine list and the Explorer profiles did not change on disk
+    /// (another process revoked a machine, narrowed a profile) and closes the connections that no longer qualify.
+    /// <see cref="TimeSpan.Zero"/> turns the check off.
+    /// </summary>
+    public TimeSpan TrustRefreshInterval { get; init; } = TimeSpan.FromSeconds(2);
+
     /// <summary>Time the users have to compare the pairing code and decide.</summary>
     public TimeSpan PairingTimeout { get; init; } = TimeSpan.FromMinutes(5);
 

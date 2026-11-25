@@ -27,6 +27,7 @@ public sealed class AgentServer : IAsyncDisposable
     private readonly SecureServer? _secure;
     private readonly AgentSecurity? _security;
     private Task _acceptLoop = Task.CompletedTask;
+    private Task _refreshLoop = Task.CompletedTask;
     private int _disposed;
 
     /// <param name="security">Identity and paired machines; null serves plain frames and needs <see cref="AgentOptions.AllowPlaintextTransport"/>.</param>
@@ -48,7 +49,8 @@ public sealed class AgentServer : IAsyncDisposable
                 PairingTimeout = options.PairingTimeout,
                 MaxFrameSize = options.MaxFrameSize,
             });
-            _secure.PeerRevoked += AbortPeer;
+            _secure.PeerRevoked += OnPeerRevoked;
+            security.ExplorerPolicies.Changed += AbortPeer;
             _secure.PairingRequested += OnPairingRequested;
         }
     }
@@ -91,6 +93,35 @@ public sealed class AgentServer : IAsyncDisposable
     {
         _listener.Start();
         _acceptLoop = Task.Run(AcceptLoopAsync);
+        if (_secure is not null && _options.TrustRefreshInterval > TimeSpan.Zero)
+            _refreshLoop = Task.Run(RefreshLoopAsync);
+    }
+
+    /// <summary>
+    /// Re-reads the trust files while the Agent runs, so a revocation or a narrowed profile made by another process
+    /// takes effect on open connections too (the stores raise the events that close them).
+    /// </summary>
+    private async Task RefreshLoopAsync()
+    {
+        using var timer = new PeriodicTimer(_options.TrustRefreshInterval);
+        try
+        {
+            while (await timer.WaitForNextTickAsync(_stopping.Token).ConfigureAwait(false))
+            {
+                try
+                {
+                    _security!.PairedMachines.Refresh();
+                    _security.ExplorerPolicies.Refresh();
+                }
+                catch (Exception e) when (e is IOException or System.Security.Cryptography.CryptographicException or InvalidDataException)
+                {
+                    // A file that cannot be read this time (another process holds it): the next tick tries again.
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
     }
 
     private async Task AcceptLoopAsync()
@@ -169,7 +200,14 @@ public sealed class AgentServer : IAsyncDisposable
             handler(request);
     }
 
-    /// <summary>Closes every connection of a revoked machine.</summary>
+    /// <summary>A revoked machine loses its connections and its Explorer profile (a machine paired again starts with nothing).</summary>
+    private void OnPeerRevoked(string fingerprint)
+    {
+        AbortPeer(fingerprint);
+        _security!.ExplorerPolicies.Remove(fingerprint);
+    }
+
+    /// <summary>Closes every connection of a machine whose trust or Explorer profile changed.</summary>
     private void AbortPeer(string fingerprint)
     {
         foreach (Connection connection in _connections.Values)
@@ -193,12 +231,14 @@ public sealed class AgentServer : IAsyncDisposable
         catch (OperationCanceledException)
         {
         }
+        await _refreshLoop.ConfigureAwait(false);
         foreach (Connection connection in _connections.Values)
             connection.Client.Dispose();
         await Task.WhenAll(_connections.Values.Select(x => x.Run)).ConfigureAwait(false);
         if (_secure is not null)
         {
-            _secure.PeerRevoked -= AbortPeer;
+            _secure.PeerRevoked -= OnPeerRevoked;
+            _security!.ExplorerPolicies.Changed -= AbortPeer;
             _secure.Dispose();
         }
         foreach (Lazy<ShareWatcher> watcher in _watchers.Values)
