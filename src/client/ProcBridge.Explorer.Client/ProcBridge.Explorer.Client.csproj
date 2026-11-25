@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Remote Explorer client on machine A (plan section 14). Request/response models come from the Agent's Explorer library. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>ProcBridge.Explorer.Client</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\shared\ProcBridge.Protocol\ProcBridge.Protocol.csproj" />
+    <ProjectReference Include="..\..\agent\ProcBridge.Agent.Explorer\ProcBridge.Agent.Explorer.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,3 +1,4 @@
+using ProcBridge.Agent.Explorer.Interfaces;
 using ProcBridge.Crypto.Identity;
 using ProcBridge.Transport.Secure;
 
@@ -14,4 +15,10 @@ public sealed record AgentSecurity
 
     /// <summary>Accept pairing requests from the start; see <see cref="AgentServer.AllowPairing"/>.</summary>
     public bool AllowPairing { get; init; }
+
+    /// <summary>Remote Explorer profile of each paired machine A; a machine without one may do nothing.</summary>
+    public ExplorerPolicyStore ExplorerPolicies { get; init; } = new();
+
+    /// <summary>Where Explorer write operations are logged with the machine that asked; null logs nothing.</summary>
+    public IExplorerAuditLog? ExplorerAudit { get; init; }
 }

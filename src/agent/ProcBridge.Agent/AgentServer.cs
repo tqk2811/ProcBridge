@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using ProcBridge.Agent.Explorer;
 using ProcBridge.Agent.Models;
 using ProcBridge.Protocol.Interfaces;
 using ProcBridge.Protocol.Transport;
@@ -24,6 +25,7 @@ public sealed class AgentServer : IAsyncDisposable
     private readonly ConcurrentDictionary<TcpClient, Connection> _connections = new();
     private readonly ConcurrentDictionary<string, Lazy<ShareWatcher>> _watchers = new(StringComparer.OrdinalIgnoreCase);
     private readonly SecureServer? _secure;
+    private readonly AgentSecurity? _security;
     private Task _acceptLoop = Task.CompletedTask;
     private int _disposed;
 
@@ -36,6 +38,7 @@ public sealed class AgentServer : IAsyncDisposable
         _shares = shares.ToDictionary(x => x.Name, StringComparer.OrdinalIgnoreCase);
         _options = options;
         _listener = new TcpListener(options.BindAddress, options.Port);
+        _security = security;
         if (security is not null)
         {
             _secure = new SecureServer(security.Identity, security.PairedMachines, new SecureServerOptions
@@ -121,6 +124,7 @@ public sealed class AgentServer : IAsyncDisposable
         try
         {
             IFrameChannel channel;
+            ExplorerDispatcher? explorer = null;
             if (_secure is null)
             {
                 channel = new StreamFrameChannel(connection.Client.GetStream(), ownsStream: true, _options.MaxFrameSize);
@@ -139,8 +143,10 @@ public sealed class AgentServer : IAsyncDisposable
                     return;
                 }
                 channel = secure;
+                // The Explorer acts for the authenticated machine A only, within the profile machine B set for it.
+                explorer = new ExplorerDispatcher(new ExplorerSession(_security!.ExplorerPolicies.Get(secure.PeerFingerprint), secure.PeerFingerprint, _security.ExplorerAudit));
             }
-            var session = new AgentSession(channel, connection.Client, _shares, _options, GetWatcher);
+            var session = new AgentSession(channel, connection.Client, _shares, _options, GetWatcher, explorer);
             await session.RunAsync(_stopping.Token).ConfigureAwait(false);
         }
         catch (Exception e) when (e is not OutOfMemoryException)

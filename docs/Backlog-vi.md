@@ -223,11 +223,21 @@ Mỗi phiên ghép cặp chỉ được nhập mã một lần, nhưng chưa có
 
 Chưa có cách thay khoá định danh của một máy mà không ghép cặp lại từ đầu.
 
-## [Vừa] Explorer: chưa nối transport và chưa có hồ sơ quyền lưu trên máy B
+## [Vừa] Explorer: audit log, UI hồ sơ quyền và tách model dùng chung
 
-- Vị trí: `src/agent/ProcBridge.Agent.Explorer/ExplorerSession.cs:12`.
-- Vấn đề: DTO đã đánh dấu MessagePack nhưng chưa có dispatcher `Fs.*`/`Sys.*`/`Proc.*`/`Reg.*` gắn vào khung giao thức (mục 7), chưa có nơi lưu `ExplorerPolicy` theo từng máy A đã ghép cặp, và audit log mới là interface (chưa ghi ra file/Event Log). Làm cùng M2 (giao thức + Agent).
+- Đã nối giao thức (`ExplorerDispatcher` ở Agent, `ExplorerClient` ở A, message `0x11xx`-`0x14xx`) và có
+  `ExplorerPolicyStore` theo vân tay A. Còn thiếu: audit log mới là interface (chưa ghi ra file/Event Log), chưa có
+  UI WPF đặt hồ sơ quyền, và CLI của Agent chưa có lệnh đặt quyền.
+- Model request/response nằm trong `ProcBridge.Agent.Explorer` (thư viện phía B) nên `ProcBridge.Explorer.Client`
+  phía A phải tham chiếu cả provider. Nên tách model ra project dùng chung (vd `ProcBridge.Explorer.Contracts`).
+- Hồ sơ quyền đọc lúc mở kết nối: đổi quyền chỉ áp cho kết nối mới (test `ProfileChange_AppliesToNewConnections`).
 - Ghi ngày: 2026-11-25.
+
+## [Thấp] Ba kho file bọc DPAPI viết lặp
+
+`IdentityKeyStore`, `PairedMachineStore`, `ExplorerPolicyStore` cùng khuôn "magic + version + blob bọc
+`IKeyProtector`, ghi nguyên tử qua file tạm". Cần hỏi user có gom thành một thành phần dùng chung không (quy tắc gom
+phần giống nhau); chưa tự gom vì `IdentityKeyStore` thuộc nhánh m5 đã review. Ghi 2026-11-25.
 
 ## [Vừa] Explorer: tải file lên, xuất `.reg`, chạy chương trình trên máy B chưa làm
 

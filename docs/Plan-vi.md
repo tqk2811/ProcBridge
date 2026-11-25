@@ -599,6 +599,12 @@ Phân quyền (Agent là bên quyết định, không tin phía A):
   hay app người dùng).
 - Mọi thao tác ghi (kill, sửa registry, xoá file) được Agent ghi log kèm máy A đã yêu cầu.
 
+Đã nối giao thức (nhánh `feature/secure-transport`): message `Explorer*` (`0x11xx` file, `0x12xx` process,
+`0x13xx` registry, `0x14xx` ổ đĩa/service/hệ thống) chỉ phục vụ trên kết nối mã hoá; Agent dựng `ExplorerSession`
+từ `ExplorerPolicyStore` theo vân tay máy A đã xác thực (không có hồ sơ = không quyền nào). Bị từ chối vẫn là khung
+trả lời bình thường mang `ExplorerStatus`. Tải file trả byte bằng payload thô của khung. Phía A dùng `ExplorerClient`
+(Hello không kèm chia sẻ).
+
 Giao diện: đặt trong Launcher (dạng cây + danh sách kiểu Explorer, tab cho File / Process / Registry /
 Service / Hệ thống). Chỗ đặt UI là câu hỏi mở số 5.
 

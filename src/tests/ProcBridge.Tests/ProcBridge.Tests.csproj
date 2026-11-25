@@ -16,6 +16,7 @@
     <ProjectReference Include="..\..\client\ProcBridge.Launcher\ProcBridge.Launcher.csproj" />
     <ProjectReference Include="..\..\shared\ProcBridge.Crypto\ProcBridge.Crypto.csproj" />
     <ProjectReference Include="..\..\agent\ProcBridge.Agent.Explorer\ProcBridge.Agent.Explorer.csproj" />
+    <ProjectReference Include="..\..\client\ProcBridge.Explorer.Client\ProcBridge.Explorer.Client.csproj" />
   </ItemGroup>
   <ItemGroup>
     <None Update="Crypto/Vectors/*.json" CopyToOutputDirectory="PreserveNewest" />

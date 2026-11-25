@@ -13,7 +13,8 @@ namespace ProcBridge.Agent;
 
 /// <summary>
 /// Serves one connection: Hello first, then requests handled concurrently (bounded per connection) and answered
-/// out of order by request id. Owns the channel and the socket.
+/// out of order by request id. A Hello with an empty share name opens a connection for the Remote Explorer only.
+/// Owns the channel and the socket.
 /// </summary>
 internal sealed class AgentSession
 {
@@ -30,10 +31,13 @@ internal sealed class AgentSession
     private Task _notificationPump = Task.CompletedTask;
     private int _lostNotifications;
     private long _nextWalkId;
+    private readonly ExplorerDispatcher? _explorer;
     private ReadOnlyShare? _share;
 
-    public AgentSession(IFrameChannel channel, TcpClient client, IReadOnlyDictionary<string, ReadOnlyShare> shares, AgentOptions options, Func<ReadOnlyShare, ShareWatcher> getWatcher)
+    /// <param name="explorer">Remote Explorer of the authenticated machine A; null (plain transport) refuses Explorer messages.</param>
+    public AgentSession(IFrameChannel channel, TcpClient client, IReadOnlyDictionary<string, ReadOnlyShare> shares, AgentOptions options, Func<ReadOnlyShare, ShareWatcher> getWatcher, ExplorerDispatcher? explorer = null)
     {
+        _explorer = explorer;
         _getWatcher = getWatcher;
         _channel = channel;
         _client = client;
@@ -41,6 +45,9 @@ internal sealed class AgentSession
         _options = options;
         _concurrency = new SemaphoreSlim(options.MaxConcurrentRequestsPerConnection);
     }
+
+    /// <summary>Share named in Hello; Explorer-only connections have none.</summary>
+    private ReadOnlyShare Share => _share ?? throw new ProtocolStatusException(NtStatus.BadNetworkName, "This connection did not open a share.");
 
     /// <summary>Closes the socket, which ends <see cref="RunAsync"/>.</summary>
     public void Abort() => _client.Dispose();
@@ -89,7 +96,7 @@ internal sealed class AgentSession
             HelloRequest request = ProtocolSerializer.Deserialize<HelloRequest>(hello.Header);
             if (request.ProtocolVersion != ProtocolInfo.Version)
                 throw new ProtocolStatusException(NtStatus.RevisionMismatch, $"Agent speaks protocol {ProtocolInfo.Version}.");
-            if (!_shares.TryGetValue(request.ShareName, out _share))
+            if (request.ShareName.Length > 0 && !_shares.TryGetValue(request.ShareName, out _share))
                 throw new ProtocolStatusException(NtStatus.BadNetworkName, $"Unknown share '{request.ShareName}'.");
 
             var response = new HelloResponse
@@ -118,14 +125,14 @@ internal sealed class AgentSession
                 case MessageType.FsStat:
                 {
                     FsStatRequest stat = ProtocolSerializer.Deserialize<FsStatRequest>(request.Header);
-                    var response = new FsStatResponse { Entry = _share!.Stat(stat.Path) };
+                    var response = new FsStatResponse { Entry = Share.Stat(stat.Path) };
                     await SendAsync(FrameKind.Response, request, ProtocolSerializer.Serialize(response), default).ConfigureAwait(false);
                     break;
                 }
                 case MessageType.FsList:
                 {
                     FsListRequest list = ProtocolSerializer.Deserialize<FsListRequest>(request.Header);
-                    FsListResponse response = _share!.List(list.Path, list.StartIndex, list.MaxCount, _options.MaxFrameSize - Frame.FixedBodySize);
+                    FsListResponse response = Share.List(list.Path, list.StartIndex, list.MaxCount, _options.MaxFrameSize - Frame.FixedBodySize);
                     await SendAsync(FrameKind.Response, request, ProtocolSerializer.Serialize(response), default).ConfigureAwait(false);
                     break;
                 }
@@ -147,6 +154,14 @@ internal sealed class AgentSession
                 case MessageType.FsRead:
                     await HandleReadAsync(request).ConfigureAwait(false);
                     break;
+                case var type when ExplorerDispatcher.IsExplorerMessage(type):
+                {
+                    if (_explorer is null)
+                        throw new ProtocolStatusException(NtStatus.AccessDenied, "The Remote Explorer needs an authenticated, encrypted connection.");
+                    (byte[] header, ReadOnlyMemory<byte> payload) = _explorer.Handle(request);
+                    await SendAsync(FrameKind.Response, request, header, payload).ConfigureAwait(false);
+                    break;
+                }
                 default:
                     throw new ProtocolStatusException(NtStatus.NotImplemented, $"Message {request.MessageType} is not supported.");
             }
@@ -177,7 +192,7 @@ internal sealed class AgentSession
             if (_walks.Count >= _options.MaxTreeWalksPerConnection)
                 throw new ProtocolStatusException(NtStatus.InsufficientResources, "Too many unfinished tree walks on this connection.");
             int depth = request.MaxDepth > 0 ? request.MaxDepth : _options.DefaultTreeDepth;
-            walk = _share!.StartTree(request.Path, depth, _options.MaxTreeEntries);
+            walk = Share.StartTree(request.Path, depth, _options.MaxTreeEntries);
             cursor = (ulong)Interlocked.Increment(ref _nextWalkId);
             _walks[cursor] = walk;
         }
@@ -222,7 +237,7 @@ internal sealed class AgentSession
             {
                 // onLost: the share's watcher broke and could not be restarted, so no more changes would reach this
                 // client while it still trusts its cache. Closing the connection makes it fall back to its TTL and resubscribe.
-                _watchSubscription = _getWatcher(_share!).Subscribe(notification =>
+                _watchSubscription = _getWatcher(Share).Subscribe(notification =>
                 {
                     // Never block the watcher: a client that does not keep up loses the details and gets a rescan.
                     if (!queue.Writer.TryWrite(notification))
@@ -289,7 +304,7 @@ internal sealed class AgentSession
         byte[] buffer = ArrayPool<byte>.Shared.Rent(Math.Max(read.Length, 1));
         try
         {
-            int count = _share!.Read(read.Path, read.Offset, buffer.AsSpan(0, read.Length), read.ExpectedVersion, out FsVersion version);
+            int count = Share.Read(read.Path, read.Offset, buffer.AsSpan(0, read.Length), read.ExpectedVersion, out FsVersion version);
             byte[] header = ProtocolSerializer.Serialize(new FsReadResponse { Version = version });
             await SendAsync(FrameKind.Response, request, header, buffer.AsMemory(0, count)).ConfigureAwait(false);
         }

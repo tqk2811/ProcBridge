@@ -8,6 +8,7 @@
   <Folder Name="/client/">
     <Project Path="client/ProcBridge.Launcher/ProcBridge.Launcher.csproj" />
     <Project Path="client/ProcBridge.Broker/ProcBridge.Broker.csproj" />
+    <Project Path="client/ProcBridge.Explorer.Client/ProcBridge.Explorer.Client.csproj" />
   </Folder>
   <Folder Name="/agent/">
     <Project Path="agent/ProcBridge.Agent/ProcBridge.Agent.csproj" />
