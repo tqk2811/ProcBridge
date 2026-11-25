@@ -50,6 +50,8 @@ public sealed class ConnectionPool : IAsyncDisposable
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
         for (int attempt = 0; ; attempt++)
         {
+            // A dispose that kills the connection under a request must not make the retry reconnect.
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
             (Slot slot, ProtocolConnection connection) = await AcquireAsync(cancellationToken).ConfigureAwait(false);
             try
             {
@@ -121,6 +123,7 @@ public sealed class ConnectionPool : IAsyncDisposable
 
         try
         {
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
             ProtocolConnection? current = slot.Connection;
             if (current is { IsAlive: true })
                 return current;
@@ -141,6 +144,8 @@ public sealed class ConnectionPool : IAsyncDisposable
             Interlocked.Increment(ref _connectCount);
             slot.Connection = connection;
             slot.ClearFailure();
+            // The store above must not be reordered after the load below, or this side and Dispose could miss each other.
+            Interlocked.MemoryBarrier();
             // Dispose may have walked the slots before the line above; then nobody else would close this one.
             if (Volatile.Read(ref _disposed) != 0)
             {

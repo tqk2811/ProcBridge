@@ -179,4 +179,21 @@ public sealed class ConnectionPoolTests
             await Task.Delay(50);
         Assert.AreEqual(1, peer.ClosedConnections);
     }
+
+    [TestMethod]
+    public async Task DisposeWhileRequestInFlight_DoesNotReconnect()
+    {
+        // The dispose kills the connection under the request; the idempotent retry must not open a new one.
+        await using var peer = new FakePeer(TimeSpan.FromMilliseconds(500));
+        var options = new TransportOptions { ConnectionCount = 1, ConnectTimeout = TimeSpan.FromSeconds(10), RequestTimeout = TimeSpan.FromSeconds(10) };
+        var factory = new ScriptedFactory(peer.Port, _ => Task.CompletedTask);
+        var pool = new ConnectionPool(factory, Hello, options);
+
+        Task<Frame> request = RequestAsync(pool);
+        await Task.Delay(200); // connected, request waiting for the peer
+        await pool.DisposeAsync();
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => request);
+
+        Assert.AreEqual(1, factory.Attempts);
+    }
 }
