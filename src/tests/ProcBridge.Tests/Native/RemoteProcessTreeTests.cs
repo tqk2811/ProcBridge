@@ -141,7 +141,7 @@ public sealed class RemoteProcessTreeTests
     }
 
     /// <summary>One console project, isolated from the repository's Directory.*.props and central packages.</summary>
-    private static void CreateDotNetProject(string root)
+    internal static void CreateDotNetProject(string root)
     {
         foreach (string name in new[] { "Directory.Build.props", "Directory.Build.targets", "Directory.Packages.props" })
         {

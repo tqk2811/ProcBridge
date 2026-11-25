@@ -27,7 +27,7 @@
 //   SetInfo request : SetInfoRequest, then String RelativePath; reply: FileInfo
 //   Rename  request : RenameRequest, then String RelativePath, String NewRelativePath
 //           reply   : FileInfo, then String NewCachePath (machine B renamed; rename the cache handle to it)
-//   Delete  request : PathRequest, then String RelativePath; reply: no body
+//   Delete  request : PathRequest (Reserved = DeleteFlag*), then String RelativePath; reply: no body
 
 #include <cstdint>
 
@@ -40,6 +40,7 @@ namespace ProcBridge::HookIpc
     constexpr uint16_t ListFlagHasMore = 1;
     constexpr uint16_t HelloFlagWriteThrough = 1;
     constexpr uint16_t RenameFlagReplaceIfExists = 1;
+    constexpr uint16_t DeleteFlagKeepItem = 1; // PathRequest.Reserved of Delete: the hook deletes the cache copy itself
     constexpr const wchar_t* PipeNamePrefix = L"\\\\.\\pipe\\ProcBridge-";
 
     enum class MessageType : uint16_t

@@ -44,6 +44,14 @@ public sealed class BrokerHost : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await Pipe.DisposeAsync().ConfigureAwait(false);
+        try
+        {
+            await WriteBack.SyncOpenAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception e) when (e is not OutOfMemoryException)
+        {
+            System.Diagnostics.Trace.TraceError($"ProcBridge: final write-back failed: {e.Message}");
+        }
         await WriteBack.DisposeAsync().ConfigureAwait(false);
         await Client.DisposeAsync().ConfigureAwait(false);
     }

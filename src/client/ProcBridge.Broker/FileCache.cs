@@ -287,8 +287,10 @@ public sealed class FileCache
         return new CachedItem(entry, newLocalPath);
     }
 
-    /// <summary>Deletes on machine B, then drops the cache copy (best effort: the hook deletes an open one through its handle).</summary>
-    public async Task DeleteAsync(string remotePath, CancellationToken cancellationToken)
+    /// <summary>Deletes on machine B, then drops the cache copy.</summary>
+    /// <param name="keepItem">The caller deletes the cache file or placeholder itself through its open handle; only
+    /// stale cache copies below a directory are removed here.</param>
+    public async Task DeleteAsync(string remotePath, bool keepItem, CancellationToken cancellationToken)
     {
         await _client.DeleteAsync(remotePath, cancellationToken).ConfigureAwait(false);
         InvalidateTree(remotePath);
@@ -299,9 +301,10 @@ public sealed class FileCache
             // itself may be held open by the caller, which deletes it.
             foreach (string child in Directory.EnumerateFileSystemEntries(localPath))
                 RemoveLocal(child);
-            TryDeleteDirectory(localPath);
+            if (!keepItem)
+                TryDeleteDirectory(localPath);
         }
-        else
+        else if (!keepItem)
         {
             RemoveLocal(localPath);
         }
@@ -326,7 +329,18 @@ public sealed class FileCache
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
         }
-        TryDelete(localPath);
+        // Rename first: the name is free at once even when a handle still holds the file (a delete would leave it
+        // delete-pending under its name until that handle closes, and every open or replace of the name would fail).
+        string doomed = $"{localPath}.pbdl-{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.Move(localPath, doomed);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            doomed = localPath;
+        }
+        TryDelete(doomed);
     }
 
     private static void TryDeleteDirectory(string path)

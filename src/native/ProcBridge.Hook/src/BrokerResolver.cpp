@@ -95,6 +95,7 @@ namespace ProcBridge::Hook
         {
             return ERROR_INVALID_DATA;
         }
+        _writeThrough = (helloReply.Flags & HookIpc::HelloFlagWriteThrough) != 0;
         wchar_t virtualRoot[MAX_PATH];
         for (USHORT index = 0; index < helloReply.MappingCount; ++index)
         {
@@ -171,15 +172,11 @@ namespace ProcBridge::Hook
         {
             return STATUS_INVALID_NETWORK_RESPONSE;
         }
-        const size_t bytes = (static_cast<size_t>(NtPrefixChars) + chars) * sizeof(wchar_t);
-        if (bytes > 0xFFFC || !AllocateString(realPath, bytes))
+        const NTSTATUS built = MakeNtPath(cachePath, chars, realPath);
+        if (!NT_SUCCESS(built))
         {
-            return bytes > 0xFFFC ? STATUS_NAME_TOO_LONG : STATUS_NO_MEMORY;
+            return built;
         }
-        memcpy(realPath.Buffer, NtPrefix, NtPrefixChars * sizeof(wchar_t));
-        memcpy(realPath.Buffer + NtPrefixChars, cachePath, chars * sizeof(wchar_t));
-        realPath.Length = static_cast<USHORT>(bytes);
-        realPath.Buffer[bytes / sizeof(wchar_t)] = L'\0';
         if (info != nullptr)
         {
             *info = received;
@@ -189,6 +186,91 @@ namespace ProcBridge::Hook
             *writeToken = token;
         }
         return STATUS_SUCCESS;
+    }
+
+    NTSTATUS BrokerResolver::MakeNtPath(const BYTE* text, USHORT chars, UNICODE_STRING& realPath) noexcept
+    {
+        const size_t bytes = (static_cast<size_t>(NtPrefixChars) + chars) * sizeof(wchar_t);
+        if (bytes > 0xFFFC || !AllocateString(realPath, bytes))
+        {
+            return bytes > 0xFFFC ? STATUS_NAME_TOO_LONG : STATUS_NO_MEMORY;
+        }
+        memcpy(realPath.Buffer, NtPrefix, NtPrefixChars * sizeof(wchar_t));
+        memcpy(realPath.Buffer + NtPrefixChars, text, chars * sizeof(wchar_t));
+        realPath.Length = static_cast<USHORT>(bytes);
+        realPath.Buffer[bytes / sizeof(wchar_t)] = L'\0';
+        return STATUS_SUCCESS;
+    }
+
+    NTSTATUS BrokerResolver::SendToken(HookIpc::MessageType type, uint64_t writeToken) const noexcept
+    {
+        BrokerClient::Call call(_client, type);
+        HookIpc::TokenRequest request{};
+        request.WriteToken = writeToken;
+        call.Put(&request, sizeof(request));
+        BrokerReply reply;
+        return call.Send(reply);
+    }
+
+    NTSTATUS BrokerResolver::SetInfo(int mapping, const UNICODE_STRING& ntPath, const HookIpc::SetInfoRequest& request,
+        HookIpc::FileInfo& info) const noexcept
+    {
+        const UNICODE_STRING relative = RelativePath(mapping, ntPath, PathKind::Nt);
+        BrokerClient::Call call(_client, HookIpc::MessageType::SetInfo);
+        HookIpc::SetInfoRequest body = request;
+        body.MappingIndex = static_cast<uint16_t>(mapping);
+        call.Put(&body, sizeof(body));
+        call.PutString(relative.Buffer, relative.Length);
+        BrokerReply reply;
+        const NTSTATUS status = call.Send(reply);
+        if (!NT_SUCCESS(status))
+        {
+            return status;
+        }
+        MessageReader reader(reply.Body, reply.BodySize);
+        return reader.Read(&info, sizeof(info)) ? STATUS_SUCCESS : STATUS_INVALID_NETWORK_RESPONSE;
+    }
+
+    NTSTATUS BrokerResolver::Rename(int mapping, const UNICODE_STRING& ntPath, int newMapping, const UNICODE_STRING& newNtPath,
+        bool replaceIfExists, HookIpc::FileInfo& info, UNICODE_STRING& newRealPath) const noexcept
+    {
+        const UNICODE_STRING relative = RelativePath(mapping, ntPath, PathKind::Nt);
+        const UNICODE_STRING newRelative = RelativePath(newMapping, newNtPath, PathKind::Nt);
+        BrokerClient::Call call(_client, HookIpc::MessageType::Rename);
+        HookIpc::RenameRequest request{};
+        request.MappingIndex = static_cast<uint16_t>(mapping);
+        request.NewMappingIndex = static_cast<uint16_t>(newMapping);
+        request.Flags = replaceIfExists ? HookIpc::RenameFlagReplaceIfExists : 0;
+        call.Put(&request, sizeof(request));
+        call.PutString(relative.Buffer, relative.Length);
+        call.PutString(newRelative.Buffer, newRelative.Length);
+        BrokerReply reply;
+        const NTSTATUS status = call.Send(reply);
+        if (!NT_SUCCESS(status))
+        {
+            return status;
+        }
+        MessageReader reader(reply.Body, reply.BodySize);
+        const BYTE* cachePath = nullptr;
+        USHORT chars = 0;
+        if (!reader.Read(&info, sizeof(info)) || !reader.ReadString(cachePath, chars) || chars == 0)
+        {
+            return STATUS_INVALID_NETWORK_RESPONSE;
+        }
+        return MakeNtPath(cachePath, chars, newRealPath);
+    }
+
+    NTSTATUS BrokerResolver::Delete(int mapping, const UNICODE_STRING& ntPath, bool keepItem) const noexcept
+    {
+        const UNICODE_STRING relative = RelativePath(mapping, ntPath, PathKind::Nt);
+        BrokerClient::Call call(_client, HookIpc::MessageType::Delete);
+        HookIpc::PathRequest request{};
+        request.MappingIndex = static_cast<uint16_t>(mapping);
+        request.Reserved = keepItem ? HookIpc::DeleteFlagKeepItem : 0;
+        call.Put(&request, sizeof(request));
+        call.PutString(relative.Buffer, relative.Length);
+        BrokerReply reply;
+        return call.Send(reply);
     }
 
     NTSTATUS BrokerResolver::Resolve(int mapping, const UNICODE_STRING& path, PathKind kind, const OpenIntent& intent,

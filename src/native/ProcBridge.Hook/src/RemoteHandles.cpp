@@ -155,6 +155,9 @@ namespace ProcBridge::Hook
         UNICODE_STRING Path;
         HookIpc::FileInfo Self; // machine B's metadata; for a directory also the "." entry
         bool Directory;
+        uint64_t WriteToken;    // Broker write token (M3), 0 = none
+        bool DeleteOnClose;
+        bool Orphaned;          // replaced by a rename: no name on machine B any more
         SRWLOCK Lock;
         bool Loaded;
         bool ReturnedAny;   // a query of this scan already completed (since the last restart)
@@ -308,7 +311,50 @@ namespace ProcBridge::Hook
         _capacity = 0;
     }
 
-    void RemoteHandleTable::Add(HANDLE handle, int mapping, const UNICODE_STRING& virtualNtPath, const HookIpc::FileInfo& info) noexcept
+    void RemoteHandleTable::RetainToken(uint64_t token) noexcept
+    {
+        for (size_t i = 0; i < _tokenCount; ++i)
+        {
+            if (_tokens[i].Token == token)
+            {
+                ++_tokens[i].Count;
+                return;
+            }
+        }
+        if (_tokenCount == _tokenCapacity)
+        {
+            const size_t capacity = _tokenCapacity == 0 ? 8 : _tokenCapacity * 2;
+            void* grown = _tokens == nullptr ? HeapAlloc(GetProcessHeap(), 0, capacity * sizeof(TokenCount))
+                                             : HeapReAlloc(GetProcessHeap(), 0, _tokens, capacity * sizeof(TokenCount));
+            if (grown == nullptr)
+            {
+                return; // uncounted: ReleaseToken then reports the first close as the last one
+            }
+            _tokens = static_cast<TokenCount*>(grown);
+            _tokenCapacity = capacity;
+        }
+        _tokens[_tokenCount++] = { token, 1 };
+    }
+
+    bool RemoteHandleTable::ReleaseToken(uint64_t token) noexcept
+    {
+        for (size_t i = 0; i < _tokenCount; ++i)
+        {
+            if (_tokens[i].Token == token)
+            {
+                if (--_tokens[i].Count > 0)
+                {
+                    return false;
+                }
+                _tokens[i] = _tokens[--_tokenCount];
+                return true;
+            }
+        }
+        return true;
+    }
+
+    void RemoteHandleTable::Add(HANDLE handle, int mapping, const UNICODE_STRING& virtualNtPath, const HookIpc::FileInfo& info,
+        uint64_t writeToken, bool deleteOnClose) noexcept
     {
         void* memory = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(State));
         if (memory == nullptr)
@@ -321,6 +367,8 @@ namespace ProcBridge::Hook
         state->Mapping = mapping;
         state->Self = info;
         state->Directory = (info.Attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        state->WriteToken = writeToken;
+        state->DeleteOnClose = deleteOnClose;
         InitializeSRWLock(&state->Lock);
         // Kernelbase opens directories with a trailing '\' ("dir\" for FindFirstFile("dir\*")).
         UNICODE_STRING path = virtualNtPath;
@@ -351,6 +399,10 @@ namespace ProcBridge::Hook
             _capacity = capacity;
         }
         state->Generation = ++_nextGeneration;
+        if (writeToken != 0)
+        {
+            RetainToken(writeToken);
+        }
         _entries[count] = state;
         _count.store(count + 1, std::memory_order_release);
         ReleaseSRWLockExclusive(&_lock);
@@ -377,7 +429,7 @@ namespace ProcBridge::Hook
         return generation != 0;
     }
 
-    void RemoteHandleTable::Remove(HANDLE handle, ULONG64 generation) noexcept
+    void RemoteHandleTable::Remove(HANDLE handle, ULONG64 generation, RemovedRemoteHandle* result) noexcept
     {
         // Every NtClose comes here: look under the shared lock first, most handles are not tracked.
         ULONG64 found = 0;
@@ -395,6 +447,17 @@ namespace ProcBridge::Hook
                 removed = _entries[i];
                 _entries[i] = _entries[count - 1];
                 _count.store(count - 1, std::memory_order_release);
+                const bool last = removed->WriteToken != 0 && ReleaseToken(removed->WriteToken);
+                if (result != nullptr)
+                {
+                    result->WriteToken = last ? removed->WriteToken : 0;
+                    result->DeleteOnClose = removed->DeleteOnClose;
+                    result->Mapping = removed->Mapping;
+                    if (removed->DeleteOnClose && !ConcatString(result->Path, removed->Path, nullptr, 0))
+                    {
+                        result->DeleteOnClose = false;
+                    }
+                }
                 break;
             }
         }
@@ -466,7 +529,98 @@ namespace ProcBridge::Hook
         return copied;
     }
 
-    bool RemoteHandleTable::GetEntry(HANDLE handle, int& mapping, UNICODE_STRING& path, HookIpc::FileInfo& info) const noexcept
+    uint64_t RemoteHandleTable::GetWriteToken(HANDLE handle) const noexcept
+    {
+        if (IsEmpty())
+        {
+            return 0;
+        }
+        State* state = Lock(handle);
+        if (state == nullptr)
+        {
+            return 0;
+        }
+        const uint64_t token = state->WriteToken;
+        Unlock(state);
+        return token;
+    }
+
+    bool RemoteHandleTable::SetDeleteOnClose(HANDLE handle, bool deleteOnClose) noexcept
+    {
+        State* state = Lock(handle);
+        if (state == nullptr)
+        {
+            return false;
+        }
+        state->DeleteOnClose = deleteOnClose;
+        Unlock(state);
+        return true;
+    }
+
+    void RemoteHandleTable::Update(HANDLE handle, const UNICODE_STRING* newPath, const HookIpc::FileInfo* info) noexcept
+    {
+        State* state = Lock(handle);
+        if (state == nullptr)
+        {
+            return;
+        }
+        if (newPath != nullptr)
+        {
+            UNICODE_STRING copy{};
+            if (ConcatString(copy, *newPath, nullptr, 0))
+            {
+                FreeString(state->Path);
+                state->Path = copy;
+            }
+        }
+        if (info != nullptr)
+        {
+            state->Self = *info;
+        }
+        Unlock(state);
+    }
+
+    void RemoteHandleTable::OrphanPath(const UNICODE_STRING& path, HANDLE except) noexcept
+    {
+        AcquireSRWLockShared(&_lock);
+        const size_t count = _count.load(std::memory_order_relaxed);
+        for (size_t i = 0; i < count; ++i)
+        {
+            State* state = _entries[i];
+            // Path and the flags are only changed under the state lock, which a directory query may hold while it
+            // waits on the network; directories are never replaced by a rename, so skip them without waiting.
+            if (state->Handle == except || state->Directory || state->Path.Length != path.Length)
+            {
+                continue;
+            }
+            if (TryAcquireSRWLockExclusive(&state->Lock))
+            {
+                if (CompareStringOrdinal(state->Path.Buffer, state->Path.Length / sizeof(wchar_t), path.Buffer,
+                        path.Length / sizeof(wchar_t), TRUE) == CSTR_EQUAL)
+                {
+                    state->Orphaned = true;
+                    state->DeleteOnClose = false;
+                }
+                ReleaseSRWLockExclusive(&state->Lock);
+            }
+        }
+        ReleaseSRWLockShared(&_lock);
+    }
+
+    bool RemoteHandleTable::IsOrphaned(HANDLE handle) const noexcept
+    {
+        State* state = Lock(handle);
+        if (state == nullptr)
+        {
+            return false;
+        }
+        const bool orphaned = state->Orphaned;
+        Unlock(state);
+        return orphaned;
+    }
+
+    bool RemoteHandleTable::GetEntry(HANDLE handle, int& mapping, UNICODE_STRING& path, HookIpc::FileInfo& info,
+        uint64_t* writeToken, bool* deleteOnClose) const noexcept
     {
         State* state = Lock(handle);
         if (state == nullptr)
@@ -475,6 +629,14 @@ namespace ProcBridge::Hook
         }
         mapping = state->Mapping;
         info = state->Self;
+        if (writeToken != nullptr)
+        {
+            *writeToken = state->WriteToken;
+        }
+        if (deleteOnClose != nullptr)
+        {
+            *deleteOnClose = state->DeleteOnClose;
+        }
         const bool copied = ConcatString(path, state->Path, nullptr, 0);
         Unlock(state);
         return copied;

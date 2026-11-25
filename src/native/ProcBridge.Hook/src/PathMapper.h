@@ -103,6 +103,36 @@ namespace ProcBridge::Hook
         {
             return STATUS_NOT_SUPPORTED;
         }
+
+        // Write operations of a remote resolver (M3, plan 4.5). ntPath arguments are virtual NT paths matched by
+        // FindMapping. A local resolver never gets these calls (the backing folder is changed directly).
+
+        /// The last handle holding writeToken was closed (Close) or flushed (Flush): write back if changed.
+        virtual NTSTATUS CloseWrite(uint64_t /*writeToken*/) const noexcept { return STATUS_NOT_SUPPORTED; }
+        virtual NTSTATUS FlushWrite(uint64_t /*writeToken*/) const noexcept { return STATUS_NOT_SUPPORTED; }
+
+        /// True when every write on a handle with a write token must be followed by FlushWrite.
+        virtual bool IsWriteThrough() const noexcept { return false; }
+
+        /// Applies the fields set in HookIpc::SetInfoRequest::Fields on machine B; info receives the new metadata.
+        virtual NTSTATUS SetInfo(int /*mapping*/, const UNICODE_STRING& /*ntPath*/, const HookIpc::SetInfoRequest& /*request*/,
+            HookIpc::FileInfo& /*info*/) const noexcept
+        {
+            return STATUS_NOT_SUPPORTED;
+        }
+
+        /// Renames on machine B; newRealPath (freed with FreeString) is the NT path the cache handle must be renamed to.
+        virtual NTSTATUS Rename(int /*mapping*/, const UNICODE_STRING& /*ntPath*/, int /*newMapping*/, const UNICODE_STRING& /*newNtPath*/,
+            bool /*replaceIfExists*/, HookIpc::FileInfo& /*info*/, UNICODE_STRING& /*newRealPath*/) const noexcept
+        {
+            return STATUS_NOT_SUPPORTED;
+        }
+
+        /// Deletes on machine B. keepItem: the caller deletes the cache copy itself through its handle.
+        virtual NTSTATUS Delete(int /*mapping*/, const UNICODE_STRING& /*ntPath*/, bool /*keepItem*/) const noexcept
+        {
+            return STATUS_NOT_SUPPORTED;
+        }
     };
 
     /// Mappings read from the PROCBRIDGE_MAP environment variable:

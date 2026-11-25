@@ -138,6 +138,9 @@ public sealed class WriteBackQueue : IAsyncDisposable
                     : null;
                 if (moved is null)
                     continue;
+                // A file replaced by the rename keeps its writers, but they must not write over the new file.
+                if (_paths.TryGetValue(moved, out PathState? replaced) && replaced != state)
+                    replaced.Deleted = true;
                 _paths.Remove(state.RemotePath);
                 state.RemotePath = moved;
                 _paths[moved] = state;
@@ -375,6 +378,19 @@ public sealed class WriteBackQueue : IAsyncDisposable
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
         }
+    }
+
+    /// <summary>
+    /// Writes back every file still open for writing: a process that exits without closing its handles never sends
+    /// Close. Runs when the session ends (the whole process tree is gone).
+    /// </summary>
+    public async Task SyncOpenAsync(CancellationToken cancellationToken)
+    {
+        PathState[] open;
+        lock (_lock)
+            open = _paths.Values.Where(x => x.OpenCount > 0).ToArray();
+        foreach (PathState state in open)
+            await SyncAsync(state, cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask DisposeAsync()

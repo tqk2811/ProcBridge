@@ -16,6 +16,16 @@ namespace ProcBridge::Hook::Nt
     constexpr ULONG FileNormalizedNameInformation = 48;
     constexpr ULONG FileRenameInformationEx = 65;
     constexpr ULONG FileLinkInformationEx = 72;
+    constexpr ULONG FileBasicInformation = 4;
+    constexpr ULONG FileDispositionInformation = 13;
+    constexpr ULONG FileDispositionInformationEx = 64;
+
+    // FILE_DISPOSITION_INFORMATION_EX flags.
+    constexpr ULONG FileDispositionDelete = 0x1;
+    constexpr ULONG FileDispositionOnClose = 0x8;
+
+    // NtCreateFile create option.
+    constexpr ULONG FileDeleteOnCloseOption = 0x00001000;
 
     // OBJECT_INFORMATION_CLASS.
     constexpr ULONG ObjectNameInformation = 1;
@@ -76,6 +86,8 @@ namespace ProcBridge::Hook::Nt
     using NtQueryInformationByNameFn = NTSTATUS(NTAPI*)(POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK, PVOID, ULONG, ULONG);
     using NtDeleteFileFn = NTSTATUS(NTAPI*)(POBJECT_ATTRIBUTES);
     using NtDuplicateObjectFn = NTSTATUS(NTAPI*)(HANDLE, HANDLE, HANDLE, PHANDLE, ACCESS_MASK, ULONG, ULONG);
+    using NtFlushBuffersFileFn = NTSTATUS(NTAPI*)(HANDLE, PIO_STATUS_BLOCK);
+    using NtWriteFileFn = NTSTATUS(NTAPI*)(HANDLE, HANDLE, PIO_APC_ROUTINE, PVOID, PIO_STATUS_BLOCK, PVOID, ULONG, PLARGE_INTEGER, PULONG);
 }
 
 extern "C"

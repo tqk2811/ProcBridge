@@ -537,6 +537,53 @@ Làm song song với M2, chưa có Broker: cấu hình là `PROCBRIDGE_MAP` cụ
   `BaseIntermediateOutputPath` trỏ ra thư mục tạm (máy B chỉ đọc tới M3) rồi chạy được app, Launcher chờ cháu
   chạy nền và đặt biến tắt build server.
 
+### 13.5 Kết quả M3 (2026-11-25)
+
+- **Agent**: `AgentShare` (trước là `ReadOnlyShare`) ghi được khi tạo bằng `--write-share name=path` (mặc định chỉ
+  đọc, share chỉ đọc trả `STATUS_MEDIA_WRITE_PROTECTED`). Mọi thao tác ghi qua cùng bước kiểm đường dẫn của đọc (không
+  `..`, thiết bị, link ra ngoài, không đụng gốc share). Message: `Fs.Create` (file/thư mục mới, trùng tên thì
+  `OBJECT_NAME_COLLISION`), `Fs.Write` (một khối vào file staging `name.pbtmp-<id>` cạnh file đích, ẩn khỏi
+  `Fs.List`), `Fs.Commit` (cắt staging đúng kích thước, so version máy A bắt đầu với version hiện tại, rồi
+  `File.Replace` giữ danh tính file), `Fs.SetInfo` (thuộc tính, thời gian, kích thước), `Fs.Rename`, `Fs.Delete`
+  (thư mục không rỗng `DIRECTORY_NOT_EMPTY`, file chỉ đọc `CANNOT_DELETE`). `HelloResponse.Writable` báo share có ghi
+  được; giao thức lên bản 2.
+- **Xung đột** (Plan 10): version không khớp lúc commit thì mặc định `KeepBoth`: file của máy B giữ nguyên, nội dung máy
+  A lưu thành `name.procbridge-conflict-<UTC>`, Broker ghi log và giữ danh sách `WriteBackQueue.Conflicts`; tuỳ chọn
+  `Overwrite` cho máy A thắng (`--conflict overwrite` ở Launcher).
+- **Broker** (`HookRequestHandler.ResolveWritableAsync`): mở với quyền ghi/tạo hỏi lại stat máy B, tên chưa có thì
+  `Fs.Create` trên máy B trước (lỗi trùng tên, thiếu thư mục cha đến từ máy B) rồi để trống tên trong cache cho lời gọi
+  thật của Hook tạo; ghi đè/supersede file có sẵn không tải về, chỉ tạo file cache rỗng mang thuộc tính máy B. Cache
+  của share ghi được giữ đúng thuộc tính máy B (share chỉ đọc vẫn ép read-only). Mở có thể đổi nội dung nhận
+  **write token**; khi file đang có người ghi, lần mở khác dùng luôn bản cache thay vì tải đè.
+- **Ghi ngược** (`WriteBackQueue`): lần đóng cuối (hoặc flush) của handle có token so file cache với version máy B nó
+  bắt nguồn (kích thước + thời gian ghi); khác thì chép nội dung vào thư mục hàng đợi kèm `<id>.json`
+  (`%LOCALAPPDATA%\ProcBridge\queue`, dùng chung các phiên), tải lên song song theo khối rồi commit với version cũ, xong
+  mới xoá mục hàng đợi. Lời đóng chờ ghi ngược xong (tiến trình khác thấy ngay). Mất kết nối thì mục ở lại hàng đợi:
+  vòng thử lại gửi khi Agent quay lại, Broker sau (cùng Agent + share) gửi lúc khởi động. Phiên kết thúc thì ghi ngược
+  nốt file còn mở. Chế độ **ghi xuyên** (`--write-through`): Hello báo cờ, Hook chặn thêm `NtWriteFile` và gửi Flush
+  sau mỗi lần ghi xong.
+- **Hook**: `NtCreateFile` gửi kèm thuộc tính file; token lưu trong `RemoteHandleTable` (đếm tham chiếu cho bản nhân
+  bản trong process, nên Broker chỉ nghe Close ở lần đóng cuối); mở thất bại trả token lại. `NtSetInformationFile`
+  trên handle ảo: đổi tên/di chuyển (tên đầy đủ, theo `RootDirectory` ảo, hoặc tên trần cùng thư mục) đi máy B trước
+  rồi đổi tên handle cache sang đường dẫn Broker trả; disposition xoá máy B rồi đặt cờ trên bản cache; Basic
+  (thời gian, thuộc tính) đi máy B rồi bản cache. `NtDeleteFile` và delete-on-close xoá máy B. `NtFlushBuffersFile`
+  gửi Flush. Handle có token báo thời gian/thuộc tính/dung lượng của bản cache (chứa các lần ghi của chính nó), chỉ
+  file ID là của máy B. Rename thay thế một file thì handle khác đang mở file cũ trong process bị đánh dấu mồ côi
+  (ReplaceFile xoá file cũ qua handle đó, không được đụng file mới). Đường dẫn `\Device\HarddiskVolumeN\...` tuyệt đối
+  được dịch khi mở: advapi32 mở thư mục cha qua dạng này lúc áp ACE kế thừa (thiếu thì file cache sau ReplaceFile mang
+  DACL rỗng).
+- Broker gỡ tên file cache cũ bằng cách đổi tên đi rồi mới xoá, nên một handle còn giữ file không để lại tên
+  delete-pending chặn lần mở/thay thế sau.
+- Kiểm: `NativeProbe --write` (tạo, CREATE_NEW trùng, append, truncate, end-of-file, rename, rename thay thế, CREATE_ALWAYS,
+  TRUNCATE_EXISTING, FILE_SUPERSEDE, mkdir/rmdir, rename thư mục, xoá, thuộc tính hidden/read-only, xoá file chỉ đọc,
+  SetFileTime, delete-on-close, disposition, disposition thư mục không rỗng, mở trùng với chia sẻ, ReplaceFile, lưu kiểu
+  file tạm + rename, liệt kê cuối) thật và qua Agent giống từng dòng, x64 và Win32 (`RemoteWriteTests`); `cmd echo >`/`>>`,
+  `mkdir`, PowerShell `File.Replace` có bản backup; ghi xuyên thấy dữ liệu trên máy B khi handle còn mở; `dotnet build`
+  một project trên Agent với `bin`/`obj` **trong** thư mục ảo rồi chạy được app từ máy B. `BrokerWriteBackTests` (giả
+  Hook qua pipe): tạo trên máy B trước, ghi ngược khi đóng, ghi đè không tải về, sửa trên máy B lúc máy A đang mở thì
+  phát hiện xung đột (giữ cả hai / máy A thắng), Agent chết lúc đóng thì mục ở lại hàng đợi và Broker sau gửi, Agent quay
+  lại thì vòng thử lại gửi, rename/xoá/SetInfo. `AgentShareWriteTests` cho các mã lỗi phía Agent. Ca chưa phủ ở Backlog.
+
 ---
 
 ## 14. Duyệt tài nguyên máy B (Remote Explorer)

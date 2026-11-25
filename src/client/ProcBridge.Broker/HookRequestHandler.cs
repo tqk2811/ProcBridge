@@ -211,7 +211,7 @@ public sealed class HookRequestHandler
                 string remotePath = ToRemotePath(delete.MappingIndex, delete.RelativePath);
                 await RequireWritableAsync(cancellationToken).ConfigureAwait(false);
                 _writeBack!.Deleted(remotePath);
-                await _cache.DeleteAsync(remotePath, cancellationToken).ConfigureAwait(false);
+                await _cache.DeleteAsync(remotePath, (delete.Flags & HookDeleteRequest.FlagKeepItem) != 0, cancellationToken).ConfigureAwait(false);
                 return new HookEmptyReply { Type = type };
             }
 

@@ -3,6 +3,7 @@ using ProcBridge.Agent;
 using ProcBridge.Agent.Models;
 using ProcBridge.Launcher;
 using ProcBridge.Launcher.Models;
+using ProcBridge.Protocol.Enums;
 
 namespace ProcBridge.Tests.Native;
 
@@ -23,6 +24,20 @@ public sealed class LauncherTests
         Assert.AreEqual("proj", options.Mappings.Single().RemotePath);
         StringAssert.EndsWith(options.SpawnPath, "ProcBridge.Spawn.x86.exe");
         Assert.AreEqual("cmd.exe /c \"dir x\"", options.CommandLine);
+    }
+
+    [TestMethod]
+    public void CommandLine_WriteOptions_AreParsed()
+    {
+        LauncherOptions defaults = LauncherCommandLine.Parse(["--agent", "h", "--share", "s", "--map", @"V:\a", "", "--", "cmd.exe"]);
+        LauncherOptions options = LauncherCommandLine.Parse(
+            ["--agent", "h", "--share", "s", "--map", @"V:\a", "", "--write-through", "--conflict", "overwrite", "--", "cmd.exe"]);
+
+        Assert.IsFalse(defaults.WriteThrough);
+        Assert.AreEqual(ConflictPolicy.KeepBoth, defaults.ConflictPolicy);
+        Assert.IsTrue(options.WriteThrough);
+        Assert.AreEqual(ConflictPolicy.Overwrite, options.ConflictPolicy);
+        Assert.ThrowsExactly<ArgumentException>(() => LauncherCommandLine.Parse(["--agent", "h", "--share", "s", "--map", @"V:\a", "", "--conflict", "x", "--", "cmd.exe"]));
     }
 
     [TestMethod]
