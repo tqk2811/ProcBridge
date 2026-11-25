@@ -22,10 +22,18 @@ Phần C# của M2 (Protocol, Agent, Broker, IPC) đã xong; Hook vẫn dùng `P
   MSVC x86.
 - Chạy lại bộ test so sánh M1 với thư mục ảo trỏ sang Agent trên loopback (điều kiện xong M2).
 
+## [Cao] Hook kiểm tra server của pipe trước khi tin nó
+
+Tên pipe là `ProcBridge-<phiên>`; Broker đã tạo instance đầu bằng `FILE_FLAG_FIRST_PIPE_INSTANCE` và sinh id phiên
+ngẫu nhiên (`HookIpcProtocol.NewSessionId`), nhưng Hook (C++) vẫn phải chắc là đang nói chuyện với đúng Broker. Sau
+khi mở pipe (và trước khi gửi `Hello`) gọi `GetNamedPipeServerProcessId` và so với PID của Broker mà Launcher truyền
+qua (cùng nơi truyền tên pipe); không khớp thì đóng pipe và coi như không có thư mục ảo. Cũng nên mở pipe với
+`SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION` để server giả không mượn được token của process.
+
 ## [Cao] Host Broker trong Launcher
 
 `ProcBridge.Broker` là thư viện (`BrokerHost.Start`). Launcher cần nhận cấu hình (địa chỉ Agent, cổng, tên chia
-sẻ, danh sách thư mục ảo ↔ thư mục máy B), sinh id phiên, khởi động `BrokerHost` trước khi tạo process cha và
+sẻ, danh sách thư mục ảo ↔ thư mục máy B), sinh id phiên bằng `HookIpcProtocol.NewSessionId()` (không dùng id đoán được), khởi động `BrokerHost` trước khi tạo process cha và
 dừng nó khi Job Object báo cả cây đã thoát.
 
 ## [Vừa] FileId và ChangeTime thật từ Agent

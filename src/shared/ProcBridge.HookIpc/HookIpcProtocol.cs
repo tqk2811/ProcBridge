@@ -31,4 +31,10 @@ public static class HookIpcProtocol
     public const ushort ListFlagHasMore = 1;
 
     public static string GetPipeName(string sessionId) => PipeNamePrefix + sessionId;
+
+    /// <summary>
+    /// New session id: 128 random bits as 32 hex digits. The pipe name is the only thing a process needs to talk
+    /// to the Broker, so it must not be guessable (a predictable name lets another process squat on it).
+    /// </summary>
+    public static string NewSessionId() => Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
 }

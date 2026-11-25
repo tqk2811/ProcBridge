@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.IO.Pipes;
 using System.Runtime.Versioning;
 using ProcBridge.HookIpc;
@@ -15,40 +16,77 @@ public sealed class HookIpcServer : IAsyncDisposable
 {
     private readonly string _pipeName;
     private readonly HookRequestHandler _handler;
+    private readonly Func<bool, NamedPipeServerStream> _createInstance;
     private readonly CancellationTokenSource _stopping = new();
     private readonly ConcurrentDictionary<NamedPipeServerStream, Task> _clients = new();
     private Task _acceptLoop = Task.CompletedTask;
     private int _disposed;
 
     /// <param name="pipeName">Name without the <c>\\.\pipe\</c> prefix, see <see cref="HookIpcProtocol.GetPipeName"/>.</param>
-    public HookIpcServer(string pipeName, HookRequestHandler handler)
+    /// <param name="createInstance">Creates a pipe instance (argument: is it the first one); tests inject failures here.</param>
+    public HookIpcServer(string pipeName, HookRequestHandler handler, Func<bool, NamedPipeServerStream>? createInstance = null)
     {
         _pipeName = pipeName;
         _handler = handler;
+        _createInstance = createInstance ?? (first => CreateDefaultInstance(pipeName, first));
     }
 
     public string PipeName => _pipeName;
 
     public void Start()
     {
-        // Created here so a client connecting right after Start finds the pipe.
-        NamedPipeServerStream first = CreateInstance();
+        // Created here so a client connecting right after Start finds the pipe. As the first instance it fails
+        // when something else already owns the name, instead of silently sharing it with that process.
+        NamedPipeServerStream first = _createInstance(true);
         _acceptLoop = Task.Run(() => AcceptLoopAsync(first));
     }
 
-    private NamedPipeServerStream CreateInstance() => new(
-        _pipeName,
+    /// <summary>The production pipe: message mode, many instances, current user only; <paramref name="first"/> claims the name.</summary>
+    public static NamedPipeServerStream CreateDefaultInstance(string pipeName, bool first) => new(
+        pipeName,
         PipeDirection.InOut,
         NamedPipeServerStream.MaxAllowedServerInstances,
         PipeTransmissionMode.Message,
-        PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly,
+        PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly | (first ? PipeOptions.FirstPipeInstance : PipeOptions.None),
         HookIpcProtocol.MaxMessageSize,
         HookIpcProtocol.MaxMessageSize);
 
-    private async Task AcceptLoopAsync(NamedPipeServerStream next)
+    /// <summary>Creates the next instance, retrying with growing delays; null when the server is stopping.</summary>
+    private async Task<NamedPipeServerStream?> CreateNextInstanceAsync()
+    {
+        TimeSpan delay = TimeSpan.FromMilliseconds(100);
+        while (!_stopping.IsCancellationRequested)
+        {
+            try
+            {
+                return _createInstance(false);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                Trace.TraceError($"ProcBridge: cannot create pipe instance '{_pipeName}': {e.Message}; retrying in {delay.TotalMilliseconds:0} ms.");
+            }
+
+            try
+            {
+                await Task.Delay(delay, _stopping.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return null;
+            }
+            delay = TimeSpan.FromMilliseconds(Math.Min(delay.TotalMilliseconds * 2, 5000));
+        }
+        return null;
+    }
+
+    private async Task AcceptLoopAsync(NamedPipeServerStream? next)
     {
         while (true)
         {
+            next ??= await CreateNextInstanceAsync().ConfigureAwait(false);
+            if (next is null)
+                return;
+
             try
             {
                 await next.WaitForConnectionAsync(_stopping.Token).ConfigureAwait(false);
@@ -62,13 +100,13 @@ public sealed class HookIpcServer : IAsyncDisposable
             {
                 // Client vanished during connect; reuse a fresh instance.
                 await next.DisposeAsync().ConfigureAwait(false);
-                next = CreateInstance();
+                next = null;
                 continue;
             }
 
             NamedPipeServerStream connected = next;
             _clients[connected] = Task.Run(() => ServeAsync(connected));
-            next = CreateInstance();
+            next = null;
         }
     }
 
