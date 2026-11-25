@@ -38,8 +38,9 @@ namespace ProcBridge::Hook::Nt
     constexpr ULONG FileDispositionDelete = 0x1;
     constexpr ULONG FileDispositionOnClose = 0x8;
 
-    // NtCreateFile create option.
+    // NtCreateFile create options.
     constexpr ULONG FileDeleteOnCloseOption = 0x00001000;
+    constexpr ULONG FileOpenByFileIdOption = 0x00002000;
 
     // OBJECT_INFORMATION_CLASS.
     constexpr ULONG ObjectNameInformation = 1;

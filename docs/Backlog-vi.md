@@ -15,14 +15,15 @@ Plan 4.3 cho phép thư mục ảo nằm trên ổ không tồn tại. M1 chưa 
 `NtQueryObject` trả tên theo volume của thư mục thật (`GetFinalPathNameByHandle` ra sai ổ), và
 `GetVolumeInformation("V:\")`, `GetDriveType` chưa được giả lập.
 
-## [Vừa] Đường dẫn dạng khác chưa nhận diện
+## [Thấp] Đường dẫn dạng khác: phần còn thiếu
 
-- `\DosDevices\...`, `\GLOBAL??\...` chưa được đưa về dạng `\??\` trước khi so. `\Device\HarddiskVolumeN\...` tuyệt đối
-  được nhận khi mở (M3, advapi32 mở thư mục cha qua dạng này khi áp ACE kế thừa), các hàm khác theo đường dẫn
-  (`NtQueryAttributesFile`, `NtDeleteFile`...) cũng đi qua cùng lối dịch.
-- Tên ngắn 8.3 (`RUNNER~1`) trong đường dẫn ảo hoặc thật: so tiền tố theo chuỗi nên không khớp với dạng tên
-  dài, và tên trả về từ `FileNameInformation` có thể không đổi ngược được.
-- Mở theo file ID (`FILE_OPEN_BY_FILE_ID`) không qua đường dẫn nên không được ghi vào bảng handle.
+`\DosDevices\`, `\GLOBAL??\`, tên 8.3 nằm ngoài thư mục ảo và mở theo file ID đã xử lý (Plan 13.8). Còn thiếu:
+- Tên 8.3 *bên trong* thư mục ảo: qua Broker, máy B không trả tên ngắn (`ShortName` rỗng) nên `SUB~1` không mở được; chế độ
+  cục bộ để hệ thống file của thư mục thật tự giải.
+- `\??\GLOBALROOT\...` và đường dẫn tương đối theo handle thư mục thật được mở bằng tên 8.3 (`NtQueryObject` trả đúng dạng
+  lúc mở) chưa được mở rộng.
+- Mở theo file ID dưới handle ảo qua Broker trả `STATUS_NOT_SUPPORTED`: cần Agent tra file theo ID của máy B.
+- Test tên 8.3 báo Inconclusive khi volume của `%TEMP%` tắt tên 8.3. Ghi 2026-11-26.
 
 ## [Vừa] Handle nhân bản sang process khác không được theo dõi
 

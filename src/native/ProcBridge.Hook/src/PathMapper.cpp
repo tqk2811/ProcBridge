@@ -1,5 +1,6 @@
 #include "PathMapper.h"
 #include "PathString.h"
+#include <cstring>
 
 namespace ProcBridge::Hook
 {
@@ -59,8 +60,49 @@ namespace ProcBridge::Hook
             }
         }
 
-        DWORD ToNtPath(const wchar_t* dosPath, UNICODE_STRING& ntPath) noexcept
+        // dosPath with the components that exist in long form (8.3 names expanded, e.g. C:\Users\RUNNER~1); the missing
+        // tail (a virtual folder) is kept as given. Paths reach the hooks in either spelling, roots are matched in long form.
+        bool ToLongDosPath(const wchar_t* dosPath, wchar_t* result, DWORD capacity) noexcept
         {
+            const DWORD length = static_cast<DWORD>(lstrlenW(dosPath));
+            HeapBuffer prefixBuffer(static_cast<size_t>(capacity) * sizeof(wchar_t));
+            if (!prefixBuffer || length >= capacity)
+            {
+                return false;
+            }
+            auto* prefix = reinterpret_cast<wchar_t*>(prefixBuffer.Get());
+            memcpy(prefix, dosPath, (static_cast<size_t>(length) + 1) * sizeof(wchar_t));
+            DWORD cut = length;
+            for (;;)
+            {
+                prefix[cut] = L'\0';
+                const DWORD written = GetLongPathNameW(prefix, result, capacity);
+                if (written > 0 && written < capacity && written + (length - cut) < capacity)
+                {
+                    memcpy(result + written, dosPath + cut, (static_cast<size_t>(length - cut) + 1) * sizeof(wchar_t));
+                    return true;
+                }
+                while (cut > 0 && dosPath[cut - 1] != L'\\')
+                {
+                    --cut;
+                }
+                if (cut <= 3)
+                {
+                    return false; // nothing exists below the drive: keep the path as given
+                }
+                --cut; // the tail starts with its '\'
+            }
+        }
+
+        DWORD ToNtPath(const wchar_t* givenPath, UNICODE_STRING& ntPath) noexcept
+        {
+            constexpr DWORD LongCapacity = 32768;
+            HeapBuffer longBuffer(LongCapacity * sizeof(wchar_t));
+            const wchar_t* dosPath = givenPath;
+            if (longBuffer && ToLongDosPath(givenPath, reinterpret_cast<wchar_t*>(longBuffer.Get()), LongCapacity))
+            {
+                dosPath = reinterpret_cast<const wchar_t*>(longBuffer.Get());
+            }
             UNICODE_STRING converted{};
             if (!RtlDosPathNameToNtPathName_U(dosPath, &converted, nullptr, nullptr))
             {

@@ -2935,6 +2935,56 @@ namespace
         return 0;
     }
 
+    /// --nt-final-name <NT path>: opens the path with NtOpenFile as given (\DosDevices\..., \GLOBAL??\...) and prints
+    /// the final path of the handle.
+    int NtFinalName(const wchar_t* ntPath)
+    {
+        const auto open = reinterpret_cast<NtOpenFileFn>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtOpenFile"));
+        UNICODE_STRING name{};
+        RtlInitUnicodeString(&name, ntPath);
+        OBJECT_ATTRIBUTES attributes{};
+        InitializeObjectAttributes(&attributes, &name, OBJ_CASE_INSENSITIVE, nullptr, nullptr);
+        HANDLE handle = nullptr;
+        IO_STATUS_BLOCK io{};
+        const NTSTATUS status = open(&handle, FILE_READ_DATA | SYNCHRONIZE, &attributes, &io, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE);
+        if (!NT_SUCCESS(status))
+        {
+            WriteLine(L"name: " + Status(status));
+            return 1;
+        }
+        WriteLine(L"name: " + FinalPath(handle));
+        CloseHandle(handle);
+        return 0;
+    }
+
+    /// --open-by-id <directory> <file>: opens file by path, reads its file id, then opens that id with OpenFileById
+    /// relative to a handle of directory and prints the final path of the result.
+    int OpenById(const wchar_t* directory, const wchar_t* file)
+    {
+        Handle byPath(OpenRead(file));
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (!byPath.IsValid() || !GetFileInformationByHandle(byPath.Get(), &info))
+        {
+            WriteLine(L"by-path: " + Error(GetLastError()));
+            return 1;
+        }
+        Handle root(CreateFileW(directory, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+            OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+        if (!root.IsValid())
+        {
+            WriteLine(L"directory: " + Error(GetLastError()));
+            return 1;
+        }
+        FILE_ID_DESCRIPTOR id{};
+        id.dwSize = sizeof(id);
+        id.Type = FileIdType;
+        id.FileId.QuadPart = static_cast<LONGLONG>((static_cast<ULONGLONG>(info.nFileIndexHigh) << 32) | info.nFileIndexLow);
+        Handle byId(OpenFileById(root.Get(), &id, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, 0));
+        WriteLine(L"by-id: " + (byId.IsValid() ? FinalPath(byId.Get()) : Error(GetLastError())));
+        return 0;
+    }
+
     int RunCommand(int argc, wchar_t** argv)
     {
         const std::wstring command = argv[1];
@@ -3009,6 +3059,14 @@ namespace
         if (command == L"--parent-listing" && argc == 3)
         {
             return ParentListing(argv[2]);
+        }
+        if (command == L"--nt-final-name" && argc == 3)
+        {
+            return NtFinalName(argv[2]);
+        }
+        if (command == L"--open-by-id" && argc == 4)
+        {
+            return OpenById(argv[2], argv[3]);
         }
         if (command == L"--stdin-id" && argc == 2)
         {

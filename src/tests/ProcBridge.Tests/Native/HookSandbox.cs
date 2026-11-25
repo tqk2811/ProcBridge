@@ -22,10 +22,12 @@ internal sealed class HookSandbox : IDisposable
     private readonly string _baseDirectory;
     private readonly NativeBinaries _binaries;
 
-    public HookSandbox(string platform)
+    /// <param name="platform">x64 or Win32.</param>
+    /// <param name="baseDirectory">Folder to create the sandbox in (must not exist); a new folder under the test output by default.</param>
+    public HookSandbox(string platform, string? baseDirectory = null)
     {
         _binaries = new NativeBinaries(platform);
-        _baseDirectory = Path.Combine(AppContext.BaseDirectory, "hook-sandbox", Guid.NewGuid().ToString("N"));
+        _baseDirectory = baseDirectory ?? Path.Combine(AppContext.BaseDirectory, "hook-sandbox", Guid.NewGuid().ToString("N"));
         RealRoot = Path.Combine(_baseDirectory, "real");
         VirtualRoot = Path.Combine(_baseDirectory, "virtual-root");
         CreateTree();

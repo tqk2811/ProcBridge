@@ -852,6 +852,19 @@ Nhận xét:
   thư mục ảo (`DirectoryEntryFormat`). Kiểm (`ParentListingTests.cs`, x64 và Win32, cục bộ và qua Agent): tìm đúng tên, tên
   viết hoa, `*`, `NtQueryDirectoryFile` không pattern, single entry, restart, `GetLongPathNameW`, `cmd dir /ad`; đỏ khi bỏ
   phần chèn. Phần chưa phủ ở Backlog.
+- **Đường dẫn dạng khác**: tên tuyệt đối không khớp gốc nào thì thử thêm dạng chuẩn: `\DosDevices\` và `\GLOBAL??\` đổi
+  thành `\??\`; thành phần có `~` (tên 8.3, không wildcard) được đổi sang tên dài bằng một lần
+  `NtQueryDirectoryFile` (class Both, pattern khớp cả tên ngắn) trên thư mục cha thật, dừng ở thành phần đầu tiên không có
+  thật (phần thư mục ảo giữ nguyên). Chỉ mở rộng khi đường dẫn có tên lá của một gốc ảo: gốc ảo không có trên volume nên
+  không có tên 8.3, đường dẫn thiếu tên dài của nó không bao giờ tới được gốc, nhờ vậy đường dẫn thật có `~` (vd
+  `%TEMP%` dạng `RUNNER~1` trên CI) không tốn thêm truy vấn. Gốc khai báo (`PROCBRIDGE_MAP`, gốc từ Broker) cũng được
+  đổi sang tên dài phần có thật (`GetLongPathNameW`) khi nạp.
+- **Mở theo file ID** (`FILE_OPEN_BY_FILE_ID`): tên là ID chứ không phải đường dẫn nên không ghép với thư mục. Dưới handle
+  ảo của ánh xạ cục bộ, handle mới được ghi như handle gốc (thư mục thật cùng volume); qua Broker trả
+  `STATUS_NOT_SUPPORTED` vì process chỉ biết ID của máy B, mở trên volume cache sẽ trúng file khác. Dưới handle thật thì
+  để nguyên.
+- Kiểm (`PathSpellingTests.cs`, x64 và Win32): mở bằng `\DosDevices\`, `\GLOBAL??\`; đường dẫn và gốc khai báo bằng tên
+  8.3 (thư mục tên dài trong `%TEMP%`); `OpenFileById` dưới thư mục ảo và thư mục thật, và qua Agent. Ba bài đỏ trên Hook cũ.
 
 ---
 

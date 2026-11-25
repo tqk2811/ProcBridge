@@ -119,6 +119,222 @@ namespace ProcBridge::Hook
             visitor(static_cast<const UNICODE_STRING&>(name));
         }
 
+        bool StartsWithText(const UNICODE_STRING& text, const wchar_t* prefix, USHORT prefixChars) noexcept
+        {
+            if (text.Length < prefixChars * sizeof(wchar_t))
+            {
+                return false;
+            }
+            for (USHORT i = 0; i < prefixChars; ++i)
+            {
+                if (RtlUpcaseUnicodeChar(text.Buffer[i]) != RtlUpcaseUnicodeChar(prefix[i]))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /// Long name of component (an 8.3 name) in the real folder parent (NT path, NUL not needed), read with a
+        /// directory query whose pattern matches short names too. longName points into entry.
+        bool LookupLongName(const wchar_t* parent, size_t parentChars, const wchar_t* component, USHORT componentChars, BYTE* entry,
+            ULONG entryBytes, const wchar_t*& longName, USHORT& longChars) noexcept
+        {
+            constexpr ULONG FileBothDirectoryInformationClass = 3;
+            constexpr ULONG BothNameOffset = 94;
+            UNICODE_STRING directory{};
+            directory.Buffer = const_cast<PWSTR>(parent);
+            directory.Length = static_cast<USHORT>(parentChars * sizeof(wchar_t));
+            directory.MaximumLength = directory.Length;
+            OBJECT_ATTRIBUTES attributes{};
+            InitializeObjectAttributes(&attributes, &directory, OBJ_CASE_INSENSITIVE, nullptr, nullptr);
+            HANDLE handle = nullptr;
+            IO_STATUS_BLOCK io{};
+            if (!NT_SUCCESS(g_ntOpenFile(&handle, FILE_LIST_DIRECTORY | SYNCHRONIZE, &attributes, &io,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_FOR_BACKUP_INTENT)))
+            {
+                return false;
+            }
+            UNICODE_STRING pattern{};
+            pattern.Buffer = const_cast<PWSTR>(component);
+            pattern.Length = static_cast<USHORT>(componentChars * sizeof(wchar_t));
+            pattern.MaximumLength = pattern.Length;
+            const NTSTATUS status = g_ntQueryDirectoryFile(handle, nullptr, nullptr, nullptr, &io, entry, entryBytes,
+                FileBothDirectoryInformationClass, TRUE, &pattern, TRUE);
+            g_ntClose(handle);
+            ULONG nameBytes = 0;
+            memcpy(&nameBytes, entry + 60, sizeof(nameBytes));
+            if (!NT_SUCCESS(status) || nameBytes == 0 || BothNameOffset + static_cast<ULONGLONG>(nameBytes) > entryBytes)
+            {
+                return false;
+            }
+            longName = reinterpret_cast<const wchar_t*>(entry + BothNameOffset);
+            longChars = static_cast<USHORT>(nameBytes / sizeof(wchar_t));
+            return true;
+        }
+
+        /// \??\ path with its 8.3 components ('~', no wildcard) replaced by their long names, as far as the components
+        /// exist on the real volume (a virtual folder does not: the rest is kept). False when nothing changed.
+        bool ExpandShortNames(const UNICODE_STRING& path, UNICODE_STRING& expanded) noexcept
+        {
+            const USHORT chars = path.Length / sizeof(wchar_t);
+            if (!StartsWithText(path, L"\\??\\", 4))
+            {
+                return false;
+            }
+            constexpr ULONG EntryBytes = 4096;
+            HeapBuffer output(MaxUnicodeStringBytes + sizeof(wchar_t));
+            HeapBuffer entry(EntryBytes);
+            if (!output || !entry)
+            {
+                return false;
+            }
+            auto* out = reinterpret_cast<wchar_t*>(output.Get());
+            constexpr size_t MaxChars = MaxUnicodeStringBytes / sizeof(wchar_t);
+            // "\??\" and the device component (C:, UNC) are kept.
+            USHORT index = 4;
+            while (index < chars && path.Buffer[index] != L'\\')
+            {
+                ++index;
+            }
+            memcpy(out, path.Buffer, index * sizeof(wchar_t));
+            size_t outChars = index;
+            bool changed = false;
+            bool stop = false;
+            while (index < chars)
+            {
+                const USHORT start = index + 1;
+                USHORT end = start;
+                bool shortName = false;
+                bool wildcard = false;
+                while (end < chars && path.Buffer[end] != L'\\')
+                {
+                    const wchar_t c = path.Buffer[end];
+                    shortName |= c == L'~';
+                    wildcard |= c == L'*' || c == L'?' || c == L'<' || c == L'>' || c == L'"';
+                    ++end;
+                }
+                const wchar_t* name = path.Buffer + start;
+                USHORT nameChars = static_cast<USHORT>(end - start);
+                if (!stop && shortName && !wildcard)
+                {
+                    // The drive root needs its trailing '\' to be opened as a directory.
+                    const bool atRoot = outChars == 6;
+                    out[outChars] = L'\\';
+                    const wchar_t* longName = nullptr;
+                    USHORT longChars = 0;
+                    if (LookupLongName(out, outChars + (atRoot ? 1 : 0), name, nameChars, entry.Get(), EntryBytes, longName, longChars))
+                    {
+                        changed |= longChars != nameChars || memcmp(longName, name, nameChars * sizeof(wchar_t)) != 0;
+                        name = longName;
+                        nameChars = longChars;
+                    }
+                    else
+                    {
+                        stop = true;
+                    }
+                }
+                if (outChars + 1 + nameChars > MaxChars)
+                {
+                    return false;
+                }
+                out[outChars] = L'\\';
+                memcpy(out + outChars + 1, name, nameChars * sizeof(wchar_t));
+                outChars += 1 + nameChars;
+                index = end;
+            }
+            if (!changed)
+            {
+                return false;
+            }
+            UNICODE_STRING view{};
+            view.Buffer = out;
+            view.Length = static_cast<USHORT>(outChars * sizeof(wchar_t));
+            view.MaximumLength = view.Length;
+            return ConcatString(expanded, view, nullptr, 0);
+        }
+
+        /// True when a component of path is the last component of a virtual root. A virtual root does not exist on the
+        /// volume, so it has no 8.3 name: a path without its long name can never reach it, and is not expanded (that
+        /// costs a directory query per short component).
+        bool HasRootLeaf(const UNICODE_STRING& path) noexcept
+        {
+            const USHORT chars = path.Length / sizeof(wchar_t);
+            for (int mapping = 0; mapping < g_resolver->Count(); ++mapping)
+            {
+                const UNICODE_STRING& root = g_resolver->GetMapping(mapping).VirtualNt;
+                USHORT leafStart = root.Length / sizeof(wchar_t);
+                while (leafStart > 0 && root.Buffer[leafStart - 1] != L'\\')
+                {
+                    --leafStart;
+                }
+                const USHORT leafChars = static_cast<USHORT>(root.Length / sizeof(wchar_t) - leafStart);
+                for (USHORT start = 0; start + leafChars <= chars; ++start)
+                {
+                    if ((start == 0 || path.Buffer[start - 1] == L'\\') && (start + leafChars == chars || path.Buffer[start + leafChars] == L'\\'))
+                    {
+                        UNICODE_STRING component{};
+                        component.Buffer = path.Buffer + start;
+                        component.Length = static_cast<USHORT>(leafChars * sizeof(wchar_t));
+                        if (StartsWithText(component, root.Buffer + leafStart, leafChars))
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+
+        /// The same path in the spelling the mappings use: \DosDevices\ and \GLOBAL??\ become \??\, 8.3 components
+        /// become long names. False (normalized untouched) when the spelling is already the usual one.
+        bool NormalizeSpelling(const UNICODE_STRING& name, UNICODE_STRING& normalized) noexcept
+        {
+            static constexpr wchar_t NtRootText[] = L"\\??\\";
+            UNICODE_STRING ntRoot{};
+            ntRoot.Buffer = const_cast<PWSTR>(NtRootText);
+            ntRoot.Length = 4 * sizeof(wchar_t);
+            ntRoot.MaximumLength = ntRoot.Length;
+            UNICODE_STRING owned{};
+            const UNICODE_STRING* current = &name;
+            struct Alias
+            {
+                const wchar_t* Text;
+                USHORT Chars;
+            };
+            static constexpr Alias Aliases[] = { { L"\\DosDevices\\", 12 }, { L"\\GLOBAL??\\", 10 } };
+            for (const Alias& alias : Aliases)
+            {
+                if (StartsWithText(name, alias.Text, alias.Chars))
+                {
+                    if (!ConcatString(owned, ntRoot, name.Buffer + alias.Chars, name.Length - alias.Chars * sizeof(wchar_t)))
+                    {
+                        return false;
+                    }
+                    current = &owned;
+                    break;
+                }
+            }
+            bool hasTilde = false;
+            for (USHORT i = 0; i < current->Length / sizeof(wchar_t) && !hasTilde; ++i)
+            {
+                hasTilde = current->Buffer[i] == L'~';
+            }
+            UNICODE_STRING expanded{};
+            if (hasTilde && HasRootLeaf(*current) && ExpandShortNames(*current, expanded))
+            {
+                FreeString(owned);
+                owned = expanded;
+            }
+            if (owned.Buffer == nullptr)
+            {
+                return false;
+            }
+            normalized = owned;
+            return true;
+        }
+
         /// Resolves OBJECT_ATTRIBUTES against the virtual roots and owns the rewritten name.
         /// The caller's structures are read once into a snapshot (SEH-guarded); an unreadable pointer
         /// makes Error() STATUS_ACCESS_VIOLATION, as the kernel would answer.
@@ -147,6 +363,24 @@ namespace ProcBridge::Hook
                 }
                 if (!CopyName(name))
                 {
+                    return;
+                }
+                if (_attributes.RootDirectory != nullptr && _intent != nullptr && (_intent->CreateOptions & FileOpenByFileIdOption) != 0)
+                {
+                    // The name is a file id on the volume of RootDirectory, not a path. Below a local mapping the
+                    // backing folder shares the volume, so the open is tracked like the handle it is relative to. With
+                    // the Broker the process only knows machine B's ids, which mean nothing on the cache volume.
+                    if (g_handles.Find(_attributes.RootDirectory) >= 0)
+                    {
+                        if (g_resolver->IsRemote())
+                        {
+                            _error = STATUS_NOT_SUPPORTED;
+                        }
+                        else
+                        {
+                            _mapping = g_handles.Find(_attributes.RootDirectory);
+                        }
+                    }
                     return;
                 }
                 if (_attributes.RootDirectory != nullptr)
@@ -185,7 +419,7 @@ namespace ProcBridge::Hook
                         _mapping = deviceMapping;
                         Translate(_nameCopy, PathKind::Device);
                     }
-                    else
+                    else if (!MatchOtherSpelling())
                     {
                         return;
                     }
@@ -283,6 +517,26 @@ namespace ProcBridge::Hook
                 const NTSTATUS status = g_resolver->Resolve(_mapping, path, kind, *_intent, _name, &_info, &_writeToken);
                 _rewritten = NT_SUCCESS(status);
                 _error = _rewritten ? STATUS_SUCCESS : status;
+            }
+
+            /// An absolute name that matched no mapping as written: try \DosDevices\, \GLOBAL??\ and 8.3 spellings.
+            bool MatchOtherSpelling() noexcept
+            {
+                UNICODE_STRING normalized{};
+                if (!NormalizeSpelling(_nameCopy, normalized))
+                {
+                    return false;
+                }
+                const int mapping = g_resolver->FindMapping(normalized);
+                if (mapping < 0)
+                {
+                    FreeString(normalized);
+                    return false;
+                }
+                _mapping = mapping;
+                _ownedMatch = normalized; // kept as the matched path
+                Translate(_ownedMatch, PathKind::Nt);
+                return true;
             }
 
             /// RootDirectory is a virtual directory handle of a remote resolver: join its virtual path with
