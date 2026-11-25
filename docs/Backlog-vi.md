@@ -2,6 +2,15 @@
 
 Việc còn treo, chưa thuộc mốc đang làm. Xử lý xong mục nào thì xoá mục đó trong cùng commit.
 
+## [Cao] Write token ở lại bên gửi khi nhân bản handle ghi sang process khác
+
+`SendDuplicate` ([FileHooks.cpp](../src/native/ProcBridge.Hook/src/FileHooks.cpp) ~2343-2353, nhánh gửi ~2428-2432) để
+write token ở process gửi. Ca thường gặp: process cha nhân bản handle ghi sang con rồi đóng bản của mình
+(`DUPLICATE_CLOSE_SOURCE`, hoặc chuyển hướng stdout của con vào file ảo rồi đóng). Khi đó ghi ngược về máy B chạy ngay lúc
+cha đóng trong khi con vẫn đang ghi; những gì con ghi sau đó mất lặng lẽ, không báo lỗi. Đây là sai dữ liệu nên xếp `[Cao]`.
+Hướng đề xuất: Broker đếm tham chiếu write token theo PID (bên nhận báo đã nhận bản sao, token chỉ ghi ngược khi bản cuối ở
+mọi process đóng). Cần user chốt thiết kế trước khi làm. Ghi 2026-11-26.
+
 ## [Thấp] Thư mục gốc ảo trong thư mục cha: các ca chưa phủ
 
 Mục của gốc ảo được chèn vào cuối lượt liệt kê thư mục cha thật (Plan mục 13, "Hook: đường dẫn và handle ngoài thư mục ảo"). Chưa phủ: thư mục cha không có thật (mở
@@ -35,6 +44,16 @@ chiếm trước (tính năng tắt cho process đó); bên nhận không giữ 
 cuối (kèm `DUPLICATE_CLOSE_SOURCE` thì là lúc nhân bản); delete-on-close không chuyển; range id trong mục được tin (mục giả
 chỉ làm Broker tải thừa). Process cùng user, cùng integrity level vẫn ghi được vào hộp thư, chặn bằng kiểm tra phía nhận.
 Ghi 2026-11-26.
+
+## [Vừa] Hộp thư handle chỉ được đọc ở hook tra handle; chiều kéo và handle kế thừa không được theo dõi
+
+Bên nhận chỉ rút hộp thư (`AdoptIncomingHandles`, [FileHooks.cpp](../src/native/ProcBridge.Hook/src/FileHooks.cpp) ~125)
+trong các hook có tra handle. Process nhận ít gọi các hook đó thì 16 ô đầy, lượt gửi sau bị bỏ (chỉ còn log debug); rút
+muộn thì mở cửa sổ tái dùng giá trị handle (handle đã đóng, giá trị được cấp lại cho file khác trước khi mục được đọc). Chiều
+kéo (bên nhận tự `DuplicateHandle` từ process khác về) và handle kế thừa qua `CreateProcess(bInheritHandles)` cũng không
+được theo dõi. Vì sao: handle ảo đi qua process khác là bình thường với công cụ build (stdout/stderr vào file, pipeline).
+Hướng thay thế: bỏ hộp thư shared memory, khi gặp handle lạ thì kiểm lười bằng `IsBackedByMapping` kèm cache âm (handle đã
+kiểm là không thuộc thư mục ảo), phủ được cả chiều kéo lẫn kế thừa. Cần user chọn hướng. Ghi 2026-11-26.
 
 ## [Vừa] Inject con: các đường chưa phủ
 
@@ -256,6 +275,9 @@ theo đường dẫn trên Agent cho commit, set-info, rename, delete.
 - `RemoteWriteTests.WriteScenario_ThroughAgent_MatchesRealFolder` (x64): đỏ một lần trên CI (2026-11-26, nhánh
   `feature/launcher-ux`, không đụng tới đường ghi của Hook): ở bước "share writer denied" mong `err=32` (sharing
   violation) nhưng nhận `err=5` (access denied). Chạy lại job thì xanh, local đều xanh.
+- `HookPipeEndToEndTests.WatchDirectory_ChangeOnAgent_ReachesWaitChanges`: đỏ một lần trên CI (run 45699654609,
+  2026-11-26) ở `Assert.IsTrue(overflow.Overflow)`; chạy lại thì xanh. Chưa rõ nguyên nhân, nghi đua thời gian giữa
+  lượt thay đổi và lúc đánh dấu tràn.
 
 ## [Thấp] Review độc lập cho M2
 
