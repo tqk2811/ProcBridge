@@ -37,7 +37,11 @@ public sealed class HookRequestHandler
             throw new ArgumentException("Too many mappings.", nameof(mappings));
         _cache = cache;
         _mappings = mappings;
+        Watches = new HookWatchRegistry(cache);
     }
+
+    /// <summary>Directory watches of the hook (WatchDirectory, WaitChanges, Unwatch).</summary>
+    public HookWatchRegistry Watches { get; }
 
     /// <summary>Handles <paramref name="request"/> and writes the reply into <paramref name="reply"/>; returns its size.</summary>
     public async Task<int> HandleAsync(ReadOnlyMemory<byte> request, Memory<byte> reply, CancellationToken cancellationToken)
@@ -129,6 +133,29 @@ public sealed class HookRequestHandler
                 IReadOnlyList<FsEntry> entries = await _cache.ListAsync(ToRemotePath(list.MappingIndex, list.RelativePath), cancellationToken).ConfigureAwait(false);
                 return BuildListPage(entries, (int)Math.Min(list.StartIndex, int.MaxValue));
             }
+
+            case HookIpcMessageType.WatchDirectory:
+            {
+                HookWatchRequest watch = Read(request, HookWatchRequest.Read);
+                string remotePath = ToRemotePath(watch.MappingIndex, watch.RelativePath);
+                FsEntry entry = await _cache.StatAsync(remotePath, cancellationToken).ConfigureAwait(false);
+                if (!entry.IsDirectory)
+                    throw new ProtocolStatusException(NtStatus.NotADirectory, "Only directories can be watched.");
+                return new HookWatchReply { WatchId = Watches.Add(remotePath, watch.WatchSubtree) };
+            }
+
+            case HookIpcMessageType.WaitChanges:
+            {
+                HookWaitChangesRequest wait = Read(request, HookWaitChangesRequest.Read);
+                TimeSpan timeout = wait.TimeoutMilliseconds == HookIpcProtocol.InfiniteTimeout
+                    ? Timeout.InfiniteTimeSpan
+                    : TimeSpan.FromMilliseconds(wait.TimeoutMilliseconds);
+                return await Watches.WaitAsync(wait.WatchId, timeout, cancellationToken).ConfigureAwait(false);
+            }
+
+            case HookIpcMessageType.Unwatch:
+                Watches.Remove(Read(request, HookUnwatchRequest.Read).WatchId);
+                return new HookUnwatchReply();
 
             default:
                 throw new ProtocolStatusException(NtStatus.NotImplemented, $"IPC message {type} is not supported.");

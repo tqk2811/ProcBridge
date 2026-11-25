@@ -86,6 +86,27 @@ public sealed class HookIpcCodecTests
     }
 
     [TestMethod]
+    public void Watch_RoundTrips()
+    {
+        HookWatchRequest watch = RoundTrip(new HookWatchRequest { MappingIndex = 2, WatchSubtree = true, CompletionFilter = 0x17, RelativePath = @"src\lib" }, HookWatchRequest.Read);
+        Assert.AreEqual((ushort)2, watch.MappingIndex);
+        Assert.IsTrue(watch.WatchSubtree);
+        Assert.AreEqual(0x17u, watch.CompletionFilter);
+        Assert.AreEqual(@"src\lib", watch.RelativePath);
+        Assert.AreEqual(99u, RoundTrip(new HookWatchReply { WatchId = 99 }, HookWatchReply.Read).WatchId);
+
+        HookWaitChangesRequest wait = RoundTrip(new HookWaitChangesRequest { WatchId = 99, TimeoutMilliseconds = HookIpcProtocol.InfiniteTimeout }, HookWaitChangesRequest.Read);
+        Assert.AreEqual(HookIpcProtocol.InfiniteTimeout, wait.TimeoutMilliseconds);
+        HookWaitChangesReply changes = RoundTrip(new HookWaitChangesReply { Changes = [new(1, "a.cs"), new(5, @"sub\b.cs")], Overflow = true }, HookWaitChangesReply.Read);
+        Assert.IsTrue(changes.Overflow);
+        CollectionAssert.AreEqual(new[] { new HookChange(1, "a.cs"), new HookChange(5, @"sub\b.cs") }, changes.Changes.ToArray());
+
+        Assert.AreEqual(99u, RoundTrip(new HookUnwatchRequest { WatchId = 99 }, HookUnwatchRequest.Read).WatchId);
+        byte[] buffer = new byte[64];
+        Assert.AreEqual(HookIpcProtocol.HeaderSize, HookIpcCodec.Encode(buffer, 1, new HookUnwatchReply()));
+    }
+
+    [TestMethod]
     public void ErrorReply_HasHeaderOnly()
     {
         byte[] buffer = new byte[64];

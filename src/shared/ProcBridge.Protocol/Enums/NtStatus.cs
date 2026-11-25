@@ -11,6 +11,8 @@ public enum NtStatus : uint
     NoMoreFiles = 0x80000006,
     Unsuccessful = 0xC0000001,
     NotImplemented = 0xC0000002,
+    /// <summary>Unknown watch id in a Hook IPC request.</summary>
+    InvalidHandle = 0xC0000008,
     InvalidParameter = 0xC000000D,
     EndOfFile = 0xC0000011,
     AccessDenied = 0xC0000022,

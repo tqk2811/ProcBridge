@@ -51,6 +51,9 @@ public sealed partial class HookIpcHeaderTests
         Assert.AreEqual((long)HookIpcProtocol.MaxMessageSize, Constant(header, "MaxMessageSize"));
         Assert.AreEqual((long)HookIpcProtocol.FileInfoSize, Constant(header, "FileInfoSize"));
         Assert.AreEqual((long)HookIpcProtocol.ListFlagHasMore, Constant(header, "ListFlagHasMore"));
+        Assert.AreEqual((long)HookIpcProtocol.WatchFlagSubtree, Constant(header, "WatchFlagSubtree"));
+        Assert.AreEqual((long)HookIpcProtocol.ChangesFlagOverflow, Constant(header, "ChangesFlagOverflow"));
+        Assert.AreEqual((long)HookIpcProtocol.InfiniteTimeout, Constant(header, "InfiniteTimeout"));
         StringAssert.Contains(header, $@"L""\\\\.\\pipe\\{HookIpcProtocol.PipeNamePrefix}""");
     }
 

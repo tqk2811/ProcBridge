@@ -179,4 +179,93 @@ public sealed class HookPipeEndToEndTests
         }));
         CollectionAssert.AreEqual(Enumerable.Range(0, 8).Select(i => i.ToString()).ToArray(), contents);
     }
+
+    [TestMethod]
+    public async Task WatchDirectory_ChangeOnAgent_ReachesWaitChanges()
+    {
+        using var share = new TempFolder("pipe");
+        share.WriteFile(@"proj\src\a.cs", "a"u8.ToArray());
+        share.WriteFile(@"proj\other\x.cs", "x"u8.ToArray());
+        using var cacheDir = new TempFolder("cache");
+        await using var agent = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
+        agent.Start();
+        string session = HookIpcProtocol.NewSessionId();
+        await using BrokerHost broker = BrokerHost.Start(new BrokerOptions
+        {
+            SessionId = session,
+            AgentHost = "127.0.0.1",
+            AgentPort = agent.Port,
+            ShareName = "src",
+            Mappings = [new VirtualMapping(VirtualRoot, "proj")],
+            CacheRoot = cacheDir.Path,
+        });
+        await broker.Watcher!.WaitActiveAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+        await using FakeHook hook = await FakeHook.ConnectAsync(HookIpcProtocol.GetPipeName(session));
+
+        HookWatchReply subtree = await hook.CallOkAsync(new HookWatchRequest { MappingIndex = 0, WatchSubtree = true, RelativePath = string.Empty }, HookWatchReply.Read);
+        HookWatchReply flat = await hook.CallOkAsync(new HookWatchRequest { MappingIndex = 0, WatchSubtree = false, RelativePath = "src" }, HookWatchReply.Read);
+        Assert.AreNotEqual(subtree.WatchId, flat.WatchId);
+
+        // Nothing changed yet: a short wait times out empty.
+        HookWaitChangesReply idle = await hook.CallOkAsync(new HookWaitChangesRequest { WatchId = flat.WatchId, TimeoutMilliseconds = 50 }, HookWaitChangesReply.Read);
+        Assert.IsEmpty(idle.Changes);
+        Assert.IsFalse(idle.Overflow);
+
+        File.WriteAllText(share.Combine(@"proj\src\a.cs"), "changed");
+        share.WriteFile(@"proj\other\new.cs", [1]);
+
+        HookWaitChangesReply flatChanges = await hook.CallOkAsync(new HookWaitChangesRequest { WatchId = flat.WatchId, TimeoutMilliseconds = 1000 }, HookWaitChangesReply.Read);
+        Assert.Contains(new HookChange(3 /* FILE_ACTION_MODIFIED */, "a.cs"), flatChanges.Changes.ToList());
+        Assert.IsFalse(flatChanges.Changes.Any(x => x.Name.Contains("new.cs")), "Flat watch must not see other folders.");
+
+        var seen = new List<HookChange>();
+        var deadline = DateTime.UtcNow.AddSeconds(1);
+        while (!seen.Contains(new HookChange(1 /* FILE_ACTION_ADDED */, @"other\new.cs")) && DateTime.UtcNow < deadline)
+            seen.AddRange((await hook.CallOkAsync(new HookWaitChangesRequest { WatchId = subtree.WatchId, TimeoutMilliseconds = 500 }, HookWaitChangesReply.Read)).Changes);
+        Assert.Contains(new HookChange(1, @"other\new.cs"), seen);
+        Assert.Contains(new HookChange(3, @"src\a.cs"), seen);
+
+        // A rescan on the Agent reaches the hook as an overflow.
+        agent.GetWatcher(new ReadOnlyShare("src", share.Path)).OnError(new InternalBufferOverflowException());
+        HookWaitChangesReply overflow = await hook.CallOkAsync(new HookWaitChangesRequest { WatchId = flat.WatchId, TimeoutMilliseconds = 1000 }, HookWaitChangesReply.Read);
+        Assert.IsTrue(overflow.Overflow);
+
+        await hook.CallOkAsync(new HookUnwatchRequest { WatchId = flat.WatchId }, (ref HookIpcReader _) => 0);
+        (uint status, _) = await hook.CallAsync(new HookWaitChangesRequest { WatchId = flat.WatchId, TimeoutMilliseconds = 0 });
+        Assert.AreEqual((uint)NtStatus.InvalidHandle, status);
+
+        (uint fileStatus, _) = await hook.CallAsync(new HookWatchRequest { MappingIndex = 0, WatchSubtree = false, RelativePath = @"src\a.cs" });
+        Assert.AreEqual((uint)NtStatus.NotADirectory, fileStatus);
+    }
+
+    [TestMethod]
+    public async Task WaitChanges_Blocked_ReturnsWhenUnwatchedFromAnotherInstance()
+    {
+        using var share = new TempFolder("pipe");
+        Directory.CreateDirectory(share.Combine("proj"));
+        using var cacheDir = new TempFolder("cache");
+        await using var agent = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
+        agent.Start();
+        string session = HookIpcProtocol.NewSessionId();
+        await using BrokerHost broker = BrokerHost.Start(new BrokerOptions
+        {
+            SessionId = session,
+            AgentHost = "127.0.0.1",
+            AgentPort = agent.Port,
+            ShareName = "src",
+            Mappings = [new VirtualMapping(VirtualRoot, "proj")],
+            CacheRoot = cacheDir.Path,
+        });
+        await using FakeHook waiter = await FakeHook.ConnectAsync(HookIpcProtocol.GetPipeName(session));
+        await using FakeHook control = await FakeHook.ConnectAsync(HookIpcProtocol.GetPipeName(session));
+
+        HookWatchReply watch = await control.CallOkAsync(new HookWatchRequest { MappingIndex = 0, WatchSubtree = true, RelativePath = string.Empty }, HookWatchReply.Read);
+        Task<HookWaitChangesReply> pending = waiter.CallOkAsync(new HookWaitChangesRequest { WatchId = watch.WatchId, TimeoutMilliseconds = HookIpcProtocol.InfiniteTimeout }, HookWaitChangesReply.Read);
+        await Task.Delay(100);
+        Assert.IsFalse(pending.IsCompleted);
+
+        await control.CallOkAsync(new HookUnwatchRequest { WatchId = watch.WatchId }, (ref HookIpcReader _) => 0);
+        HookWaitChangesReply reply = await pending.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.IsEmpty(reply.Changes);
+    }
 }

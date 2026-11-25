@@ -11,4 +11,10 @@ public enum HookIpcMessageType : ushort
     Resolve = 3,
     /// <summary>One page of a virtual directory listing (NtQueryDirectoryFile[Ex]).</summary>
     List = 4,
+    /// <summary>Starts watching a virtual directory for changes (NtNotifyChangeDirectoryFile[Ex]); returns a watch id.</summary>
+    WatchDirectory = 5,
+    /// <summary>Long poll: waits until a watch has changes (or the timeout) and returns them.</summary>
+    WaitChanges = 6,
+    /// <summary>Stops a watch (the directory handle was closed).</summary>
+    Unwatch = 7,
 }
