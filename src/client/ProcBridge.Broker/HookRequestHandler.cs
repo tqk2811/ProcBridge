@@ -59,10 +59,21 @@ public sealed class HookRequestHandler
         }
         catch (Exception e) when (e is not OutOfMemoryException)
         {
-            NtStatus status = e is HookIpcFormatException ? NtStatus.InvalidParameter : NtStatusMapper.FromException(e);
+            NtStatus status = e is HookIpcFormatException ? NtStatus.InvalidParameter : ToHookStatus(NtStatusMapper.FromException(e));
             return HookIpcCodec.EncodeError(reply.Span, header.MessageType, header.RequestId, (uint)status);
         }
     }
+
+    /// <summary>
+    /// The hooked process only understands standard NTSTATUS values: ProcBridge's own codes (0xE000000x, customer
+    /// bit set) are replaced by the closest standard one before they cross the IPC boundary.
+    /// </summary>
+    public static NtStatus ToHookStatus(NtStatus status) => status switch
+    {
+        NtStatus.ProtocolError => NtStatus.InvalidNetworkResponse,
+        NtStatus.FileVersionChanged or NtStatus.FrameTooLarge => NtStatus.UnexpectedNetworkError,
+        _ => ((uint)status & 0x20000000u) != 0 ? NtStatus.UnexpectedNetworkError : status,
+    };
 
     private async Task<IHookIpcMessage> DispatchAsync(HookIpcMessageType type, ReadOnlyMemory<byte> request, CancellationToken cancellationToken)
     {

@@ -30,6 +30,9 @@ public enum NtStatus : uint
     BadNetworkName = 0xC00000CC,
     NotADirectory = 0xC0000103,
     Cancelled = 0xC0000120,
+    /// <summary>Standard status the Hook gets for a transport or protocol failure that has no closer match.</summary>
+    InvalidNetworkResponse = 0xC00000C3,
+    UnexpectedNetworkError = 0xC00000C4,
     NetworkUnreachable = 0xC000023C,
 
     /// <summary>The file on machine B changed between two chunks of one download.</summary>
