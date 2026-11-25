@@ -22,6 +22,21 @@ public sealed record BrokerOptions
     /// <summary>How long stat and list results are reused before asking machine B again (plan section 10).</summary>
     public TimeSpan MetadataTtl { get; init; } = TimeSpan.FromSeconds(2);
 
+    /// <summary>Subscribe to change notifications of the Agent (M7) and invalidate the cache by them instead of by TTL.</summary>
+    public bool WatchChanges { get; init; } = true;
+
+    /// <summary>Safety lifetime of metadata while the change watcher is active.</summary>
+    public TimeSpan WatchedMetadataTtl { get; init; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>Delay before the change watcher reconnects after losing its connection.</summary>
+    public TimeSpan WatchReconnectDelay { get; init; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>Load the metadata of every mapped folder with one tree walk when the session starts (plan section 11).</summary>
+    public bool PreloadTree { get; init; } = true;
+
+    /// <summary>Depth of the start-up tree walk; 0 lets the Agent choose.</summary>
+    public int PreloadTreeDepth { get; init; }
+
     public TransportOptions Transport { get; init; } = new();
 
     public string GetCacheRoot() => CacheRoot ?? Path.Combine(

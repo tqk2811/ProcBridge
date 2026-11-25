@@ -13,12 +13,15 @@ namespace ProcBridge.Broker;
 public sealed class AgentClient : IAsyncDisposable
 {
     private readonly TransportOptions _options;
+    private readonly IConnectionFactory _factory;
+    private readonly HelloRequest _hello;
 
     public AgentClient(IConnectionFactory factory, string shareName, TransportOptions options, string clientName = "ProcBridge.Broker")
     {
         _options = options;
-        var hello = new HelloRequest { ProtocolVersion = ProtocolInfo.Version, ClientName = clientName, ShareName = shareName };
-        Pool = new ConnectionPool(factory, hello, options);
+        _factory = factory;
+        _hello = new HelloRequest { ProtocolVersion = ProtocolInfo.Version, ClientName = clientName, ShareName = shareName };
+        Pool = new ConnectionPool(factory, _hello, options);
     }
 
     /// <summary>Connection pool, exposed for diagnostics (request spread, reconnect count).</summary>
@@ -44,6 +47,32 @@ public sealed class AgentClient : IAsyncDisposable
                 return entries;
         }
     }
+
+    /// <summary>
+    /// Walks the subtree at <paramref name="remotePath"/> with <see cref="MessageType.FsTree"/> and hands each page to
+    /// <paramref name="onPage"/> as it arrives. The walk state lives on one connection on the Agent, so the walk runs on
+    /// a connection of its own (not the pool) that is closed afterwards.
+    /// </summary>
+    /// <param name="maxDepth">Levels to list; 0 lets the Agent choose.</param>
+    /// <returns>True when the Agent stopped at its entry limit (<see cref="FsTreeResponse.Truncated"/>).</returns>
+    public async Task<bool> WalkTreeAsync(string remotePath, int maxDepth, Action<FsTreeResponse> onPage, CancellationToken cancellationToken)
+    {
+        await using ProtocolConnection connection = await ProtocolConnection.OpenAsync(_factory, _hello, _options, cancellationToken).ConfigureAwait(false);
+        ulong cursor = 0;
+        while (true)
+        {
+            var request = new FsTreeRequest { Path = remotePath, MaxDepth = maxDepth, Cursor = cursor };
+            Frame frame = await connection.SendAsync(MessageType.FsTree, ProtocolSerializer.Serialize(request), default, cancellationToken).ConfigureAwait(false);
+            FsTreeResponse page = ProtocolSerializer.Deserialize<FsTreeResponse>(frame.Header);
+            onPage(page);
+            if (page.Cursor == 0)
+                return page.Truncated;
+            cursor = page.Cursor;
+        }
+    }
+
+    /// <summary>New, not yet started watcher on a dedicated connection to the same Agent and share. The caller owns it.</summary>
+    public ChangeWatcher CreateWatcher(TimeSpan reconnectDelay) => new(_factory, _hello, _options, reconnectDelay);
 
     /// <summary>
     /// Downloads the whole file into a new file at <paramref name="destinationPath"/>. Every chunk is checked

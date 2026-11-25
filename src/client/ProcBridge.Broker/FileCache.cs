@@ -7,7 +7,8 @@ using ProcBridge.Protocol.Models;
 namespace ProcBridge.Broker;
 
 /// <summary>
-/// Local cache of one share (plan 4.4 and 10). Stat and list results live for a short TTL; file contents are
+/// Local cache of one share (plan 4.4 and 10). Stat and list results live for a short TTL, or until a change
+/// notification invalidates them while a <see cref="ChangeWatcher"/> is attached and active; file contents are
 /// downloaded whole, get machine B's times and attributes, and are reused while the remote version
 /// (last write time + size) stays the same. Concurrent requests for the same file share one download.
 /// Does not own the <see cref="AgentClient"/>.
@@ -22,18 +23,26 @@ public sealed class FileCache
 
     private readonly AgentClient _client;
     private readonly string _cacheRoot;
-    private readonly long _ttlMilliseconds;
+    private readonly FileCacheOptions _options;
     private readonly ConcurrentDictionary<string, Timed<FsEntry>> _stats = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, Timed<IReadOnlyList<FsEntry>>> _lists = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, FsVersion> _versions = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, Lazy<Task<CachedItem>>> _downloads = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, Lazy<Task<FsEntry>>> _pendingStats = new(StringComparer.OrdinalIgnoreCase);
+    // Bumped by every invalidation; a fetch that started under an older value may hold stale data and gets the short TTL.
+    private long _epoch;
+    private volatile bool _watchActive;
 
     public FileCache(AgentClient client, string cacheRoot, TimeSpan metadataTtl)
+        : this(client, cacheRoot, new FileCacheOptions { MetadataTtl = metadataTtl })
+    {
+    }
+
+    public FileCache(AgentClient client, string cacheRoot, FileCacheOptions options)
     {
         _client = client;
         _cacheRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(cacheRoot));
-        _ttlMilliseconds = (long)metadataTtl.TotalMilliseconds;
+        _options = options;
         Directory.CreateDirectory(_cacheRoot);
         DeleteLeftoverTempFiles();
     }
@@ -69,8 +78,9 @@ public sealed class FileCache
     private async Task<FsEntry> FetchStatAsync(string remotePath)
     {
         await Task.Yield();
+        long epoch = Volatile.Read(ref _epoch);
         FsEntry entry = await _client.StatAsync(remotePath, CancellationToken.None).ConfigureAwait(false);
-        _stats[remotePath] = new Timed<FsEntry>(entry, Environment.TickCount64 + _ttlMilliseconds);
+        _stats[remotePath] = new Timed<FsEntry>(entry, ExpiryFor(epoch));
         return entry;
     }
 
@@ -78,14 +88,145 @@ public sealed class FileCache
     {
         if (_lists.TryGetValue(remotePath, out Timed<IReadOnlyList<FsEntry>>? cached) && !cached.IsExpired)
             return cached.Value;
+        long epoch = Volatile.Read(ref _epoch);
         IReadOnlyList<FsEntry> entries = await _client.ListAsync(remotePath, cancellationToken).ConfigureAwait(false);
-        long expires = Environment.TickCount64 + _ttlMilliseconds;
+        long expires = ExpiryFor(epoch);
         _lists[remotePath] = new Timed<IReadOnlyList<FsEntry>>(entries, expires);
         // A listing also refreshes the children's metadata, saving one stat per file for build tools.
         string prefix = remotePath.Length == 0 ? string.Empty : remotePath + "/";
         foreach (FsEntry entry in entries)
             _stats[prefix + entry.Name] = new Timed<FsEntry>(entry, expires);
         return entries;
+    }
+
+    /// <summary>True while a change watcher is subscribed: metadata then lives until a notification invalidates it.</summary>
+    public bool IsWatchActive => _watchActive;
+
+    /// <summary>
+    /// Raised after the cache applied a change notification. A notification with
+    /// <see cref="FsChangeNotification.Rescan"/> is also raised when the watcher connects or disconnects, since changes
+    /// may have been missed in between.
+    /// </summary>
+    public event Action<FsChangeNotification>? RemoteChanged;
+
+    /// <summary>
+    /// Lets <paramref name="watcher"/> drive invalidation. Call before starting the watcher. Does not take ownership.
+    /// </summary>
+    public void AttachWatcher(ChangeWatcher watcher)
+    {
+        watcher.StateChanged += OnWatchStateChanged;
+        watcher.Changed += OnRemoteChanged;
+    }
+
+    private void OnWatchStateChanged(bool active)
+    {
+        // Either way changes may have been missed: before the subscription, or from now on.
+        _watchActive = active;
+        ClearMetadata();
+        RemoteChanged?.Invoke(new FsChangeNotification { Changes = [], Rescan = true });
+    }
+
+    private void OnRemoteChanged(FsChangeNotification notification)
+    {
+        if (notification.Rescan)
+        {
+            ClearMetadata();
+        }
+        else
+        {
+            foreach (FsChange change in notification.Changes)
+                Invalidate(change);
+        }
+        RemoteChanged?.Invoke(notification);
+    }
+
+    /// <summary>Forgets every stat and listing (contents stay: they are checked by version before reuse).</summary>
+    public void ClearMetadata()
+    {
+        Interlocked.Increment(ref _epoch);
+        _stats.Clear();
+        _lists.Clear();
+    }
+
+    /// <summary>Drops what <paramref name="change"/> makes stale: the path, its parent's listing and, when it went away, its subtree.</summary>
+    private void Invalidate(FsChange change)
+    {
+        Interlocked.Increment(ref _epoch);
+        string path = change.Path;
+        string parent = GetParent(path);
+        _stats.TryRemove(path, out _);
+        _lists.TryRemove(path, out _);
+        _lists.TryRemove(parent, out _);
+        // The parent's write time changes with its children.
+        _stats.TryRemove(parent, out _);
+        if (change.Action is FsChangeAction.Removed or FsChangeAction.RenamedOldName or FsChangeAction.RenamedNewName or FsChangeAction.Added)
+        {
+            // A directory that vanished (or appeared in place of something) takes its cached subtree with it.
+            string prefix = path + "/";
+            RemoveByPrefix(_stats, prefix);
+            RemoveByPrefix(_lists, prefix);
+        }
+        if (change.Action is FsChangeAction.Removed or FsChangeAction.RenamedOldName)
+        {
+            _versions.TryRemove(path, out _);
+            RemoveByPrefix(_versions, path + "/");
+        }
+    }
+
+    private static void RemoveByPrefix<T>(ConcurrentDictionary<string, T> map, string prefix)
+    {
+        foreach (string key in map.Keys)
+        {
+            if (key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                map.TryRemove(key, out _);
+        }
+    }
+
+    private static string GetParent(string path)
+    {
+        int slash = path.LastIndexOf('/');
+        return slash < 0 ? string.Empty : path[..slash];
+    }
+
+    /// <summary>Expiry for metadata fetched when the epoch was <paramref name="epochAtStart"/>.</summary>
+    private long ExpiryFor(long epochAtStart)
+    {
+        bool trusted = _watchActive && Volatile.Read(ref _epoch) == epochAtStart;
+        return Environment.TickCount64 + (long)(trusted ? _options.WatchedMetadataTtl : _options.MetadataTtl).TotalMilliseconds;
+    }
+
+    /// <summary>
+    /// Loads the stats and listings of the whole subtree at <paramref name="remotePath"/> with one tree walk
+    /// (plan section 11), so a build that touches thousands of files needs no round trip per directory.
+    /// Directories past the depth or the Agent's entry limit are left to on-demand listing.
+    /// </summary>
+    /// <returns>Number of entries loaded.</returns>
+    public async Task<int> PreloadTreeAsync(string remotePath, int maxDepth, CancellationToken cancellationToken)
+    {
+        long epoch = Volatile.Read(ref _epoch);
+        var partial = new Dictionary<string, List<FsEntry>>(StringComparer.OrdinalIgnoreCase);
+        int count = 0;
+        await _client.WalkTreeAsync(remotePath, maxDepth, page =>
+        {
+            long expires = ExpiryFor(epoch);
+            foreach (FsTreeDirectory directory in page.Directories)
+            {
+                string prefix = directory.Path.Length == 0 ? string.Empty : directory.Path + "/";
+                foreach (FsEntry entry in directory.Entries)
+                    _stats[prefix + entry.Name] = new Timed<FsEntry>(entry, expires);
+                count += directory.Entries.Length;
+
+                if (!partial.TryGetValue(directory.Path, out List<FsEntry>? list))
+                    partial[directory.Path] = list = [];
+                list.AddRange(directory.Entries);
+                if (directory.Complete)
+                {
+                    _lists[directory.Path] = new Timed<IReadOnlyList<FsEntry>>(list.ToArray(), expires);
+                    partial.Remove(directory.Path);
+                }
+            }
+        }, cancellationToken).ConfigureAwait(false);
+        return count;
     }
 
     /// <summary>Makes sure <paramref name="remotePath"/> is in the cache with the current remote version.</summary>
