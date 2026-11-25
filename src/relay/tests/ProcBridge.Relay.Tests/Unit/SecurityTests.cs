@@ -17,6 +17,15 @@ public sealed class SecurityTests
     }
 
     [TestMethod]
+    public void HashGiảCóCùngChiPhíVàKhôngKhớpMậtKhẩuNào()
+    {
+        var hasher = new PasswordHasher(1000);
+        StringAssert.StartsWith(hasher.DummyHash, "pbkdf2-sha256$1000$");
+        Assert.HasCount(4, hasher.DummyHash.Split('$'));
+        Assert.IsFalse(hasher.Verify("mat-khau-1", hasher.DummyHash));
+    }
+
+    [TestMethod]
     public void TokenCóTiềnTốNgẫuNhiênVàBămỔnĐịnh()
     {
         var a = SecretTokens.Create("pbd_");

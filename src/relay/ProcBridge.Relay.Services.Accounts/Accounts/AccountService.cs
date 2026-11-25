@@ -64,7 +64,10 @@ public sealed class AccountService : IAccountService
     public async Task<LoginResultVM> LoginAsync(LoginRequestVM request, CancellationToken cancellationToken = default)
     {
         var account = await _accounts.GetByUserNameAsync(NormalizeUserName(request.UserName ?? string.Empty), cancellationToken);
-        if (account is null || request.Password is null || !_passwordHasher.Verify(request.Password, account.PasswordHash))
+        // Verify even when the user does not exist (against a dummy hash of the same cost): the time must not tell
+        // an unknown user name from a wrong password.
+        var passwordOk = _passwordHasher.Verify(request.Password ?? string.Empty, account?.PasswordHash ?? _passwordHasher.DummyHash);
+        if (account is null || request.Password is null || !passwordOk)
             throw ServiceException.Unauthorized(RelayErrors.InvalidCredentials, "Sai tên đăng nhập hoặc mật khẩu.");
 
         var token = SecretTokens.Create(RelayAuth.SessionTokenPrefix);

@@ -8,19 +8,30 @@ namespace ProcBridge.Relay.Services.Common.Security;
 /// PBKDF2-SHA256 password hashing. Stored format: <c>pbkdf2-sha256$&lt;iterations&gt;$&lt;salt b64&gt;$&lt;hash b64&gt;</c>,
 /// so the iteration count can be raised later without breaking old hashes.
 /// </summary>
-public sealed class PasswordHasher
+public class PasswordHasher
 {
     private const string Algorithm = "pbkdf2-sha256";
     private const int SaltSize = 16;
     private const int HashSize = 32;
     private readonly int _iterations;
+    private readonly Lazy<string> _dummyHash;
 
     public PasswordHasher() : this(210_000)
     {
     }
 
     /// <param name="iterations">Lower only in tests.</param>
-    public PasswordHasher(int iterations) => _iterations = iterations;
+    public PasswordHasher(int iterations)
+    {
+        _iterations = iterations;
+        _dummyHash = new Lazy<string>(() => Hash(Convert.ToBase64String(RandomNumberGenerator.GetBytes(24))));
+    }
+
+    /// <summary>
+    /// A valid hash of a random password nobody knows, with this hasher's cost. Verifying against it for an unknown
+    /// user makes sign-in take as long as for a known one, so response time does not reveal which user names exist.
+    /// </summary>
+    public string DummyHash => _dummyHash.Value;
 
     public string Hash(string password)
     {
@@ -29,7 +40,7 @@ public sealed class PasswordHasher
         return string.Join('$', Algorithm, _iterations.ToString(CultureInfo.InvariantCulture), Convert.ToBase64String(salt), Convert.ToBase64String(hash));
     }
 
-    public bool Verify(string password, string stored)
+    public virtual bool Verify(string password, string stored)
     {
         var parts = stored.Split('$');
         if (parts.Length != 4 || parts[0] != Algorithm || !int.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out var iterations))
