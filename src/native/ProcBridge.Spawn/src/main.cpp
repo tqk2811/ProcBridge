@@ -5,7 +5,7 @@
 //
 // Usage:
 //   ProcBridge.Spawn.<arch>.exe [--hook <dll>] --map <virtual dir> <real dir> [--map ...] -- <command line>
-// Everything after the first " -- " of the raw command line is passed to CreateProcessW verbatim.
+// Everything after the "--" argument of the raw command line is passed to CreateProcessW verbatim.
 #include <windows.h>
 #include <ProcBridge/Inject.h>
 #include <cstdio>
@@ -67,6 +67,72 @@ namespace
             && fullPath.find_first_not_of(L'\\', 3) != std::wstring::npos;
     }
 
+    bool IsBlank(wchar_t c) noexcept
+    {
+        return c == L' ' || c == L'\t';
+    }
+
+    /// Position just after argument argIndex (0 = program name) of a raw command line, split with the
+    /// UCRT rules that produced wmain's argv (quotes, backslashes before quotes, "" inside quotes).
+    /// npos when the line has fewer arguments.
+    size_t FindArgumentEnd(const std::wstring& line, int argIndex)
+    {
+        size_t p = 0;
+        const size_t end = line.size();
+        // Program name: quotes toggle, no escapes.
+        bool inQuotes = false;
+        while (p < end && (inQuotes || !IsBlank(line[p])))
+        {
+            if (line[p] == L'"')
+            {
+                inQuotes = !inQuotes;
+            }
+            ++p;
+        }
+        for (int index = 1; index <= argIndex; ++index)
+        {
+            while (p < end && IsBlank(line[p]))
+            {
+                ++p;
+            }
+            if (p == end)
+            {
+                return std::wstring::npos;
+            }
+            inQuotes = false;
+            while (p < end)
+            {
+                size_t backslashes = 0;
+                while (p < end && line[p] == L'\\')
+                {
+                    ++backslashes;
+                    ++p;
+                }
+                if (p == end)
+                {
+                    break;
+                }
+                if (line[p] == L'"' && backslashes % 2 == 0)
+                {
+                    if (inQuotes && p + 1 < end && line[p + 1] == L'"')
+                    {
+                        ++p; // "" inside quotes: literal quote
+                    }
+                    else
+                    {
+                        inQuotes = !inQuotes;
+                    }
+                }
+                else if (!inQuotes && IsBlank(line[p]))
+                {
+                    break;
+                }
+                ++p;
+            }
+        }
+        return p;
+    }
+
     int Usage()
     {
         std::fwprintf(stderr,
@@ -113,13 +179,13 @@ int wmain(int argc, wchar_t** argv)
 {
     std::wstring hookPath;
     std::vector<Mapping> mappings;
-    bool sawSeparator = false;
+    int separatorIndex = 0;
     for (int i = 1; i < argc; ++i)
     {
         const std::wstring arg = argv[i];
         if (arg == L"--")
         {
-            sawSeparator = true;
+            separatorIndex = i;
             break;
         }
         if (arg == L"--hook" && i + 1 < argc)
@@ -137,13 +203,19 @@ int wmain(int argc, wchar_t** argv)
         }
     }
 
+    // Cut the raw line right after the "--" token (not at the first " -- " substring, which may sit
+    // inside a quoted --map path), so the target's command line keeps its own quoting.
     const std::wstring rawCommandLine = GetCommandLineW();
-    const size_t separator = rawCommandLine.find(L" -- ");
-    if (!sawSeparator || mappings.empty() || separator == std::wstring::npos)
+    size_t commandStart = separatorIndex == 0 ? std::wstring::npos : FindArgumentEnd(rawCommandLine, separatorIndex);
+    if (mappings.empty() || commandStart == std::wstring::npos)
     {
         return Usage();
     }
-    const std::wstring commandLine = rawCommandLine.substr(separator + 4);
+    while (commandStart < rawCommandLine.size() && IsBlank(rawCommandLine[commandStart]))
+    {
+        ++commandStart;
+    }
+    const std::wstring commandLine = rawCommandLine.substr(commandStart);
     if (commandLine.empty())
     {
         return Usage();

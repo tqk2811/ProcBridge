@@ -29,6 +29,21 @@ public sealed class SpawnTests
     [TestMethod]
     [DataRow("x64")]
     [DataRow("Win32")]
+    public void SeparatorInsideQuotedMapPath_IsNotTheSeparator(string platform)
+    {
+        using HookSandbox sandbox = new(platform);
+        string virtualRoot = Path.Combine(sandbox.BaseDirectory, "v -- x");
+
+        ProcessResult result = sandbox.RunSpawn(
+            $"--map \"{virtualRoot}\" \"{sandbox.RealRoot}\" -- cmd.exe /d /c type \"{virtualRoot}\\a.txt\"");
+
+        Assert.AreEqual(0, result.ExitCode, result.StandardError);
+        Assert.AreEqual(HookSandbox.FileAContent, result.StandardOutput);
+    }
+
+    [TestMethod]
+    [DataRow("x64")]
+    [DataRow("Win32")]
     public void UncMapping_IsRefused(string platform)
     {
         using HookSandbox sandbox = new(platform);
