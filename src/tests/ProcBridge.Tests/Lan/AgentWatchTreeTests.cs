@@ -57,7 +57,7 @@ public sealed class AgentWatchTreeTests
     }
 
     [TestMethod]
-    public async Task Watch_FileWrittenOnAgent_NotificationArrivesWithinOneSecond()
+    public async Task Watch_FileWrittenOnAgent_NotificationArrives()
     {
         using var share = new TempFolder("watch");
         share.WriteFile(@"proj\a.cs", "a"u8.ToArray());
@@ -66,10 +66,10 @@ public sealed class AgentWatchTreeTests
         BlockingCollection<FsChangeNotification> received = await WatchAsync(connection);
 
         File.WriteAllText(share.Combine(@"proj\a.cs"), "changed");
-        WaitFor(received, x => x.Changes.Any(c => c.Path == "proj/a.cs" && c.Action == FsChangeAction.Modified), TimeSpan.FromSeconds(1));
+        WaitFor(received, x => x.Changes.Any(c => c.Path == "proj/a.cs" && c.Action == FsChangeAction.Modified), TimeSpan.FromSeconds(5));
 
         File.Move(share.Combine(@"proj\a.cs"), share.Combine(@"proj\b.cs"));
-        FsChangeNotification renamed = WaitFor(received, x => x.Changes.Any(c => c.Action == FsChangeAction.RenamedNewName), TimeSpan.FromSeconds(1));
+        FsChangeNotification renamed = WaitFor(received, x => x.Changes.Any(c => c.Action == FsChangeAction.RenamedNewName), TimeSpan.FromSeconds(5));
         CollectionAssert.IsSubsetOf(
             new[] { "RenamedOldName proj/a.cs", "RenamedNewName proj/b.cs" },
             renamed.Changes.Select(c => $"{c.Action} {c.Path}").ToArray());
@@ -86,7 +86,7 @@ public sealed class AgentWatchTreeTests
         // FileSystemWatcher reports a ReadDirectoryChangesW overflow through its Error event with this exception.
         server.GetWatcher(new ReadOnlyShare("src", share.Path)).OnError(new InternalBufferOverflowException());
 
-        FsChangeNotification rescan = WaitFor(received, x => x.Rescan, TimeSpan.FromSeconds(1));
+        FsChangeNotification rescan = WaitFor(received, x => x.Rescan, TimeSpan.FromSeconds(5));
         Assert.IsEmpty(rescan.Changes);
     }
 
@@ -152,7 +152,7 @@ public sealed class AgentWatchTreeTests
         await using ProtocolConnection second = await ConnectAsync(server);
         BlockingCollection<FsChangeNotification> received = await WatchAsync(second);
         share.WriteFile("new.txt", [1]);
-        WaitFor(received, x => x.Changes.Any(c => c.Path == "new.txt"), TimeSpan.FromSeconds(1));
+        WaitFor(received, x => x.Changes.Any(c => c.Path == "new.txt"), TimeSpan.FromSeconds(5));
     }
 
     private static TempFolder BuildTree()

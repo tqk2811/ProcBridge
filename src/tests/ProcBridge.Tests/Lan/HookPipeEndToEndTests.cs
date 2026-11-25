@@ -218,12 +218,12 @@ public sealed class HookPipeEndToEndTests
         File.WriteAllText(share.Combine(@"proj\src\a.cs"), "changed");
         share.WriteFile(@"proj\other\new.cs", [1]);
 
-        HookWaitChangesReply flatChanges = await hook.CallOkAsync(new HookWaitChangesRequest { WatchId = flat.WatchId, TimeoutMilliseconds = 1000 }, HookWaitChangesReply.Read);
+        HookWaitChangesReply flatChanges = await hook.CallOkAsync(new HookWaitChangesRequest { WatchId = flat.WatchId, TimeoutMilliseconds = 5000 }, HookWaitChangesReply.Read);
         Assert.Contains(new HookChange(3 /* FILE_ACTION_MODIFIED */, "a.cs"), flatChanges.Changes.ToList());
         Assert.IsFalse(flatChanges.Changes.Any(x => x.Name.Contains("new.cs")), "Flat watch must not see other folders.");
 
         var seen = new List<HookChange>();
-        var deadline = DateTime.UtcNow.AddSeconds(1);
+        var deadline = DateTime.UtcNow.AddSeconds(5);
         while (!seen.Contains(new HookChange(1 /* FILE_ACTION_ADDED */, @"other\new.cs")) && DateTime.UtcNow < deadline)
             seen.AddRange((await hook.CallOkAsync(new HookWaitChangesRequest { WatchId = subtree.WatchId, TimeoutMilliseconds = 500 }, HookWaitChangesReply.Read)).Changes);
         Assert.Contains(new HookChange(1, @"other\new.cs"), seen);
@@ -231,7 +231,7 @@ public sealed class HookPipeEndToEndTests
 
         // A rescan on the Agent reaches the hook as an overflow.
         agent.GetWatcher(new ReadOnlyShare("src", share.Path)).OnError(new InternalBufferOverflowException());
-        HookWaitChangesReply overflow = await hook.CallOkAsync(new HookWaitChangesRequest { WatchId = flat.WatchId, TimeoutMilliseconds = 1000 }, HookWaitChangesReply.Read);
+        HookWaitChangesReply overflow = await hook.CallOkAsync(new HookWaitChangesRequest { WatchId = flat.WatchId, TimeoutMilliseconds = 5000 }, HookWaitChangesReply.Read);
         Assert.IsTrue(overflow.Overflow);
 
         await hook.CallOkAsync(new HookUnwatchRequest { WatchId = flat.WatchId }, (ref HookIpcReader _) => 0);

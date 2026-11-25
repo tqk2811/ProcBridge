@@ -45,7 +45,7 @@ public sealed class ReadAheadTests
         using var cacheDir = new TempFolder("cache");
         await using AgentServer server = StartAgent(share);
         await using AgentClient client = CreateClient(server.Port);
-        var cache = new FileCache(client, cacheDir.Path, new FileCacheOptions { ReadAheadMaxFileSize = Threshold, ReadAheadMaxFiles = 100 });
+        var cache = new FileCache(client, cacheDir.Path, new FileCacheOptions { ReadAheadMaxFileSize = Threshold, ReadAheadMaxFiles = 100, MetadataTtl = TimeSpan.FromMinutes(5) });
 
         await cache.EnsureAsync("dir/small0.cs", CancellationToken.None);
         await cache.WaitForReadAheadAsync().WaitAsync(TimeSpan.FromSeconds(10));
