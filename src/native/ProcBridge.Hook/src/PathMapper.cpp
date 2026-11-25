@@ -165,6 +165,7 @@ namespace ProcBridge::Hook
             // Virtual drive letter does not exist (e.g. V:\): keep the real volume device so that
             // GetFinalPathNameByHandle still resolves. Known gap, see docs/Backlog-vi.md.
             BuildDevicePath(mapping.RealNt, mapping.VirtualVolumeRelative, mapping.VirtualDevicePath);
+            mapping.VirtualDriveMissing = true;
         }
         ++_count;
         return ERROR_SUCCESS;

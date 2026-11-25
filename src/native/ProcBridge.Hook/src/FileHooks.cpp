@@ -19,11 +19,13 @@
 // Broker (DirectoryWatches); closing or cancelling (NtCancelIoFile[Ex], NtCancelSynchronousIoFile) ends them.
 #include "FileHooks.h"
 #include "CallerMemory.h"
+#include "DirectoryEntries.h"
 #include "DirectoryNameCache.h"
 #include "DirectoryWatches.h"
 #include "HandleInheritance.h"
 #include "HandleTable.h"
 #include "HookGuard.h"
+#include "ParentScans.h"
 #include "PathString.h"
 #include "RemoteHandles.h"
 #include <MinHook.h>
@@ -47,6 +49,7 @@ namespace ProcBridge::Hook
         DirectoryNameCache g_directoryNames;
         RemoteHandleTable g_remoteHandles;
         DirectoryWatches g_watches;
+        ParentScans g_parentScans;
 
         using NtQueryDirectoryFileFn = NTSTATUS(NTAPI*)(HANDLE, HANDLE, PIO_APC_ROUTINE, PVOID, PIO_STATUS_BLOCK, PVOID, ULONG,
             ULONG, BOOLEAN, PUNICODE_STRING, BOOLEAN);
@@ -86,6 +89,35 @@ namespace ProcBridge::Hook
         NtUnlockFileFn g_ntUnlockFile = nullptr;
         // M8: set once a ranged cache copy was opened (or inherited); until then reads and mappings skip the table.
         std::atomic<bool> g_anyRange{ false };
+
+        /// Calls visitor(const UNICODE_STRING& name) with the NT device name of a real directory handle
+        /// (\Device\HarddiskVolume3\dir, no trailing '\'; empty when it cannot be read), cached per handle.
+        template <typename Visitor>
+        void VisitDirectoryName(HANDLE directory, Visitor&& visitor) noexcept
+        {
+            if (g_directoryNames.Visit(directory, visitor))
+            {
+                return;
+            }
+            const size_t bufferBytes = sizeof(ObjectNameInfo) + MaxNameBytes;
+            HeapBuffer buffer(bufferBytes);
+            UNICODE_STRING name{};
+            if (buffer)
+            {
+                const auto* info = reinterpret_cast<const ObjectNameInfo*>(buffer.Get());
+                const NTSTATUS status = g_ntQueryObject(directory, ObjectNameInformation, buffer.Get(), static_cast<ULONG>(bufferBytes), nullptr);
+                if (NT_SUCCESS(status) && info->Name.Buffer != nullptr)
+                {
+                    name = info->Name;
+                    while (name.Length > 0 && name.Buffer[name.Length / sizeof(wchar_t) - 1] == L'\\')
+                    {
+                        name.Length -= sizeof(wchar_t);
+                    }
+                }
+                g_directoryNames.Add(directory, name.Buffer, name.Length);
+            }
+            visitor(static_cast<const UNICODE_STRING&>(name));
+        }
 
         /// Resolves OBJECT_ATTRIBUTES against the virtual roots and owns the rewritten name.
         /// The caller's structures are read once into a snapshot (SEH-guarded); an unreadable pointer
@@ -288,33 +320,13 @@ namespace ProcBridge::Hook
             /// with the relative name and translate when the result lies inside a virtual root.
             void ResolveBelowRealDirectory(HANDLE root, const UNICODE_STRING& relative) noexcept
             {
-                const bool cached = g_directoryNames.Visit(root, [&](const UNICODE_STRING& rootName)
+                VisitDirectoryName(root, [&](const UNICODE_STRING& rootName)
                     {
-                        ResolveJoined(rootName, relative);
+                        if (rootName.Length > 0)
+                        {
+                            ResolveJoined(rootName, relative);
+                        }
                     });
-                if (cached)
-                {
-                    return;
-                }
-                const size_t bufferBytes = sizeof(ObjectNameInfo) + MaxNameBytes;
-                HeapBuffer buffer(bufferBytes);
-                if (!buffer)
-                {
-                    return;
-                }
-                const auto* info = reinterpret_cast<const ObjectNameInfo*>(buffer.Get());
-                const NTSTATUS status = g_ntQueryObject(root, ObjectNameInformation, buffer.Get(), static_cast<ULONG>(bufferBytes), nullptr);
-                UNICODE_STRING rootName{};
-                if (NT_SUCCESS(status) && info->Name.Buffer != nullptr)
-                {
-                    rootName = info->Name;
-                    while (rootName.Length > 0 && rootName.Buffer[rootName.Length / sizeof(wchar_t) - 1] == L'\\')
-                    {
-                        rootName.Length -= sizeof(wchar_t);
-                    }
-                }
-                g_directoryNames.Add(root, rootName.Buffer, rootName.Length);
-                ResolveJoined(rootName, relative);
             }
 
             void ResolveJoined(const UNICODE_STRING& rootName, const UNICODE_STRING& relative) noexcept
@@ -428,6 +440,7 @@ namespace ProcBridge::Hook
                 return;
             }
             g_directoryNames.Remove(handle);
+            g_parentScans.Remove(handle);
             if (redirect.Matched())
             {
                 g_handles.Add(handle, redirect.Mapping());
@@ -1583,6 +1596,7 @@ namespace ProcBridge::Hook
                 // A cached directory name is only a cache: a stale entry for a reused value is also
                 // dropped by the next hooked open that returns it.
                 g_directoryNames.Remove(handle);
+                g_parentScans.Remove(handle);
                 if (remote)
                 {
                     RemovedRemoteHandle removed;
@@ -1708,6 +1722,245 @@ namespace ProcBridge::Hook
             return status;
         }
 
+        // ---- Virtual roots in the listing of their real parent folder ----
+
+        /// A virtual root seen from its parent folder: views into the mapping's VirtualDevicePath.
+        struct ParentRoot
+        {
+            UNICODE_STRING Parent; // \Device\HarddiskVolume3\Work
+            UNICODE_STRING Leaf;   // virtual
+        };
+        constexpr int MaxParentRoots = 32;
+        ParentRoot g_parentRoots[MaxParentRoots] = {}; // by mapping index
+        uint32_t g_parentRootMask = 0;
+
+        bool EqualPath(const UNICODE_STRING& left, const UNICODE_STRING& right) noexcept
+        {
+            if (left.Length != right.Length)
+            {
+                return false;
+            }
+            for (USHORT i = 0; i < left.Length / sizeof(wchar_t); ++i)
+            {
+                if (RtlUpcaseUnicodeChar(left.Buffer[i]) != RtlUpcaseUnicodeChar(right.Buffer[i]))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /// Virtual roots whose parent folder is a real folder on a known volume. A root nested in another virtual root
+        /// is listed by that root's own listing, a root on a missing drive letter (V:\) has no real parent.
+        void CollectParentRoots() noexcept
+        {
+            const int count = g_resolver->Count();
+            for (int i = 0; i < count && i < MaxParentRoots; ++i)
+            {
+                const PathMapping& map = g_resolver->GetMapping(i);
+                const UNICODE_STRING& path = map.VirtualDevicePath;
+                if (map.VirtualDriveMissing || path.Length == 0)
+                {
+                    continue;
+                }
+                const USHORT chars = path.Length / sizeof(wchar_t);
+                USHORT leafStart = chars;
+                while (leafStart > 0 && path.Buffer[leafStart - 1] != L'\\')
+                {
+                    --leafStart;
+                }
+                if (leafStart <= 1 || leafStart == chars)
+                {
+                    continue;
+                }
+                ParentRoot& root = g_parentRoots[i];
+                root.Parent.Buffer = path.Buffer;
+                root.Parent.Length = static_cast<USHORT>((leafStart - 1) * sizeof(wchar_t));
+                root.Parent.MaximumLength = root.Parent.Length;
+                root.Leaf.Buffer = path.Buffer + leafStart;
+                root.Leaf.Length = static_cast<USHORT>((chars - leafStart) * sizeof(wchar_t));
+                root.Leaf.MaximumLength = root.Leaf.Length;
+                if (g_resolver->FindMappingByDevicePath(root.Parent) >= 0)
+                {
+                    root = {};
+                    continue;
+                }
+                g_parentRootMask |= 1u << i;
+            }
+        }
+
+        /// Mask of the virtual roots that sit directly in the folder of a real directory handle.
+        uint32_t RootsInFolder(HANDLE directory) noexcept
+        {
+            uint32_t roots = 0;
+            VisitDirectoryName(directory, [&](const UNICODE_STRING& name)
+                {
+                    for (int i = 0; i < MaxParentRoots; ++i)
+                    {
+                        if ((g_parentRootMask & (1u << i)) != 0 && EqualPath(g_parentRoots[i].Parent, name))
+                        {
+                            roots |= 1u << i;
+                        }
+                    }
+                });
+            return roots;
+        }
+
+        /// Metadata of a virtual root for its entry in the parent listing: machine B's (Broker) or the backing folder's.
+        bool GetRootInfo(int mapping, HookIpc::FileInfo& info) noexcept
+        {
+            const PathMapping& map = g_resolver->GetMapping(mapping);
+            info = {};
+            if (g_resolver->IsRemote())
+            {
+                return NT_SUCCESS(g_resolver->Stat(mapping, map.VirtualNt, PathKind::Nt, info));
+            }
+            UNICODE_STRING name = map.RealNt;
+            OBJECT_ATTRIBUTES attributes{};
+            InitializeObjectAttributes(&attributes, &name, OBJ_CASE_INSENSITIVE, nullptr, nullptr);
+            NetworkOpenInfo open{};
+            if (!NT_SUCCESS(g_ntQueryFullAttributesFile(&attributes, &open)))
+            {
+                return false;
+            }
+            info.Attributes = open.FileAttributes;
+            info.Size = open.EndOfFile.QuadPart;
+            info.AllocationSize = open.AllocationSize.QuadPart;
+            info.CreationTime = open.CreationTime.QuadPart;
+            info.LastAccessTime = open.LastAccessTime.QuadPart;
+            info.LastWriteTime = open.LastWriteTime.QuadPart;
+            info.ChangeTime = open.ChangeTime.QuadPart;
+            return true;
+        }
+
+        /// True when the real folder already holds a file or folder with the root's name (the system listed it).
+        bool ExistsInParent(int mapping) noexcept
+        {
+            UNICODE_STRING name = g_resolver->GetMapping(mapping).VirtualDevicePath;
+            OBJECT_ATTRIBUTES attributes{};
+            InitializeObjectAttributes(&attributes, &name, OBJ_CASE_INSENSITIVE, nullptr, nullptr);
+            NetworkOpenInfo open{};
+            return NT_SUCCESS(g_ntQueryFullAttributesFile(&attributes, &open));
+        }
+
+        /// After the system answered NtQueryDirectoryFile[Ex] on a real directory handle (synchronously): a scan of the
+        /// parent folder of virtual roots gets their entries once the system's own entries are exhausted
+        /// (STATUS_NO_MORE_FILES, or STATUS_NO_SUCH_FILE for a pattern nothing real matches). status is replaced when
+        /// entries were added. A pattern given with the first query is remembered, since later queries come without one.
+        void AddVirtualRootEntries(HANDLE fileHandle, PIO_STATUS_BLOCK ioStatusBlock, PVOID information, ULONG length,
+            ULONG informationClass, bool returnSingleEntry, PUNICODE_STRING fileName, bool restartScan, NTSTATUS& status) noexcept
+        {
+            const bool exhausted = status == STATUS_NO_MORE_FILES || status == STATUS_NO_SUCH_FILE;
+            const bool startsScan = fileName != nullptr || restartScan;
+            if (g_parentRootMask == 0 || (!exhausted && !startsScan) || status == STATUS_PENDING)
+            {
+                return;
+            }
+            if (startsScan)
+            {
+                const uint32_t roots = RootsInFolder(fileHandle);
+                if (roots == 0)
+                {
+                    g_parentScans.Remove(fileHandle);
+                    return;
+                }
+                UNICODE_STRING pattern{};
+                HeapBuffer patternText(fileName != nullptr ? MaxUnicodeStringBytes : 1);
+                if (fileName != nullptr)
+                {
+                    if (!patternText || !SafeCopy(&pattern, fileName, sizeof(pattern)) || pattern.Length > MaxUnicodeStringBytes
+                        || (pattern.Length > 0 && !SafeCopy(patternText.Get(), pattern.Buffer, pattern.Length)))
+                    {
+                        return;
+                    }
+                    pattern.Buffer = reinterpret_cast<PWSTR>(patternText.Get());
+                    pattern.MaximumLength = pattern.Length;
+                }
+                g_parentScans.Start(fileHandle, roots, fileName != nullptr ? &pattern : nullptr);
+            }
+            if (!exhausted)
+            {
+                return;
+            }
+            uint32_t pending = 0;
+            UNICODE_STRING pattern{};
+            if (!g_parentScans.Get(fileHandle, pending, pattern))
+            {
+                // A scan started without a pattern (.NET passes none): any name matches.
+                const uint32_t roots = startsScan ? 0 : RootsInFolder(fileHandle);
+                if (roots == 0)
+                {
+                    return;
+                }
+                g_parentScans.Start(fileHandle, roots, nullptr);
+                pending = roots;
+            }
+            const DirectoryEntryFormat format(informationClass);
+            constexpr ULONG MaxScratch = 64 * 1024;
+            const ULONG scratchBytes = length < MaxScratch ? length : MaxScratch;
+            HeapBuffer scratch(scratchBytes > 0 ? scratchBytes : 1);
+            if (!format.IsSupported() || !scratch || scratchBytes < format.NameOffset())
+            {
+                FreeString(pattern);
+                return;
+            }
+            ULONG written = 0;
+            ULONG previous = 0;
+            bool any = false;
+            uint32_t listed = 0;
+            for (int i = 0; i < MaxParentRoots; ++i)
+            {
+                if ((pending & (1u << i)) == 0)
+                {
+                    continue;
+                }
+                UNICODE_STRING leaf = g_parentRoots[i].Leaf;
+                HookIpc::FileInfo info{};
+                if ((pattern.Length > 0 && !RtlIsNameInExpression(&pattern, &leaf, TRUE, nullptr)) || ExistsInParent(i)
+                    || !GetRootInfo(i, info))
+                {
+                    listed |= 1u << i; // not part of this scan
+                    continue;
+                }
+                const ULONG start = AlignDirectoryEntry(written);
+                if (static_cast<ULONGLONG>(start) + format.NameOffset() + leaf.Length > scratchBytes)
+                {
+                    if (!any)
+                    {
+                        status = STATUS_BUFFER_OVERFLOW;
+                        SafeSetIoStatus(ioStatusBlock, status, 0);
+                    }
+                    break;
+                }
+                format.Write(scratch.Get() + start, info, leaf.Buffer, leaf.Length);
+                if (any)
+                {
+                    const ULONG next = start - previous;
+                    memcpy(scratch.Get() + previous, &next, sizeof(next));
+                }
+                any = true;
+                previous = start;
+                written = start + format.NameOffset() + leaf.Length;
+                listed |= 1u << i;
+                if (returnSingleEntry)
+                {
+                    break;
+                }
+            }
+            FreeString(pattern);
+            g_parentScans.MarkListed(fileHandle, listed);
+            if (!any)
+            {
+                return;
+            }
+            if (!SafeCopy(information, scratch.Get(), written) || !SafeSetIoStatus(ioStatusBlock, STATUS_SUCCESS, written))
+            {
+                status = STATUS_ACCESS_VIOLATION;
+                return;
+            }
+            status = STATUS_SUCCESS;
+        }
+
         bool IsCurrentProcess(HANDLE process) noexcept
         {
             return process == GetCurrentProcess() || (process != nullptr && GetProcessId(process) == GetCurrentProcessId());
@@ -1749,6 +2002,7 @@ namespace ProcBridge::Hook
                     g_handles.Remove(sourceHandle, generation);
                 }
                 g_directoryNames.Remove(sourceHandle);
+                g_parentScans.Remove(sourceHandle);
                 g_remoteHandles.Remove(sourceHandle);
                 g_watches.Closed(sourceHandle);
             }
@@ -1757,6 +2011,7 @@ namespace ProcBridge::Hook
                 && IsCurrentProcess(targetProcess))
             {
                 g_directoryNames.Remove(copy);
+                g_parentScans.Remove(copy);
                 if (mapping >= 0)
                 {
                     g_handles.Add(copy, mapping);
@@ -1784,18 +2039,23 @@ namespace ProcBridge::Hook
             PUNICODE_STRING fileName, BOOLEAN restartScan)
         {
             ReentryGuard guard;
-            if (guard.IsOutermost())
+            if (!guard.IsOutermost())
             {
-                bool handled = false;
-                const NTSTATUS status = QueryVirtualDirectory(fileHandle, event, ioStatusBlock, information, length, informationClass,
-                    returnSingleEntry != FALSE, fileName, restartScan != FALSE, handled);
-                if (handled)
-                {
-                    return status;
-                }
+                return g_ntQueryDirectoryFile(fileHandle, event, apcRoutine, apcContext, ioStatusBlock, information, length,
+                    informationClass, returnSingleEntry, fileName, restartScan);
             }
-            return g_ntQueryDirectoryFile(fileHandle, event, apcRoutine, apcContext, ioStatusBlock, information, length,
+            bool handled = false;
+            NTSTATUS status = QueryVirtualDirectory(fileHandle, event, ioStatusBlock, information, length, informationClass,
+                returnSingleEntry != FALSE, fileName, restartScan != FALSE, handled);
+            if (handled)
+            {
+                return status;
+            }
+            status = g_ntQueryDirectoryFile(fileHandle, event, apcRoutine, apcContext, ioStatusBlock, information, length,
                 informationClass, returnSingleEntry, fileName, restartScan);
+            AddVirtualRootEntries(fileHandle, ioStatusBlock, information, length, informationClass, returnSingleEntry != FALSE, fileName,
+                restartScan != FALSE, status);
+            return status;
         }
 
         NTSTATUS NTAPI HookNtQueryDirectoryFileEx(HANDLE fileHandle, HANDLE event, PIO_APC_ROUTINE apcRoutine, PVOID apcContext,
@@ -1805,18 +2065,24 @@ namespace ProcBridge::Hook
             constexpr ULONG RestartScanFlag = 0x1;       // SL_RESTART_SCAN
             constexpr ULONG ReturnSingleEntryFlag = 0x2; // SL_RETURN_SINGLE_ENTRY
             ReentryGuard guard;
-            if (guard.IsOutermost())
+            if (!guard.IsOutermost())
             {
-                bool handled = false;
-                const NTSTATUS status = QueryVirtualDirectory(fileHandle, event, ioStatusBlock, information, length, informationClass,
-                    (queryFlags & ReturnSingleEntryFlag) != 0, fileName, (queryFlags & RestartScanFlag) != 0, handled);
-                if (handled)
-                {
-                    return status;
-                }
+                return g_ntQueryDirectoryFileEx(fileHandle, event, apcRoutine, apcContext, ioStatusBlock, information, length,
+                    informationClass, queryFlags, fileName);
             }
-            return g_ntQueryDirectoryFileEx(fileHandle, event, apcRoutine, apcContext, ioStatusBlock, information, length,
+            const bool single = (queryFlags & ReturnSingleEntryFlag) != 0;
+            const bool restart = (queryFlags & RestartScanFlag) != 0;
+            bool handled = false;
+            NTSTATUS status = QueryVirtualDirectory(fileHandle, event, ioStatusBlock, information, length, informationClass,
+                single, fileName, restart, handled);
+            if (handled)
+            {
+                return status;
+            }
+            status = g_ntQueryDirectoryFileEx(fileHandle, event, apcRoutine, apcContext, ioStatusBlock, information, length,
                 informationClass, queryFlags, fileName);
+            AddVirtualRootEntries(fileHandle, ioStatusBlock, information, length, informationClass, single, fileName, restart, status);
+            return status;
         }
 
         /// NtNotifyChangeDirectoryFile[Ex] on a virtual directory of a remote resolver: changes come from machine B
@@ -2102,6 +2368,7 @@ namespace ProcBridge::Hook
     DWORD InstallFileHooks(const IPathResolver& resolver) noexcept
     {
         g_resolver = &resolver;
+        CollectParentRoots();
         const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
         if (ntdll == nullptr)
         {

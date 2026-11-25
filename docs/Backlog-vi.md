@@ -2,12 +2,12 @@
 
 Việc còn treo, chưa thuộc mốc đang làm. Xử lý xong mục nào thì xoá mục đó trong cùng commit.
 
-## [Vừa] Thư mục gốc ảo không hiện trong thư mục cha
+## [Thấp] Thư mục gốc ảo trong thư mục cha: các ca chưa phủ
 
-Hook chỉ dịch đường dẫn nằm *trong* thư mục ảo. Liệt kê thư mục cha (`FindFirstFile("D:\Work\virtual")`
-không wildcard, `GetLongPathNameW` trên đường dẫn ảo) mở thư mục cha thật nên không thấy thư mục ảo và trả
-`ERROR_FILE_NOT_FOUND`. Cần chèn mục giả cho thư mục gốc ảo khi liệt kê thư mục cha (hook
-`NtQueryDirectoryFile[Ex]` trên handle của thư mục cha). NativeProbe hiện cố ý không gọi hai API này.
+Mục của gốc ảo được chèn vào cuối lượt liệt kê thư mục cha thật (Plan 13.8). Chưa phủ: thư mục cha không có thật (mở
+thư mục cha đã lỗi); handle overlapped mà hàm gốc trả `STATUS_PENDING` (không chèn); gốc ảo nằm trong gốc ảo khác; mục
+chèn ở cuối chứ không theo thứ tự tên; `SL_INDEX_SPECIFIED`; quá 64 lượt quét thư mục cha cùng lúc; ở chế độ cục bộ
+(`PROCBRIDGE_MAP`) mục không có file ID. Ghi 2026-11-26.
 
 ## [Vừa] Ký tự ổ giả (V:\) làm thư mục ảo
 

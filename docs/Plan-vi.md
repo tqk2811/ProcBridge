@@ -839,6 +839,20 @@ Nhận xét:
 - Ở loopback vẫn ~2,5 ms mỗi file nhỏ và ~6 ms mỗi lần đóng ghi: chi phí đĩa (file tạm, đổi tên, hàng đợi ghi), chưa
   đáng tối ưu so với RTT thật.
 
+### 13.8 Đường dẫn và handle: các ca ngoài thư mục ảo (2026-11-26)
+
+- **Gốc ảo trong thư mục cha**: gốc ảo không có trên volume nên liệt kê thư mục cha thật (`FindFirstFile("D:\Work\virtual")`
+  không wildcard, `dir D:\Work`, `GetLongPathNameW`) không thấy nó. Hook `NtQueryDirectoryFile[Ex]` để hàm gốc chạy trước
+  trên handle thật; khi lượt quét hết mục thật (`STATUS_NO_MORE_FILES`, hoặc `STATUS_NO_SUCH_FILE` khi pattern không khớp mục
+  thật nào) mà thư mục của handle (tên thiết bị qua `NtQueryObject`, cache theo handle) là thư mục cha của gốc ảo, Hook trả
+  thêm mục của các gốc ảo khớp pattern, mỗi gốc một lần mỗi lượt quét. Pattern chỉ đi theo lời gọi đầu nên được nhớ theo
+  handle (`ParentScans`, dọn khi `NtClose`, nhân bản kèm đóng nguồn, hoặc lần mở mới trả cùng giá trị); lượt quét không có
+  pattern (.NET) khớp mọi tên; restart bắt đầu lại. Thư mục thật đã có tên đó thì không chèn (hàm gốc đã liệt kê). Metadata
+  của mục: `Stat` của máy B (Broker) hoặc thư mục thật phía sau (cục bộ). Cách dựng mục theo class dùng chung với liệt kê
+  thư mục ảo (`DirectoryEntryFormat`). Kiểm (`ParentListingTests.cs`, x64 và Win32, cục bộ và qua Agent): tìm đúng tên, tên
+  viết hoa, `*`, `NtQueryDirectoryFile` không pattern, single entry, restart, `GetLongPathNameW`, `cmd dir /ad`; đỏ khi bỏ
+  phần chèn. Phần chưa phủ ở Backlog.
+
 ---
 
 ## 14. Duyệt tài nguyên máy B (Remote Explorer)

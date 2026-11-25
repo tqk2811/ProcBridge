@@ -2834,6 +2834,107 @@ namespace
         return 0;
     }
 
+    /// Counts the entries named leaf in a listing of directory with NtQueryDirectoryFile (no pattern, as .NET lists).
+    /// restarts: how many more times the scan is restarted and read to the end.
+    std::wstring CountNtEntries(const std::wstring& directory, const std::wstring& leaf, ULONG informationClass, bool single, int restarts)
+    {
+        const auto query = reinterpret_cast<NtQueryDirectoryFileFn>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryDirectoryFile"));
+        Handle handle(CreateFileW(directory.c_str(), FILE_LIST_DIRECTORY | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+        if (!handle.IsValid())
+        {
+            return Error(GetLastError());
+        }
+        const ULONG nameOffset = informationClass == FileNamesInformationClass ? 12 : 104; // FileIdBothDirectoryInformation
+        const ULONG nameLengthOffset = informationClass == FileNamesInformationClass ? 8 : 60;
+        std::vector<BYTE> buffer(64 * 1024);
+        int count = 0;
+        NTSTATUS status = STATUS_SUCCESS;
+        for (int pass = 0; pass <= restarts; ++pass)
+        {
+            bool restart = pass > 0;
+            for (;;)
+            {
+                IO_STATUS_BLOCK io{};
+                status = query(handle.Get(), nullptr, nullptr, nullptr, &io, buffer.data(), static_cast<ULONG>(buffer.size()), informationClass,
+                    single ? TRUE : FALSE, nullptr, restart ? TRUE : FALSE);
+                restart = false;
+                if (!NT_SUCCESS(status))
+                {
+                    break;
+                }
+                for (ULONG offset = 0;;)
+                {
+                    const BYTE* entry = buffer.data() + offset;
+                    ULONG next = 0;
+                    ULONG nameBytes = 0;
+                    memcpy(&next, entry, sizeof(next));
+                    memcpy(&nameBytes, entry + nameLengthOffset, sizeof(nameBytes));
+                    const std::wstring name(reinterpret_cast<const wchar_t*>(entry + nameOffset), nameBytes / sizeof(wchar_t));
+                    if (_wcsicmp(name.c_str(), leaf.c_str()) == 0)
+                    {
+                        ++count;
+                    }
+                    if (next == 0)
+                    {
+                        break;
+                    }
+                    offset += next;
+                }
+            }
+        }
+        return L"count=" + Num(count) + L" " + Status(status);
+    }
+
+    /// --parent-listing <virtual root>: the virtual root as an entry of its parent folder's listings (FindFirstFile
+    /// without wildcard, with "*", NtQueryDirectoryFile without pattern, single entries, a restarted scan) and
+    /// GetLongPathName on a path below it.
+    int ParentListing(const wchar_t* rootArgument)
+    {
+        std::wstring root = rootArgument;
+        const size_t slash = root.find_last_of(L'\\');
+        const std::wstring parent = root.substr(0, slash);
+        const std::wstring leaf = root.substr(slash + 1);
+        auto find = [](const std::wstring& path) {
+            WIN32_FIND_DATAW data{};
+            const HANDLE found = FindFirstFileW(path.c_str(), &data);
+            if (found == INVALID_HANDLE_VALUE)
+            {
+                return Error(GetLastError());
+            }
+            FindClose(found);
+            return std::wstring(data.cFileName) + L" dir=" + Num((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ? 1 : 0);
+        };
+        WriteLine(L"find-exact: " + find(root));
+        std::wstring upper = root;
+        CharUpperBuffW(upper.data() + slash + 1, static_cast<DWORD>(leaf.size()));
+        WriteLine(L"find-upper: " + find(upper));
+        WIN32_FIND_DATAW data{};
+        int count = 0;
+        int directories = 0;
+        const HANDLE all = FindFirstFileW((parent + L"\\*").c_str(), &data);
+        if (all != INVALID_HANDLE_VALUE)
+        {
+            do
+            {
+                if (_wcsicmp(data.cFileName, leaf.c_str()) == 0)
+                {
+                    ++count;
+                    directories += (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ? 1 : 0;
+                }
+            } while (FindNextFileW(all, &data));
+            FindClose(all);
+        }
+        WriteLine(L"find-star: count=" + Num(count) + L" dir=" + Num(directories));
+        WriteLine(L"nt-null: " + CountNtEntries(parent, leaf, 37, false, 0));
+        WriteLine(L"nt-single: " + CountNtEntries(parent, leaf, FileNamesInformationClass, true, 0));
+        WriteLine(L"nt-restart: " + CountNtEntries(parent, leaf, 37, false, 1));
+        wchar_t longPath[MAX_PATH * 2];
+        const DWORD length = GetLongPathNameW((root + L"\\sub").c_str(), longPath, static_cast<DWORD>(std::size(longPath)));
+        WriteLine(L"long: " + (length == 0 || length >= std::size(longPath) ? Error(GetLastError()) : std::wstring(longPath, length)));
+        return 0;
+    }
+
     int RunCommand(int argc, wchar_t** argv)
     {
         const std::wstring command = argv[1];
@@ -2904,6 +3005,10 @@ namespace
         if (command == L"--dir-classes" && argc == 3)
         {
             return DirectoryClasses(argv[2]);
+        }
+        if (command == L"--parent-listing" && argc == 3)
+        {
+            return ParentListing(argv[2]);
         }
         if (command == L"--stdin-id" && argc == 2)
         {

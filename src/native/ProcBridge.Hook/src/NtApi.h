@@ -136,6 +136,7 @@ namespace ProcBridge::Hook::Nt
 extern "C"
 {
     NTSYSAPI WCHAR NTAPI RtlUpcaseUnicodeChar(WCHAR sourceCharacter);
+    NTSYSAPI BOOLEAN NTAPI RtlIsNameInExpression(PUNICODE_STRING expression, PUNICODE_STRING name, BOOLEAN ignoreCase, PWCH upcaseTable);
     NTSYSAPI BOOLEAN NTAPI RtlDosPathNameToNtPathName_U(PCWSTR dosFileName, PUNICODE_STRING ntFileName,
         PWSTR* filePart, PVOID relativeName);
 }
