@@ -256,6 +256,9 @@ public sealed class HookPipeEndToEndTests
             Mappings = [new VirtualMapping(VirtualRoot, "proj")],
             CacheRoot = cacheDir.Path,
         });
+        // The rescan that follows the subscription of the change watcher would overflow a watch registered before it.
+        await broker.Watcher!.WaitActiveAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.Delay(200);
         await using FakeHook waiter = await FakeHook.ConnectAsync(HookIpcProtocol.GetPipeName(session));
         await using FakeHook control = await FakeHook.ConnectAsync(HookIpcProtocol.GetPipeName(session));
 

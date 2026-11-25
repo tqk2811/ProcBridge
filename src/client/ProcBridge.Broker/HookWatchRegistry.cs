@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Threading.Channels;
 using ProcBridge.HookIpc;
 using ProcBridge.HookIpc.Models;
 using ProcBridge.Protocol;
@@ -14,9 +15,11 @@ namespace ProcBridge.Broker;
 /// overflowed, which the hook turns into <c>STATUS_NOTIFY_ENUM_DIR</c>.
 /// Every watch belongs to the client process that registered it (the owner, see <see cref="Attach"/>): only that
 /// process can wait on or remove it, and the watches of a process go away when its last pipe connection closes.
-/// Does not own the cache; subscribes to it for its whole lifetime.
+/// Notifications are handed to a task of their own, so the thread that raises <see cref="FileCache.RemoteChanged"/>
+/// (the reader of the change connection) never waits for the watches.
+/// Does not own the cache; subscribes to it until disposed.
 /// </summary>
-public sealed class HookWatchRegistry
+public sealed class HookWatchRegistry : IDisposable
 {
     /// <summary>Changes kept per watch; beyond that the watch overflows (like a full notify buffer).</summary>
     public const int MaxQueuedChanges = 1024;
@@ -30,12 +33,27 @@ public sealed class HookWatchRegistry
     private int _nextId;
 
     private readonly int _replyBudget;
+    private readonly FileCache _cache;
+    private readonly Channel<FsChangeNotification> _notifications = Channel.CreateUnbounded<FsChangeNotification>(new UnboundedChannelOptions { SingleReader = true });
+    private readonly Task _dispatcher;
 
     /// <param name="replyBudget">Bytes of changes one WaitChanges reply may carry; tests shrink it.</param>
     public HookWatchRegistry(FileCache cache, int replyBudget = DefaultReplyBudget)
     {
         _replyBudget = replyBudget;
+        _cache = cache;
+        _dispatcher = Task.Run(DispatchAsync);
         cache.RemoteChanged += OnRemoteChanged;
+    }
+
+    /// <summary>Test hook, called by the dispatching task before it applies a notification.</summary>
+    internal Action? BeforeDispatch { get; set; }
+
+    /// <summary>Stops listening to the cache; the watches stay but receive nothing more.</summary>
+    public void Dispose()
+    {
+        _cache.RemoteChanged -= OnRemoteChanged;
+        _notifications.Writer.TryComplete();
     }
 
     /// <summary>What fits a reply message after its header and fixed fields.</summary>
@@ -119,7 +137,26 @@ public sealed class HookWatchRegistry
         return watch.Drain(_replyBudget);
     }
 
-    private void OnRemoteChanged(FsChangeNotification notification)
+    private void OnRemoteChanged(FsChangeNotification notification) => _notifications.Writer.TryWrite(notification);
+
+    private async Task DispatchAsync()
+    {
+        await foreach (FsChangeNotification notification in _notifications.Reader.ReadAllAsync().ConfigureAwait(false))
+        {
+            try
+            {
+                BeforeDispatch?.Invoke();
+                Apply(notification);
+            }
+            catch (Exception e) when (e is not OutOfMemoryException)
+            {
+                // One bad notification must not end the dispatching: the watches would silently go deaf.
+                System.Diagnostics.Trace.TraceError($"ProcBridge: applying a change notification to the hook watches failed: {e.Message}");
+            }
+        }
+    }
+
+    private void Apply(FsChangeNotification notification)
     {
         foreach (Watch watch in _watches.Values)
         {

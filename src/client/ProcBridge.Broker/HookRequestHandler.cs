@@ -14,7 +14,7 @@ namespace ProcBridge.Broker;
 /// Answers one Hook IPC request: maps (mapping index, relative path) to a share path and asks the
 /// <see cref="FileCache"/>. Every failure becomes the NTSTATUS the hooked call should return.
 /// </summary>
-public sealed class HookRequestHandler
+public sealed class HookRequestHandler : IDisposable
 {
     private const uint WriteAccessMask =
         0x0002 /* FILE_WRITE_DATA */ | 0x0004 /* FILE_APPEND_DATA */ | 0x0010 /* FILE_WRITE_EA */ |
@@ -48,6 +48,8 @@ public sealed class HookRequestHandler
 
     /// <summary>Directory watches of the hook (WatchDirectory, WaitChanges, Unwatch).</summary>
     public HookWatchRegistry Watches { get; }
+
+    public void Dispose() => Watches.Dispose();
 
     /// <summary>
     /// Handles <paramref name="request"/> of client <paramref name="clientId"/> and writes the reply into

@@ -287,6 +287,35 @@ public sealed class BrokerWatchTests
     }
 
     [TestMethod]
+    public async Task HookWatches_DoNotBlockTheThreadThatRaisesTheChange()
+    {
+        using var share = new TempFolder("bwatch");
+        Directory.CreateDirectory(share.Combine("proj"));
+        using var cacheDir = new TempFolder("cache");
+        await using AgentServer server = StartAgent(share);
+        await using AgentClient client = CreateClient(server.Port);
+        (FileCache cache, ChangeWatcher watcher) = await WatchedCacheAsync(client, cacheDir.Path);
+        await using ChangeWatcher _ = watcher;
+        using var registry = new HookWatchRegistry(cache);
+        uint id = registry.Add(1, "proj", subtree: true);
+        using var held = new ManualResetEventSlim();
+        registry.BeforeDispatch = () => held.Wait(TimeSpan.FromSeconds(10));
+        // Subscribed after the registry: with a synchronous registry it would only run once the registry was done.
+        var raised = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        cache.RemoteChanged += x =>
+        {
+            if (x.Changes.Length > 0)
+                raised.TrySetResult();
+        };
+
+        share.WriteFile(@"proj\a.txt", [1]);
+        await raised.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        held.Set();
+        var reply = await registry.WaitAsync(1, id, TimeSpan.FromSeconds(5), CancellationToken.None);
+        Assert.IsTrue(reply.Changes.Any(x => x.Name == "a.txt"));
+    }
+
+    [TestMethod]
     public async Task HookWatch_ChangeTooBigForOneReply_BecomesOverflow()
     {
         using var share = new TempFolder("bwatch");

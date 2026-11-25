@@ -12,7 +12,7 @@ namespace ProcBridge.Broker;
 /// <summary>
 /// Named pipe endpoint for Hook.dll (plan section 6): message mode, many instances, current user only. Each
 /// connected instance is served by its own loop (request, reply, repeat), so hook threads using separate
-/// instances run in parallel.
+/// instances run in parallel. Owns the handler it serves and disposes it.
 /// </summary>
 [SupportedOSPlatform("windows")]
 public sealed class HookIpcServer : IAsyncDisposable
@@ -221,6 +221,7 @@ public sealed class HookIpcServer : IAsyncDisposable
         foreach (NamedPipeServerStream pipe in _clients.Keys)
             await pipe.DisposeAsync().ConfigureAwait(false);
         await Task.WhenAll(_clients.Values).ConfigureAwait(false);
+        _handler.Dispose();
         _stopping.Dispose();
     }
 }
