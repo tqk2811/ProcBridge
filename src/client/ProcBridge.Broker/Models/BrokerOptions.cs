@@ -37,6 +37,15 @@ public sealed record BrokerOptions
     /// <summary>Depth of the start-up tree walk; 0 lets the Agent choose.</summary>
     public int PreloadTreeDepth { get; init; }
 
+    /// <summary>Read-ahead of small files, see <see cref="FileCacheOptions.ReadAheadMaxFileSize"/>; 0 turns it off.</summary>
+    public long ReadAheadMaxFileSize { get; init; } = 64 * 1024;
+
+    /// <summary>See <see cref="FileCacheOptions.ReadAheadMaxFiles"/>.</summary>
+    public int ReadAheadMaxFiles { get; init; } = 64;
+
+    /// <summary>See <see cref="FileCacheOptions.ReadAheadParallelism"/>.</summary>
+    public int ReadAheadParallelism { get; init; } = 8;
+
     public TransportOptions Transport { get; init; } = new();
 
     public string GetCacheRoot() => CacheRoot ?? Path.Combine(

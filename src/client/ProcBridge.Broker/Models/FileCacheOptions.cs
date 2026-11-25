@@ -11,4 +11,16 @@ public sealed record FileCacheOptions
     /// only a safety net against a lost notification.
     /// </summary>
     public TimeSpan WatchedMetadataTtl { get; init; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// Read-ahead (plan section 11): when a file this small or smaller is opened, the other files of its directory up to
+    /// this size are downloaded in the background. 0 turns read-ahead off.
+    /// </summary>
+    public long ReadAheadMaxFileSize { get; init; } = 64 * 1024;
+
+    /// <summary>Most files one directory read-ahead downloads.</summary>
+    public int ReadAheadMaxFiles { get; init; } = 64;
+
+    /// <summary>Read-ahead downloads running at once (they share the connection pool with foreground requests).</summary>
+    public int ReadAheadParallelism { get; init; } = 8;
 }

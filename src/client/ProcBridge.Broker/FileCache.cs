@@ -32,6 +32,9 @@ public sealed class FileCache
     // Bumped by every invalidation; a fetch that started under an older value may hold stale data and gets the short TTL.
     private long _epoch;
     private volatile bool _watchActive;
+    private readonly ConcurrentDictionary<string, byte> _readAheadDirectories = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<Task, byte> _readAheadTasks = new();
+    private int _readAheadDownloads;
 
     public FileCache(AgentClient client, string cacheRoot, TimeSpan metadataTtl)
         : this(client, cacheRoot, new FileCacheOptions { MetadataTtl = metadataTtl })
@@ -146,6 +149,7 @@ public sealed class FileCache
         Interlocked.Increment(ref _epoch);
         _stats.Clear();
         _lists.Clear();
+        _readAheadDirectories.Clear();
     }
 
     /// <summary>Drops what <paramref name="change"/> makes stale: the path, its parent's listing and, when it went away, its subtree.</summary>
@@ -157,6 +161,7 @@ public sealed class FileCache
         _stats.TryRemove(path, out _);
         _lists.TryRemove(path, out _);
         _lists.TryRemove(parent, out _);
+        _readAheadDirectories.TryRemove(parent, out _);
         // The parent's write time changes with its children.
         _stats.TryRemove(parent, out _);
         if (change.Action is FsChangeAction.Removed or FsChangeAction.RenamedOldName or FsChangeAction.RenamedNewName or FsChangeAction.Added)
@@ -230,7 +235,17 @@ public sealed class FileCache
     }
 
     /// <summary>Makes sure <paramref name="remotePath"/> is in the cache with the current remote version.</summary>
-    public async Task<CachedItem> EnsureAsync(string remotePath, CancellationToken cancellationToken)
+    /// <remarks>Opening a small file starts the read-ahead of its directory (<see cref="FileCacheOptions.ReadAheadMaxFileSize"/>).</remarks>
+    public Task<CachedItem> EnsureAsync(string remotePath, CancellationToken cancellationToken)
+        => EnsureAsync(remotePath, readAhead: true, cancellationToken);
+
+    /// <summary>Files downloaded by read-ahead so far, for diagnostics, tests and benchmarks.</summary>
+    public int ReadAheadDownloads => Volatile.Read(ref _readAheadDownloads);
+
+    /// <summary>Completes when every read-ahead started so far has finished.</summary>
+    public Task WaitForReadAheadAsync() => Task.WhenAll(_readAheadTasks.Keys);
+
+    private async Task<CachedItem> EnsureAsync(string remotePath, bool readAhead, CancellationToken cancellationToken)
     {
         FsEntry entry = await StatAsync(remotePath, cancellationToken).ConfigureAwait(false);
         string localPath = GetLocalPath(remotePath);
@@ -239,6 +254,9 @@ public sealed class FileCache
             Directory.CreateDirectory(localPath);
             return new CachedItem(entry, localPath);
         }
+
+        if (readAhead && _options.ReadAheadMaxFileSize > 0 && entry.Size <= _options.ReadAheadMaxFileSize)
+            StartReadAhead(GetParent(remotePath), remotePath);
 
         if (_versions.TryGetValue(remotePath, out FsVersion version) && version == entry.Version && MatchesVersion(localPath, version))
             return new CachedItem(entry, localPath);
@@ -255,6 +273,54 @@ public sealed class FileCache
             if (download.IsValueCreated && download.Value.IsCompleted)
                 _downloads.TryRemove(new KeyValuePair<string, Lazy<Task<CachedItem>>>(remotePath, download));
         }
+    }
+
+    /// <summary>Downloads the small files of <paramref name="remoteDirectory"/> in the background, once per directory until it changes.</summary>
+    /// <param name="opened">The file whose open triggered it; the foreground request downloads that one.</param>
+    private void StartReadAhead(string remoteDirectory, string opened)
+    {
+        if (!_readAheadDirectories.TryAdd(remoteDirectory, 0))
+            return;
+        Task task = Task.Run(() => ReadAheadAsync(remoteDirectory, opened));
+        _readAheadTasks.TryAdd(task, 0);
+        task.ContinueWith(x => _readAheadTasks.TryRemove(x, out _), TaskScheduler.Default);
+    }
+
+    private async Task ReadAheadAsync(string remoteDirectory, string opened)
+    {
+        IReadOnlyList<FsEntry> entries;
+        try
+        {
+            entries = await ListAsync(remoteDirectory, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception e) when (e is not OutOfMemoryException)
+        {
+            // Read-ahead is a guess; the foreground request reports real errors.
+            return;
+        }
+
+        string prefix = remoteDirectory.Length == 0 ? string.Empty : remoteDirectory + "/";
+        string[] candidates = entries
+            .Where(x => !x.IsDirectory && x.Size <= _options.ReadAheadMaxFileSize)
+            .Select(x => prefix + x.Name)
+            .Where(x => !x.Equals(opened, StringComparison.OrdinalIgnoreCase))
+            .Where(x => !(_versions.TryGetValue(x, out FsVersion version) && MatchesVersion(GetLocalPath(x), version)))
+            .Take(_options.ReadAheadMaxFiles)
+            .ToArray();
+        var parallel = new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, _options.ReadAheadParallelism) };
+        await Parallel.ForEachAsync(candidates, parallel, async (path, token) =>
+        {
+            try
+            {
+                CachedItem item = await EnsureAsync(path, readAhead: false, token).ConfigureAwait(false);
+                // The file may have grown since it was listed; it is downloaded by then, but count only real read-ahead.
+                if (item.Entry.Size <= _options.ReadAheadMaxFileSize)
+                    Interlocked.Increment(ref _readAheadDownloads);
+            }
+            catch (Exception e) when (e is not OutOfMemoryException)
+            {
+            }
+        }).ConfigureAwait(false);
     }
 
     /// <summary>True when the cache file exists and still has the size and write time of the downloaded version.</summary>

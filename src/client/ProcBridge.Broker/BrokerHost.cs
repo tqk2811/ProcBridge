@@ -46,6 +46,9 @@ public sealed class BrokerHost : IAsyncDisposable
         {
             MetadataTtl = options.MetadataTtl,
             WatchedMetadataTtl = options.WatchedMetadataTtl,
+            ReadAheadMaxFileSize = options.ReadAheadMaxFileSize,
+            ReadAheadMaxFiles = options.ReadAheadMaxFiles,
+            ReadAheadParallelism = options.ReadAheadParallelism,
         });
 
         ChangeWatcher? watcher = null;
