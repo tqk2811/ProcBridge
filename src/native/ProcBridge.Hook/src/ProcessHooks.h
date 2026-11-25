@@ -6,7 +6,7 @@
 namespace ProcBridge::Hook
 {
     /// Creates the process creation hooks (plan 5.2): NtCreateUserProcess, NtResumeThread,
-    /// NtResumeProcess. MinHook must already be initialized; the caller enables the hooks.
+    /// NtAlertResumeThread, NtResumeProcess. MinHook must already be initialized; the caller enables the hooks.
     /// hooks: DLL of each architecture for the children. environment: the configuration variables
     /// ("NAME=VALUE", each NUL-terminated), captured at initialization so a process that clears them
     /// still passes them on. inheritance must outlive the hooks.

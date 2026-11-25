@@ -33,6 +33,12 @@ bên nhận thấy tên thật. Cần bên nhận hỏi Broker theo `(pid nguồ
 - Process con chỉ được inject khi thread chính của nó được resume qua `NtResumeThread`/`NtResumeProcess`
   (hoặc tạo không treo). Bên gọi `CREATE_SUSPENDED` rồi chạy code trong con bằng thread từ xa trước khi
   resume (debugger, công cụ inject khác) sẽ chạy phần đó trước khi có hook.
+- Resume từ process khác: Hook chỉ thấy `NtResumeThread`/`NtAlertResumeThread`/`NtResumeProcess` gọi trong
+  chính process cha. Cha tạo con `CREATE_SUSPENDED` rồi nhờ process khác (broker, debugger) resume thì con
+  chạy không có hook. Cần Broker (M2) hoặc chặn ở phía con. Ghi 2026-11-25.
+- Helper khác kiến trúc mở process inject bằng PID (`PROCESS_DUP_HANDLE`) để lấy handle; process inject chạy
+  với token hạn chế hơn helper (AppContainer, integrity thấp) mà helper không mở được thì inject thất bại và
+  con bị kết thúc. Chưa thử. Ghi 2026-11-25.
 - Con ARM64 (hoặc kiến trúc khác x64/x86) bị kết thúc vì chưa có `Hook.dll` ARM64.
 - Process con không thuộc Win32 (pico, minimal) chưa thử.
 - Bên gọi thẳng `NtCreateUserProcess` không xin thread treo được inject trước khi đăng ký csrss (giống hành

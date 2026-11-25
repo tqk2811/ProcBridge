@@ -636,10 +636,16 @@ namespace ProcBridge::Hook
         public:
             void ExportForChild(std::vector<Inject::InheritedHandle>& handles) const override
             {
-                constexpr size_t MaxHandles = 4096;
-                std::vector<HANDLE> values(MaxHandles);
-                std::vector<int> mappings(MaxHandles);
-                const size_t count = g_handles.CopyEntries(values.data(), mappings.data(), MaxHandles);
+                // A full copy may have been cut short: grow until the whole table fits.
+                std::vector<HANDLE> values(256);
+                std::vector<int> mappings(256);
+                size_t count = g_handles.CopyEntries(values.data(), mappings.data(), values.size());
+                while (count == values.size())
+                {
+                    values.resize(values.size() * 2);
+                    mappings.resize(mappings.size() * 2);
+                    count = g_handles.CopyEntries(values.data(), mappings.data(), values.size());
+                }
                 for (size_t i = 0; i < count; ++i)
                 {
                     DWORD flags = 0;
