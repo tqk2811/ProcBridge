@@ -222,28 +222,6 @@ Hook chờ Broker tối đa `PROCBRIDGE_IPC_TIMEOUT_MS` (mặc định 60 giây)
 trọn file. File lớn qua mạng chậm sẽ quá hạn (`STATUS_IO_TIMEOUT`) dù Broker vẫn đang tải. Cần thời hạn riêng
 cho tải, hoặc Broker trả "đang tải" để Hook chờ tiếp.
 
-## [Vừa] Launcher chưa đủ cho người dùng
-
-- CLI chưa đọc cấu hình từ file.
-- Broker hay Agent không kết nối được lúc khởi động thì Spawn báo `inject failed` và không chạy
-  process đích; chưa có thông báo dễ hiểu hơn.
-
-## [Vừa] Launcher WPF: phía A không biết danh sách chia sẻ và thư mục gốc của chúng
-
-- Vị trí: `src/client/ProcBridge.Launcher.Wpf/Models/LaunchProfile.cs` (`ShareRoot`), `Services/LaunchOptionsFactory.cs`.
-- Giao thức `Fs.*` dùng đường dẫn tương đối trong chia sẻ, còn Remote Explorer trả đường dẫn tuyệt đối trên máy B.
-  Hồ sơ WPF vì vậy bắt người dùng tự nhập tên chia sẻ và chọn "gốc chia sẻ trên B" (thư mục chọn đầu tiên được
-  gợi ý làm gốc), rồi đổi đường dẫn chọn được sang tương đối. Gõ sai gốc thì chỉ lộ lúc chạy (đọc sai thư mục).
-- Hướng: thêm message cho A liệt kê chia sẻ (tên + gốc) mà máy B cho phép, để chọn chia sẻ bằng ComboBox và
-  kiểm thư mục chọn nằm trong gốc ngay khi chọn.
-
-## [Thấp] Launcher WPF: thư mục làm việc không được nằm trong thư mục ảo
-
-- Vị trí: `src/client/ProcBridge.Launcher/LaunchSession.cs` (kiểm `Directory.Exists(WorkingDirectory)`).
-- Spawn được tạo với thư mục làm việc của target, mà Spawn không bị hook nên thư mục ảo không tồn tại với nó.
-  Cần Spawn nhận `--cwd` và truyền `lpCurrentDirectory` cho process đích sau khi hook đã nạp (hoặc đặt thư mục
-  qua hook lúc khởi động).
-
 ## [Thấp] Launcher WPF: Remote Explorer còn thiếu thao tác và test giao diện
 
 - Vị trí: `src/client/ProcBridge.Launcher.Wpf/ViewModels/RemoteExplorerViewModel.cs`, `RegistryViewModel.cs`.
@@ -289,6 +267,9 @@ theo đường dẫn trên Agent cho commit, set-info, rename, delete.
   dưới 2000 ms, tức các request xếp hàng trên một kết nối 300 ms/lượt chạm sát ngưỡng khi máy đang tải nặng. Chạy riêng
   3 lần đều xanh. Ngưỡng 2000 ms quá sát (10 request × 300 ms chia trên một kết nối sống); nên đo theo số request phải
   chờ kết nối chậm thay vì theo thời gian tuyệt đối.
+- `RemoteWriteTests.WriteScenario_ThroughAgent_MatchesRealFolder` (x64): đỏ một lần trên CI (2026-11-26, nhánh
+  `feature/launcher-ux`, không đụng tới đường ghi của Hook): ở bước "share writer denied" mong `err=32` (sharing
+  violation) nhưng nhận `err=5` (access denied). Chạy lại job thì xanh, local đều xanh.
 
 ## [Thấp] Review độc lập cho M2
 
@@ -468,11 +449,8 @@ Ghi 2026-11-25 (M6).
 
 Ghép cặp qua relay bằng mã mời đã chạy (Plan 9, "Ghép cặp qua relay"). Còn lại:
 
-- Hồ sơ chạy của app WPF Launcher không tự điền URL relay và bật "Kết nối qua relay" cho máy ghép cặp qua relay
-  (địa chỉ lưu dạng `relay <url>`); hiện chỉ báo lỗi để người dùng tự bật.
 - Chưa chạy thử giao diện thật (UIA) của ô mã mời ở hai app WPF, chỉ test tầng ViewModel; chưa thử với relay thật trên
   internet.
-- Mã mời đổi sau mỗi lần dùng và mỗi 5 phút; app WPF của Agent chỉ thấy mã mới ở lượt làm mới định kỳ của cửa sổ.
 
 Ghi 2026-11-26.
 

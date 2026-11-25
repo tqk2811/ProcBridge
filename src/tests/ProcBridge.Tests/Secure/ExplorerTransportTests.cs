@@ -129,6 +129,43 @@ public sealed class ExplorerTransportTests
         Assert.IsEmpty(none.FileRoots);
     }
 
+    /// <summary>
+    /// Without a profile machine A learns the share names only (it may open them anyway), not their folders on machine B;
+    /// the request is audited.
+    /// </summary>
+    [TestMethod]
+    public async Task Shares_WithoutProfile_GiveNamesButNoFolder_AndAreAudited()
+    {
+        using var root = new TempFolder("exp");
+        var audit = new ListAudit();
+        await using var s = new Setup(root, policy: null, audit);
+
+        ShareListResponse response = await s.Client.ListSharesAsync(CancellationToken.None);
+
+        Assert.AreEqual(ExplorerStatus.Ok, response.Status, response.Error);
+        ShareEntry share = response.Shares.Single();
+        Assert.AreEqual("src", share.Name);
+        Assert.AreEqual(string.Empty, share.RootPath);
+        Assert.IsFalse(share.Writable);
+        ExplorerAuditEntry entry = audit.Entries.Single();
+        Assert.AreEqual("ListShares", entry.Action);
+        Assert.AreEqual(s.Peers.BrokerKey.Fingerprint, entry.RequesterId);
+    }
+
+    [TestMethod]
+    public async Task Shares_GiveTheFolder_OnlyWhenTheProfileBrowsesIt()
+    {
+        using var root = new TempFolder("exp");
+        using var other = new TempFolder("exp-other");
+        await using var browsing = new Setup(root, new ExplorerPolicy { FileRoots = [Path.GetDirectoryName(root.Path)!], Permissions = ExplorerPermissions.FileRead });
+        await using var elsewhere = new Setup(root, new ExplorerPolicy { FileRoots = [other.Path], Permissions = ExplorerPermissions.FileRead });
+        await using var noRead = new Setup(root, new ExplorerPolicy { FileRoots = [root.Path], Permissions = ExplorerPermissions.SystemInfo });
+
+        Assert.AreEqual(Path.TrimEndingDirectorySeparator(root.Path), (await browsing.Client.ListSharesAsync(CancellationToken.None)).Shares.Single().RootPath);
+        Assert.AreEqual(string.Empty, (await elsewhere.Client.ListSharesAsync(CancellationToken.None)).Shares.Single().RootPath);
+        Assert.AreEqual(string.Empty, (await noRead.Client.ListSharesAsync(CancellationToken.None)).Shares.Single().RootPath);
+    }
+
     [TestMethod]
     public async Task ProfileChange_AppliesToNewConnections()
     {

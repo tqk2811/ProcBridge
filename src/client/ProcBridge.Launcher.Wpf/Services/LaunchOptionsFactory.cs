@@ -38,17 +38,16 @@ public sealed class LaunchOptionsFactory
             errors.Add("Chưa nhập chương trình cần chạy.");
         if (profile.Architecture is not ("x64" or "x86"))
             errors.Add("Kiến trúc phải là x64 hoặc x86.");
+        // HostId comes from the paired machine (its fingerprint); only the relay URL is asked for. A machine paired through
+        // the relay has no LAN address: its relay is used when the profile gives none.
         LauncherRelay? relay = null;
-        if (profile.UseRelay)
-        {
-            // HostId comes from the paired machine (its fingerprint); only the relay URL is asked for.
-            if (Uri.TryCreate(profile.RelayUrl.Trim(), UriKind.Absolute, out Uri? relayUrl) && relayUrl.Scheme is "https" or "http")
-                relay = new LauncherRelay(relayUrl);
-            else
-                errors.Add("Địa chỉ relay phải là URL http(s), vd https://relay.example.com/.");
-        }
-        else if (RelayPairingConnector.TryParseRelayAddress(machine?.Address) is not null)
-            errors.Add("Máy B này được ghép cặp qua relay (không có địa chỉ LAN): bật \"Kết nối qua relay\" trong hồ sơ.");
+        Uri? machineRelay = RelayPairingConnector.TryParseRelayAddress(machine?.Address);
+        if (profile.UseRelay && Uri.TryCreate(profile.RelayUrl.Trim(), UriKind.Absolute, out Uri? relayUrl) && relayUrl.Scheme is "https" or "http")
+            relay = new LauncherRelay(relayUrl);
+        else if (machineRelay is not null && (!profile.UseRelay || string.IsNullOrWhiteSpace(profile.RelayUrl)))
+            relay = new LauncherRelay(machineRelay);
+        else if (profile.UseRelay)
+            errors.Add("Địa chỉ relay phải là URL http(s), vd https://relay.example.com/.");
 
         var mappings = new List<VirtualMapping>();
         foreach (FolderMapping mapping in profile.Mappings)

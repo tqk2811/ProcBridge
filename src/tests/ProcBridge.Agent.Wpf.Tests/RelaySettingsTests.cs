@@ -46,6 +46,45 @@ public sealed class RelaySettingsTests
         }
     }
 
+    /// <summary>A rotated invite code shows as soon as the relay link reports it, without waiting for the window timer.</summary>
+    [TestMethod]
+    public async Task RelayPairingCode_ChangeIsShownAtOnce_WithoutRefresh()
+    {
+        string folder = NewShareFolder();
+        try
+        {
+            _settings.Settings = new AgentUiSettings { Shares = [new ShareSettings { Name = "src", Path = folder }] };
+            _host.RelayPairingCodeValue = "1234-5678";
+            MainViewModel viewModel = Create();
+            viewModel.RelayUrl = "https://relay.example/";
+            viewModel.Start();
+            viewModel.AllowPairing = true;
+            Assert.AreEqual("1234-5678", viewModel.RelayPairingCode);
+            var changed = new List<string?>();
+            viewModel.PropertyChanged += (_, e) =>
+            {
+                if (e.PropertyName == nameof(MainViewModel.RelayPairingCode))
+                    changed.Add(viewModel.RelayPairingCode);
+            };
+
+            _host.RelayPairingCodeValue = "8765-4321";
+            _host.RaiseRelayStatusChanged();
+
+            Assert.AreEqual("8765-4321", viewModel.RelayPairingCode);
+            CollectionAssert.AreEqual(new[] { "8765-4321" }, changed);
+
+            await viewModel.StopAsync();
+            _host.RaiseRelayStatusChanged();
+            Assert.IsNull(viewModel.RelayPairingCode);
+            Assert.IsNull(viewModel.RelayState);
+            await viewModel.ShutdownAsync();
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
+
     [TestMethod]
     public async Task RelayPairingCode_ShownWhilePairingIsOnThroughTheRelay()
     {

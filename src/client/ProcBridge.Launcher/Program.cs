@@ -23,7 +23,7 @@ internal static class Program
         LauncherOptions options;
         try
         {
-            options = LauncherCommandLine.Parse(args);
+            options = LauncherCommandLine.Parse(args, Console.Error.WriteLine);
         }
         catch (ArgumentException e)
         {
@@ -58,6 +58,11 @@ internal static class Program
         catch (FileNotFoundException e)
         {
             Console.Error.WriteLine($"ProcBridge.Launcher: {e.Message} {e.FileName}");
+            return 2;
+        }
+        catch (LaunchFailedException e)
+        {
+            Console.Error.WriteLine($"ProcBridge.Launcher: {e.Message}");
             return 2;
         }
     }

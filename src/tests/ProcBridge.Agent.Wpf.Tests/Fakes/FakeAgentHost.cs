@@ -25,6 +25,11 @@ internal sealed class FakeAgentHost : IAgentHost
 
     public void RaisePairing(IPairingPrompt prompt) => PairingRequested?.Invoke(prompt);
 
+    public event Action? RelayStatusChanged;
+
+    /// <summary>What the relay link raises when the invite code rotates (after a use or its expiry).</summary>
+    public void RaiseRelayStatusChanged() => RelayStatusChanged?.Invoke();
+
     public string? RelayState => StartedRelay is null || !IsRunning ? null : "relay: đã kết nối";
 
     /// <summary>What the real host reports while running with a relay and pairing on; tests set it.</summary>

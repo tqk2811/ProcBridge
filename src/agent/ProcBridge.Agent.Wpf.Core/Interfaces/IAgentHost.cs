@@ -28,9 +28,12 @@ public interface IAgentHost : IAsyncDisposable
     /// <summary>
     /// Invite code machines A type to pair through the relay (<c>1234-5678</c>) while running with a relay and
     /// <see cref="AllowPairing"/> on; null otherwise or until the relay opened the slot. It changes after each use and
-    /// expiry, so poll it with <see cref="RelayState"/>.
+    /// expiry: <see cref="RelayStatusChanged"/> says when.
     /// </summary>
     string? RelayPairingCode { get; }
+
+    /// <summary>Raised on a background thread when <see cref="RelayPairingCode"/> or <see cref="RelayState"/> may have changed.</summary>
+    event Action? RelayStatusChanged;
 
     /// <param name="relay">Also serve through this relay (plan 8.2); null for the LAN only.</param>
     /// <exception cref="InvalidOperationException">Already running.</exception>
