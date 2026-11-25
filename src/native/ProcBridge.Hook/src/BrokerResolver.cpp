@@ -260,15 +260,20 @@ namespace ProcBridge::Hook
         return MakeNtPath(cachePath, chars, newRealPath);
     }
 
-    NTSTATUS BrokerResolver::Delete(int mapping, const UNICODE_STRING& ntPath, bool keepItem) const noexcept
+    NTSTATUS BrokerResolver::Delete(int mapping, const UNICODE_STRING& ntPath, bool keepItem, uint64_t expectedFileId) const noexcept
     {
         const UNICODE_STRING relative = RelativePath(mapping, ntPath, PathKind::Nt);
         BrokerClient::Call call(_client, HookIpc::MessageType::Delete);
         HookIpc::PathRequest request{};
         request.MappingIndex = static_cast<uint16_t>(mapping);
-        request.Reserved = keepItem ? HookIpc::DeleteFlagKeepItem : 0;
+        request.Reserved = static_cast<uint16_t>((keepItem ? HookIpc::DeleteFlagKeepItem : 0)
+            | (expectedFileId != 0 ? HookIpc::DeleteFlagExpectFileId : 0));
         call.Put(&request, sizeof(request));
         call.PutString(relative.Buffer, relative.Length);
+        if (expectedFileId != 0)
+        {
+            call.Put(&expectedFileId, sizeof(expectedFileId));
+        }
         BrokerReply reply;
         return call.Send(reply);
     }

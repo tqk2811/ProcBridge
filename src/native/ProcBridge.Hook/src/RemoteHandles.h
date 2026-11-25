@@ -22,6 +22,7 @@ namespace ProcBridge::Hook
         bool DeleteOnClose = false;
         int Mapping = -1;
         UNICODE_STRING Path{};       // virtual NT path, freed by the caller with FreeString (only with DeleteOnClose)
+        uint64_t FileId = 0;         // machine B's file id of the handle (0 when unknown)
     };
 
     /// Handles opened through a virtual path when the resolver is remote (plan 4.4): each is a real handle to

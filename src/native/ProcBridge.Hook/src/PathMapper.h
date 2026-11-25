@@ -110,6 +110,8 @@ namespace ProcBridge::Hook
         /// The last handle holding writeToken was closed (Close) or flushed (Flush): write back if changed.
         virtual NTSTATUS CloseWrite(uint64_t /*writeToken*/) const noexcept { return STATUS_NOT_SUPPORTED; }
         virtual NTSTATUS FlushWrite(uint64_t /*writeToken*/) const noexcept { return STATUS_NOT_SUPPORTED; }
+        /// A child inherited a handle holding writeToken: the Broker then expects one more CloseWrite (the child's).
+        virtual NTSTATUS RetainWrite(uint64_t /*writeToken*/) const noexcept { return STATUS_NOT_SUPPORTED; }
 
         /// True when every write on a handle with a write token must be followed by FlushWrite.
         virtual bool IsWriteThrough() const noexcept { return false; }
@@ -128,8 +130,10 @@ namespace ProcBridge::Hook
             return STATUS_NOT_SUPPORTED;
         }
 
-        /// Deletes on machine B. keepItem: the caller deletes the cache copy itself through its handle.
-        virtual NTSTATUS Delete(int /*mapping*/, const UNICODE_STRING& /*ntPath*/, bool /*keepItem*/) const noexcept
+        /// Deletes on machine B. keepItem: the caller deletes the cache copy itself through its handle. expectedFileId
+        /// (non-zero): machine B's file id the handle was opened on; another file now under the name is left alone.
+        virtual NTSTATUS Delete(int /*mapping*/, const UNICODE_STRING& /*ntPath*/, bool /*keepItem*/,
+            uint64_t /*expectedFileId*/) const noexcept
         {
             return STATUS_NOT_SUPPORTED;
         }

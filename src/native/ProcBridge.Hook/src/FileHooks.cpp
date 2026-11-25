@@ -22,6 +22,7 @@
 #include "PathString.h"
 #include "RemoteHandles.h"
 #include <MinHook.h>
+#include <algorithm>
 #include <cstring>
 
 namespace ProcBridge::Hook
@@ -706,7 +707,7 @@ namespace ProcBridge::Hook
                 {
                     return STATUS_NO_MEMORY;
                 }
-                const NTSTATUS status = g_resolver->Delete(match.Mapping(), ntPath, false);
+                const NTSTATUS status = g_resolver->Delete(match.Mapping(), ntPath, false, 0);
                 FreeString(ntPath);
                 return status;
             }
@@ -1094,7 +1095,7 @@ namespace ProcBridge::Hook
                 if ((flags & FileDispositionDelete) != 0)
                 {
                     // Machine B decides (directory not empty, read only...). Undoing it later is not possible (backlog).
-                    const NTSTATUS status = g_resolver->Delete(mapping, path, true);
+                    const NTSTATUS status = g_resolver->Delete(mapping, path, true, 0);
                     if (!NT_SUCCESS(status))
                     {
                         return status;
@@ -1293,8 +1294,9 @@ namespace ProcBridge::Hook
                     g_remoteHandles.Remove(handle, remoteGeneration, &removed);
                     if (removed.DeleteOnClose)
                     {
-                        // The system deleted the cache copy with the handle; machine B follows.
-                        g_resolver->Delete(removed.Mapping, removed.Path, true);
+                        // The system deleted the cache copy with the handle; machine B follows, unless another file
+                        // took the name on machine B since the open (the file id differs).
+                        g_resolver->Delete(removed.Mapping, removed.Path, true, removed.FileId);
                         FreeString(removed.Path);
                     }
                     if (removed.WriteToken != 0)
@@ -1519,13 +1521,17 @@ namespace ProcBridge::Hook
                 informationClass, queryFlags, fileName);
         }
 
-        /// Extra record of an inherited remote handle (init block): machine B's metadata, then the virtual
-        /// NT path (PathBytes bytes, no terminator). Read with memcpy: records are not aligned.
+        /// Extra record of an inherited remote handle (init block): machine B's metadata and the Broker's write
+        /// token, then the virtual NT path (PathBytes bytes, no terminator). Read with memcpy: records are not
+        /// aligned. Same layout in x86 and x64 (a child may have the other architecture).
         struct InheritedRemoteRecord
         {
             HookIpc::FileInfo Info;
-            ULONG PathBytes;
+            uint32_t PathBytes;
+            uint32_t Reserved;
+            uint64_t WriteToken; // retained for the child by RetainForChild; 0 = none
         };
+        static_assert(sizeof(InheritedRemoteRecord) == HookIpc::FileInfoSize + 16, "record layout must not depend on the architecture");
 
         /// Handle inheritance (plan 5.5): entries travel in the child's init block (see HandleInheritance.h).
         /// With the Broker the record of a remote handle also carries its virtual path and machine B's
@@ -1590,8 +1596,38 @@ namespace ProcBridge::Hook
                     }
                     memcpy(path.Buffer, extra + pathOffset, record.PathBytes);
                     path.Length = static_cast<USHORT>(record.PathBytes);
-                    g_remoteHandles.Add(handle, mapping, path, record.Info);
+                    // The parent retained the token for this process: its last close sends Close like the parent's.
+                    g_remoteHandles.Add(handle, mapping, path, record.Info, record.WriteToken);
                     FreeString(path);
+                }
+            }
+
+            void RetainForChild(const std::vector<Inject::InheritedHandle>& handles, const std::vector<BYTE>& extra) const noexcept override
+            {
+                // One retain per token, as the child's table counts its copies and closes the token once.
+                std::vector<uint64_t> retained;
+                for (const Inject::InheritedHandle& handle : handles)
+                {
+                    InheritedRemoteRecord record{};
+                    const size_t offset = handle.ExtraOffset;
+                    if (offset == Inject::NoExtra || offset > extra.size() || extra.size() - offset < sizeof(record))
+                    {
+                        continue;
+                    }
+                    memcpy(&record, extra.data() + offset, sizeof(record));
+                    if (record.WriteToken == 0 || std::find(retained.begin(), retained.end(), record.WriteToken) != retained.end())
+                    {
+                        continue;
+                    }
+                    try
+                    {
+                        retained.push_back(record.WriteToken);
+                    }
+                    catch (...)
+                    {
+                        // Out of memory: retain anyway (a duplicate retain only keeps the file open until the session ends).
+                    }
+                    g_resolver->RetainWrite(record.WriteToken);
                 }
             }
 
@@ -1605,7 +1641,7 @@ namespace ProcBridge::Hook
                 InheritedRemoteRecord record{};
                 int mapping = -1;
                 UNICODE_STRING path{};
-                if (!g_remoteHandles.GetEntry(handle, mapping, path, record.Info))
+                if (!g_remoteHandles.GetEntry(handle, mapping, path, record.Info, &record.WriteToken))
                 {
                     return;
                 }

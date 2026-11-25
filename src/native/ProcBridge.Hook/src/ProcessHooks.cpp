@@ -368,6 +368,7 @@ namespace ProcBridge::Hook
             g_inheritance->ExportForChild(handles, extra);
             if (!attributes.HasHandleList || handles.empty())
             {
+                g_inheritance->RetainForChild(handles, extra);
                 return handles;
             }
             std::vector<HANDLE> listed(attributes.HandleListBytes / sizeof(HANDLE));
@@ -381,6 +382,7 @@ namespace ProcBridge::Hook
                     const HANDLE value = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(handle.Handle));
                     return std::find(listed.begin(), listed.end(), value) == listed.end();
                 });
+            g_inheritance->RetainForChild(handles, extra);
             return handles;
         }
 

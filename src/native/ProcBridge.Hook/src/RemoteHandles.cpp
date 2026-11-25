@@ -453,6 +453,7 @@ namespace ProcBridge::Hook
                     result->WriteToken = last ? removed->WriteToken : 0;
                     result->DeleteOnClose = removed->DeleteOnClose;
                     result->Mapping = removed->Mapping;
+                    result->FileId = removed->Self.FileId;
                     if (removed->DeleteOnClose && !ConcatString(result->Path, removed->Path, nullptr, 0))
                     {
                         result->DeleteOnClose = false;

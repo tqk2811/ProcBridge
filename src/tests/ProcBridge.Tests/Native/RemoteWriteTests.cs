@@ -66,6 +66,22 @@ public sealed class RemoteWriteTests
     }
 
     [TestMethod]
+    [DataRow("x64")]
+    [DataRow("Win32")]
+    public async Task ChildWritingInheritedHandleAfterParentClosed_LandsOnMachineB(string platform)
+    {
+        using HookSandbox sandbox = new(platform);
+        await using RemoteSession session = RemoteSession.Start(sandbox, writable: true);
+
+        ProcessResult result = session.Run($"\"{sandbox.Binaries.Probe}\" --child inherit-write \"{sandbox.VirtualRoot}\\inherited.txt\"");
+
+        Assert.AreEqual(0, result.ExitCode, Lines(result));
+        // Checked before the session ends: the child's own close wrote it back, not the final sync of open files.
+        Assert.AreEqual("parent+child", File.ReadAllText(Path.Combine(sandbox.RealRoot, "inherited.txt")));
+        Assert.AreEqual(0, session.Broker.WriteBack.PendingCount);
+    }
+
+    [TestMethod]
     public async Task WriteThrough_SendsEachWriteBeforeClose()
     {
         using HookSandbox sandbox = new("x64");

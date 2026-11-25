@@ -53,12 +53,13 @@ namespace ProcBridge::Hook
             DirectoryPage& page) const noexcept override;
         NTSTATUS CloseWrite(uint64_t writeToken) const noexcept override { return SendToken(HookIpc::MessageType::Close, writeToken); }
         NTSTATUS FlushWrite(uint64_t writeToken) const noexcept override { return SendToken(HookIpc::MessageType::Flush, writeToken); }
+        NTSTATUS RetainWrite(uint64_t writeToken) const noexcept override { return SendToken(HookIpc::MessageType::Retain, writeToken); }
         bool IsWriteThrough() const noexcept override { return _writeThrough; }
         NTSTATUS SetInfo(int mapping, const UNICODE_STRING& ntPath, const HookIpc::SetInfoRequest& request,
             HookIpc::FileInfo& info) const noexcept override;
         NTSTATUS Rename(int mapping, const UNICODE_STRING& ntPath, int newMapping, const UNICODE_STRING& newNtPath,
             bool replaceIfExists, HookIpc::FileInfo& info, UNICODE_STRING& newRealPath) const noexcept override;
-        NTSTATUS Delete(int mapping, const UNICODE_STRING& ntPath, bool keepItem) const noexcept override;
+        NTSTATUS Delete(int mapping, const UNICODE_STRING& ntPath, bool keepItem, uint64_t expectedFileId) const noexcept override;
 
     private:
         /// View of path below the virtual root ('\' separated, no leading '\'; empty for the root itself).

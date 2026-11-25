@@ -1211,6 +1211,54 @@ namespace
         return static_cast<int>(WaitExitCode(child.Process));
     }
 
+    /// --write-handle <handle> <text>: writes text at the current position of an inherited handle, then closes it.
+    int WriteHandle(const wchar_t* value, const wchar_t* text)
+    {
+        const HANDLE handle = ParseHandleValue(value);
+        std::string bytes;
+        for (const wchar_t* c = text; *c != 0; ++c)
+        {
+            bytes.push_back(static_cast<char>(*c));
+        }
+        DWORD written = 0;
+        if (!WriteFile(handle, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr))
+        {
+            WriteLine(L"child write: " + Error(GetLastError()));
+            return 1;
+        }
+        return CloseHandle(handle) ? 0 : 1;
+    }
+
+    /// --child inherit-write <virtual file>: creates the file for writing on an inheritable handle, writes "parent",
+    /// starts a child suspended that inherits it, closes its own handle, then lets the child append "+child" and
+    /// close. Both writes must reach machine B (the child holds the write token after the parent closed).
+    int ChildInheritWrite(const wchar_t* virtualFile)
+    {
+        SECURITY_ATTRIBUTES inherit{ sizeof(inherit), nullptr, TRUE };
+        const HANDLE handle = CreateFileW(virtualFile, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &inherit, CREATE_ALWAYS, 0, nullptr);
+        if (handle == INVALID_HANDLE_VALUE)
+        {
+            WriteLine(L"open: " + Error(GetLastError()));
+            return 1;
+        }
+        DWORD written = 0;
+        if (!WriteFile(handle, "parent", 6, &written, nullptr))
+        {
+            WriteLine(L"write: " + Error(GetLastError()));
+            return 1;
+        }
+        ChildProcess child;
+        if (!StartProbe(L"", L"--write-handle " + HandleText(handle) + L" +child", TRUE, CREATE_SUSPENDED, nullptr, child))
+        {
+            return 1;
+        }
+        CloseHandle(handle);
+        ResumeThread(child.Thread);
+        const DWORD code = WaitExitCode(child.Process);
+        WriteLine(L"child: " + std::to_wstring(code));
+        return static_cast<int>(code);
+    }
+
     /// --child handle-list|parent-process <virtual file> <real file>: the child does not inherit the
     /// virtual handle (a handle list without it, or another parent process), so it must not receive
     /// its entry: the same value in the child, holding the real file, must show the real name. Prints
@@ -1851,6 +1899,10 @@ namespace
             {
                 return ChildSuspendedClose(argv[3]);
             }
+            if (mode == L"inherit-write" && argc == 4)
+            {
+                return ChildInheritWrite(argv[3]);
+            }
             if ((mode == L"handle-list" || mode == L"parent-process") && argc == 5)
             {
                 return ChildWithoutVirtualHandle(mode == L"handle-list", argv[3], argv[4]);
@@ -1871,6 +1923,10 @@ namespace
             {
                 return ChildSiblingLeak(argv[3], argv[4]);
             }
+        }
+        if (command == L"--write-handle" && argc == 4)
+        {
+            return WriteHandle(argv[2], argv[3]);
         }
         if (command == L"--stale-handle" && argc == 4)
         {
