@@ -6,6 +6,7 @@
 //        ProcBridge.NativeProbe.<arch>.exe --<command> <arguments>   (single checks, see RunCommand)
 //        ProcBridge.NativeProbe.<arch>.exe --write <new folder>     (M3 write scenario, see WriteScenario)
 //        ProcBridge.NativeProbe.<arch>.exe --notify <watched> <real> (M7 change notifications, see NotifyScenario)
+//        ProcBridge.NativeProbe.<arch>.exe --read-at|--map-hash|--load|--symbols|--lock ... (M8, see ReadAt and below)
 // Expected tree under <root> (created by the test): a.txt, sub\b.txt, sub\deep\c.bin, empty\,
 // ro.txt (read-only), unicode file name. Last access times are never printed (they drift), nor the times
 // of ".." entries (the parent of a virtual root is not part of the virtual folder).
@@ -14,11 +15,14 @@
 #undef WIN32_NO_STATUS
 #include <ntstatus.h>
 #include <winternl.h>
+#include <dbghelp.h>
 #include <algorithm>
 #include <cstring>
 #include <cstdio>
 #include <string>
 #include <vector>
+
+#pragma comment(lib, "dbghelp.lib")
 
 namespace
 {
@@ -2260,6 +2264,182 @@ namespace
         return WriteScenario(std::wstring(full, length)).Run();
     }
 
+    /// --read-at <file> <offset> <length> [<offset> <length>...] (M8): reads each range, the 1st, 3rd... at an
+    /// explicit offset, the others through the file pointer, and prints "read <offset> <bytes> <hash>". The file is
+    /// opened sharing only reading, like most readers do.
+    int ReadAt(int argc, wchar_t** argv)
+    {
+        const HANDLE file = CreateFileW(argv[2], GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (file == INVALID_HANDLE_VALUE)
+        {
+            WriteLine(L"open: " + Error(GetLastError()));
+            return 1;
+        }
+        std::vector<BYTE> buffer;
+        for (int i = 3; i + 1 < argc; i += 2)
+        {
+            const long long offset = _wtoi64(argv[i]);
+            const DWORD length = static_cast<DWORD>(_wtoi(argv[i + 1]));
+            buffer.assign(length, 0);
+            DWORD read = 0;
+            BOOL ok;
+            if ((i - 3) / 2 % 2 == 0)
+            {
+                OVERLAPPED overlapped{};
+                overlapped.Offset = static_cast<DWORD>(offset);
+                overlapped.OffsetHigh = static_cast<DWORD>(offset >> 32);
+                ok = ReadFile(file, buffer.data(), length, &read, &overlapped);
+            }
+            else
+            {
+                LARGE_INTEGER position{};
+                position.QuadPart = offset;
+                ok = SetFilePointerEx(file, position, nullptr, FILE_BEGIN) && ReadFile(file, buffer.data(), length, &read, nullptr);
+            }
+            WriteLine(L"read " + Num(offset) + L" " + (ok ? Num(read) + L" " + Hex(Fnv1a(buffer.data(), read)) : Error(GetLastError())));
+        }
+        CloseHandle(file);
+        return 0;
+    }
+
+    /// --map-hash <file> (M8): maps the whole file read only and prints "map <size> <hash>" (no reads to hook).
+    int MapHash(const wchar_t* path)
+    {
+        const HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (file == INVALID_HANDLE_VALUE)
+        {
+            WriteLine(L"open: " + Error(GetLastError()));
+            return 1;
+        }
+        LARGE_INTEGER size{};
+        GetFileSizeEx(file, &size);
+        const HANDLE mapping = CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
+        if (mapping == nullptr)
+        {
+            WriteLine(L"mapping: " + Error(GetLastError()));
+            CloseHandle(file);
+            return 1;
+        }
+        const void* view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+        if (view == nullptr)
+        {
+            WriteLine(L"view: " + Error(GetLastError()));
+            return 1;
+        }
+        WriteLine(L"map " + Num(size.QuadPart) + L" " + Hex(Fnv1a(static_cast<const BYTE*>(view), static_cast<size_t>(size.QuadPart))));
+        UnmapViewOfFile(view);
+        CloseHandle(mapping);
+        CloseHandle(file);
+        return 0;
+    }
+
+    /// --load <dll> (M8): LoadLibrary (an image section of the file), then calls GetFileVersionInfoSizeW (the DLL is a
+    /// copy of version.dll) on kernel32 and prints "load ok size=<n>" and the module's file name.
+    int LoadDll(const wchar_t* path)
+    {
+        const HMODULE module = LoadLibraryW(path);
+        if (module == nullptr)
+        {
+            WriteLine(L"load: " + Error(GetLastError()));
+            return 1;
+        }
+        using GetSizeFn = DWORD(WINAPI*)(LPCWSTR, LPDWORD);
+        const auto getSize = reinterpret_cast<GetSizeFn>(GetProcAddress(module, "GetFileVersionInfoSizeW"));
+        DWORD handle = 0;
+        const DWORD size = getSize != nullptr ? getSize(L"kernel32.dll", &handle) : 0;
+        wchar_t name[MAX_PATH]{};
+        GetModuleFileNameW(module, name, MAX_PATH);
+        WriteLine(L"load ok size=" + std::wstring(size != 0 ? L"nonzero" : L"0"));
+        WriteLine(L"module " + std::wstring(name));
+        FreeLibrary(module);
+        return 0;
+    }
+
+    /// --symbols <exe> (M8, debugging): DbgHelp loads the exe's pdb from the exe's folder (the CodeView path is
+    /// ignored) and resolves wmain; prints the symbol type, the pdb DbgHelp read and the lookup result.
+    int Symbols(const wchar_t* exe)
+    {
+        std::wstring folder = exe;
+        folder.resize(folder.find_last_of(L'\\'));
+        const HANDLE process = GetCurrentProcess();
+        SymSetOptions(SYMOPT_IGNORE_CVREC | SYMOPT_FAIL_CRITICAL_ERRORS | SYMOPT_NO_PROMPTS);
+        if (!SymInitializeW(process, folder.c_str(), FALSE))
+        {
+            WriteLine(L"init: " + Error(GetLastError()));
+            return 1;
+        }
+        const DWORD64 base = SymLoadModuleExW(process, nullptr, exe, nullptr, 0x10000000, 0, nullptr, 0);
+        if (base == 0)
+        {
+            WriteLine(L"load: " + Error(GetLastError()));
+            SymCleanup(process);
+            return 1;
+        }
+        IMAGEHLP_MODULEW64 info{};
+        info.SizeOfStruct = sizeof(info);
+        SymGetModuleInfoW64(process, base, &info);
+        WriteLine(L"symbols type=" + Num(info.SymType) + L" pdb=" + info.LoadedPdbName);
+        BYTE storage[sizeof(SYMBOL_INFOW) + MAX_SYM_NAME * sizeof(wchar_t)]{};
+        auto* symbol = reinterpret_cast<SYMBOL_INFOW*>(storage);
+        symbol->SizeOfStruct = sizeof(SYMBOL_INFOW);
+        symbol->MaxNameLen = MAX_SYM_NAME;
+        const BOOL found = SymFromNameW(process, L"wmain", symbol);
+        WriteLine(L"wmain " + std::wstring(found ? L"found" : Error(GetLastError()).c_str()));
+        SymCleanup(process);
+        return 0;
+    }
+
+    /// --lock <virtual file> <real file> (M8): byte range locks and share mode of a writer on machine A are seen on
+    /// machine B (the real file behind the share, opened directly), and the other way round.
+    int LockScenario(const wchar_t* virtualFile, const wchar_t* realFile)
+    {
+        const HANDLE file = CreateFileW(virtualFile, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (file == INVALID_HANDLE_VALUE)
+        {
+            WriteLine(L"open: " + Error(GetLastError()));
+            return 1;
+        }
+        auto result = [](BOOL ok) { return ok ? std::wstring(L"ok") : Error(GetLastError()); };
+        HANDLE realWriter = CreateFileW(realFile, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+        WriteLine(L"real write open: " + result(realWriter != INVALID_HANDLE_VALUE));
+        if (realWriter != INVALID_HANDLE_VALUE)
+        {
+            CloseHandle(realWriter);
+        }
+        const HANDLE realReader = CreateFileW(realFile, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+        WriteLine(L"real read open: " + result(realReader != INVALID_HANDLE_VALUE));
+
+        OVERLAPPED range{};
+        range.Offset = 100;
+        WriteLine(L"lock: " + result(LockFileEx(file, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 10, 0, &range)));
+        OVERLAPPED realRange{};
+        realRange.Offset = 105;
+        WriteLine(L"real lock: " + result(LockFileEx(realReader, LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &realRange)));
+        WriteLine(L"unlock: " + result(UnlockFileEx(file, 0, 10, 0, &range)));
+        WriteLine(L"real lock after unlock: " + result(LockFileEx(realReader, LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &realRange)));
+        WriteLine(L"lock while machine B holds: " + result(LockFileEx(file, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 10, 0, &range)));
+        UnlockFileEx(realReader, 0, 1, 0, &realRange);
+        WriteLine(L"lock again: " + result(LockFileEx(file, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 10, 0, &range)));
+
+        DWORD written = 0;
+        WriteLine(L"write: " + result(WriteFile(file, "LOCKED", 6, &written, nullptr)));
+        WriteLine(L"flush: " + result(FlushFileBuffers(file)));
+        char text[7]{};
+        DWORD read = 0;
+        OVERLAPPED start{};
+        ReadFile(realReader, text, 6, &read, &start);
+        WriteLine(L"real after flush: " + std::wstring(text, text + read));
+        CloseHandle(realReader);
+        CloseHandle(file);
+        realWriter = CreateFileW(realFile, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+        WriteLine(L"real write open after close: " + result(realWriter != INVALID_HANDLE_VALUE));
+        if (realWriter != INVALID_HANDLE_VALUE)
+        {
+            CloseHandle(realWriter);
+        }
+        return 0;
+    }
+
     int RunCommand(int argc, wchar_t** argv)
     {
         const std::wstring command = argv[1];
@@ -2350,6 +2530,26 @@ namespace
         if (command == L"--threads" && argc == 4)
         {
             return ThreadedHandles(argv[2], argv[3]);
+        }
+        if (command == L"--read-at" && argc >= 5)
+        {
+            return ReadAt(argc, argv);
+        }
+        if (command == L"--map-hash" && argc == 3)
+        {
+            return MapHash(argv[2]);
+        }
+        if (command == L"--load" && argc == 3)
+        {
+            return LoadDll(argv[2]);
+        }
+        if (command == L"--symbols" && argc == 3)
+        {
+            return Symbols(argv[2]);
+        }
+        if (command == L"--lock" && argc == 4)
+        {
+            return LockScenario(argv[2], argv[3]);
         }
         std::fputs("ProcBridge.NativeProbe: unknown command\n", stderr);
         return 2;

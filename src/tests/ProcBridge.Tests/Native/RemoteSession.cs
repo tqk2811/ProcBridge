@@ -41,13 +41,14 @@ internal sealed class RemoteSession : IAsyncDisposable
     public BrokerHost Broker => _broker;
 
     /// <param name="writable">Serve the real folder read/write (M3) instead of read only.</param>
-    public static RemoteSession Start(HookSandbox sandbox, bool writable = false, bool writeThrough = false)
+    /// <param name="configure">Changes the Broker options (M8 range threshold...).</param>
+    public static RemoteSession Start(HookSandbox sandbox, bool writable = false, bool writeThrough = false, Func<BrokerOptions, BrokerOptions>? configure = null)
     {
         var peers = new SecurePeers();
         var agent = new AgentServer([new AgentShare("share", sandbox.RealRoot, writable)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 }, peers.Agent());
         agent.Start();
         string sessionId = HookIpcProtocol.NewSessionId();
-        BrokerHost broker = BrokerHost.Start(new BrokerOptions
+        var options = new BrokerOptions
         {
             SessionId = sessionId,
             AgentHost = "127.0.0.1",
@@ -58,7 +59,8 @@ internal sealed class RemoteSession : IAsyncDisposable
             Security = peers.Broker,
             WriteQueueRoot = Path.Combine(sandbox.BaseDirectory, "queue"),
             WriteThrough = writeThrough,
-        });
+        };
+        BrokerHost broker = BrokerHost.Start(configure?.Invoke(options) ?? options);
         return new RemoteSession(sandbox, agent, broker, sessionId, peers);
     }
 
