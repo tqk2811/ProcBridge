@@ -661,6 +661,12 @@ Làm song song với M2, chưa có Broker: cấu hình là `PROCBRIDGE_MAP` cụ
 - **Launcher**: Spawn chỉ thoát khi Job hết process, nên Launcher chờ Spawn là chờ cả cây; Broker chỉ dừng sau
   đó. `--no-build-servers` (`LauncherOptions.DisableBuildServers`) đặt `DOTNET_CLI_USE_MSBUILD_SERVER=0`,
   `MSBUILDDISABLENODEREUSE=1`, `UseSharedCompilation=false` (MSBuild đọc biến môi trường thành property) cho cả cây.
+- **Launcher dùng hằng ngày** (2026-11-26): `--config <file.json>` đọc các tuỳ chọn từ file JSON (`LauncherConfigFile`,
+  tên khoá trùng tên tuỳ chọn: `agent`, `share`, `maps` [`virtual`, `remote`], `cwd`, `command`…; khoá lạ bị từ chối),
+  tuỳ chọn gõ sau `--config` đè lên file, `--map` thêm ánh xạ, đường dẫn tương đối tính từ thư mục của file. Trước khi
+  chạy Spawn, `LaunchSession` mở một kết nối của pool Broker (Hello kèm share): Agent không kết nối được hoặc không có
+  share thì dừng bằng `LaunchFailedException` (`LaunchFailureReason`) với lý do rõ ràng, thay cho `inject failed` của
+  Spawn; app WPF hiện lý do bằng tiếng Việt.
 - Kiểm (`src/tests/ProcBridge.Tests/Native/RemoteProcessTreeTests.cs`, Agent loopback): `cmd /c cmd /c type`,
   con khác kiến trúc sau khi cha xoá `PROCBRIDGE_SESSION`, handle stdin kế thừa báo đúng file ID và thời gian
   của máy B (đỏ khi bỏ bản ghi extra), `dotnet build` một project nằm trên Agent với `BaseOutputPath`/

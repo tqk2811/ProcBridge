@@ -4,7 +4,10 @@ using ProcBridge.Broker;
 using ProcBridge.Broker.Models;
 using ProcBridge.Transport.Relay.Models;
 using ProcBridge.HookIpc;
+using ProcBridge.Launcher.Enums;
 using ProcBridge.Launcher.Models;
+using ProcBridge.Protocol;
+using ProcBridge.Protocol.Enums;
 
 namespace ProcBridge.Launcher;
 
@@ -48,10 +51,19 @@ public sealed class LaunchSession
     };
 
     /// <summary>Runs the target with inherited standard streams; returns its exit code (125 when Spawn fails).</summary>
+    /// <exception cref="LaunchFailedException">
+    /// The Agent cannot be reached, has no such share, or the working directory does not exist: checked before the target
+    /// starts, so the user gets that reason instead of Spawn's "inject failed".
+    /// </exception>
     public async Task<int> RunAsync(CancellationToken cancellationToken = default)
     {
         if (!File.Exists(_options.SpawnPath))
             throw new FileNotFoundException("ProcBridge.Spawn not found.", _options.SpawnPath);
+        if (_options.WorkingDirectory is not null && !Directory.Exists(_options.WorkingDirectory))
+        {
+            throw new LaunchFailedException(LaunchFailureReason.WorkingDirectoryMissing, _options.WorkingDirectory, string.Empty,
+                $"Working directory {_options.WorkingDirectory} does not exist on this machine.");
+        }
 
         BrokerHost broker = BrokerHost.Start(new BrokerOptions
         {
@@ -71,6 +83,7 @@ public sealed class LaunchSession
         });
         try
         {
+            await CheckAgentAsync(broker, cancellationToken).ConfigureAwait(false);
             return await RunSpawnAsync(cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -78,6 +91,33 @@ public sealed class LaunchSession
             // The last write-backs run while the Broker stops, so conflicts are complete only after that.
             await broker.DisposeAsync().ConfigureAwait(false);
             ReportConflicts(broker.WriteBack.Conflicts);
+        }
+    }
+
+    /// <summary>Where the Agent is reached, for messages.</summary>
+    private string AgentDescription => _options.Relay is { } relay
+        ? $"relay {relay.Url} (Agent {_options.AgentFingerprint})"
+        : $"{_options.AgentHost}:{_options.AgentPort}";
+
+    /// <summary>
+    /// Opens a connection of the Broker's pool (Hello with the share) before the target starts. Without it the hook of the
+    /// target cannot initialize and Spawn only reports "inject failed".
+    /// </summary>
+    private async Task CheckAgentAsync(BrokerHost broker, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await broker.Client.Pool.GetServerHelloAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (ProtocolStatusException e) when (e.Status == NtStatus.BadNetworkName && !e.IsConnectionFailure)
+        {
+            throw new LaunchFailedException(LaunchFailureReason.ShareUnknown, _options.ShareName, e.Message,
+                $"The Agent at {AgentDescription} has no share '{_options.ShareName}'.", e);
+        }
+        catch (Exception e) when (e is not OutOfMemoryException && !(e is OperationCanceledException && cancellationToken.IsCancellationRequested))
+        {
+            throw new LaunchFailedException(LaunchFailureReason.AgentUnreachable, AgentDescription, e.Message,
+                $"Cannot reach the Agent at {AgentDescription}: {e.Message} Check that the Agent runs on machine B, the address (or relay) and that this machine is still paired.", e);
         }
     }
 
@@ -103,11 +143,7 @@ public sealed class LaunchSession
             UseShellExecute = false,
         };
         if (_options.WorkingDirectory is not null)
-        {
-            if (!Directory.Exists(_options.WorkingDirectory))
-                throw new DirectoryNotFoundException($"Working directory {_options.WorkingDirectory} does not exist on this machine.");
             startInfo.WorkingDirectory = _options.WorkingDirectory;
-        }
         if (_outputLine is not null)
         {
             startInfo.RedirectStandardOutput = true;

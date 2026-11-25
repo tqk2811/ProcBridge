@@ -2,6 +2,7 @@ using System.Net;
 using ProcBridge.Agent;
 using ProcBridge.Agent.Models;
 using ProcBridge.Launcher;
+using ProcBridge.Launcher.Enums;
 using ProcBridge.Launcher.Models;
 using ProcBridge.Protocol.Enums;
 
@@ -48,6 +49,128 @@ public sealed class LauncherTests
         Assert.IsTrue(options.WriteThrough);
         Assert.AreEqual(ConflictPolicy.Overwrite, options.ConflictPolicy);
         Assert.ThrowsExactly<ArgumentException>(() => LauncherCommandLine.Parse(["--agent", "h", "--share", "s", "--map", @"V:\a", "", "--conflict", "x", "--", "cmd.exe"]));
+    }
+
+    [TestMethod]
+    public void CommandLine_ConfigFile_GivesTheOptions_AndTheLineOverridesIt()
+    {
+        string folder = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), $"pb-config-{Guid.NewGuid():N}")).FullName;
+        try
+        {
+            string file = Path.Combine(folder, "run.json");
+            File.WriteAllText(file, """
+                {
+                  // comments and trailing commas are fine
+                  "agent": "10.0.0.5:5000",
+                  "share": "src",
+                  "maps": [{ "virtual": "Proj", "remote": "proj" }],
+                  "noBuildServers": true,
+                  "conflict": "overwrite",
+                  "cwd": "work",
+                  "command": ["cmd.exe", "/c", "dir x"],
+                }
+                """);
+
+            LauncherOptions fromFile = LauncherCommandLine.Parse(["--config", file]);
+            LauncherOptions overridden = LauncherCommandLine.Parse(["--config", file, "--share", "other", "--map", @"V:\b", "b", "--", "git", "status"]);
+
+            Assert.AreEqual("10.0.0.5", fromFile.AgentHost);
+            Assert.AreEqual(5000, fromFile.AgentPort);
+            Assert.AreEqual("src", fromFile.ShareName);
+            // Relative paths start at the file's folder.
+            Assert.AreEqual(Path.Combine(folder, "Proj"), fromFile.Mappings.Single().VirtualRoot);
+            Assert.AreEqual(Path.Combine(folder, "work"), fromFile.WorkingDirectory);
+            Assert.IsTrue(fromFile.DisableBuildServers);
+            Assert.AreEqual(ConflictPolicy.Overwrite, fromFile.ConflictPolicy);
+            Assert.AreEqual("cmd.exe /c \"dir x\"", fromFile.CommandLine);
+            Assert.AreEqual("other", overridden.ShareName);
+            CollectionAssert.AreEqual(new[] { "proj", "b" }, overridden.Mappings.Select(x => x.RemotePath).ToArray());
+            Assert.AreEqual("git status", overridden.CommandLine);
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    [TestMethod]
+    [DataRow("""{ "agnet": "host" }""")]
+    [DataRow("""{ "agent": """)]
+    public void CommandLine_ConfigFileWithTypoOrBadJson_IsRefused(string json)
+    {
+        string file = Path.Combine(Path.GetTempPath(), $"pb-config-{Guid.NewGuid():N}.json");
+        File.WriteAllText(file, json);
+        try
+        {
+            var e = Assert.ThrowsExactly<ArgumentException>(() => LauncherCommandLine.Parse(["--config", file, "--", "cmd.exe"]));
+            StringAssert.Contains(e.Message, "--config");
+        }
+        finally
+        {
+            File.Delete(file);
+        }
+    }
+
+    [TestMethod]
+    public void CommandLine_MissingConfigFile_IsRefused()
+    {
+        Assert.ThrowsExactly<ArgumentException>(() => LauncherCommandLine.Parse(["--config", @"Z:\none\run.json"]));
+        Assert.ThrowsExactly<ArgumentException>(() => LauncherCommandLine.Parse(["--config"]));
+    }
+
+    /// <summary>An Agent that does not answer stops the run with that reason before Spawn (it used to say "inject failed").</summary>
+    [TestMethod]
+    public async Task Run_AgentNotReachable_FailsBeforeTheTargetStarts()
+    {
+        using HookSandbox sandbox = new("x64");
+        int port;
+        using (var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0))
+        {
+            probe.Start();
+            port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        }
+        string marker = Path.Combine(sandbox.BaseDirectory, "ran.txt");
+        var options = new LauncherOptions
+        {
+            AllowPlaintextTransport = true,
+            AgentHost = "127.0.0.1",
+            AgentPort = port,
+            ShareName = "share",
+            Mappings = [new Broker.Models.VirtualMapping(sandbox.VirtualRoot, "")],
+            CacheRoot = Path.Combine(sandbox.BaseDirectory, "cache"),
+            SpawnPath = sandbox.Binaries.Spawn,
+            CommandLine = $"cmd.exe /d /c echo x> \"{marker}\"",
+        };
+
+        var e = await Assert.ThrowsExactlyAsync<LaunchFailedException>(() => new LaunchSession(options).RunAsync());
+
+        Assert.AreEqual(LaunchFailureReason.AgentUnreachable, e.Reason);
+        StringAssert.Contains(e.Message, $"127.0.0.1:{port}");
+        Assert.IsFalse(File.Exists(marker));
+    }
+
+    [TestMethod]
+    public async Task Run_UnknownShare_FailsBeforeTheTargetStarts()
+    {
+        using HookSandbox sandbox = new("x64");
+        await using var agent = new AgentServer([new AgentShare("share", sandbox.RealRoot)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
+        agent.Start();
+        var options = new LauncherOptions
+        {
+            AllowPlaintextTransport = true,
+            AgentHost = "127.0.0.1",
+            AgentPort = agent.Port,
+            ShareName = "nope",
+            Mappings = [new Broker.Models.VirtualMapping(sandbox.VirtualRoot, "")],
+            CacheRoot = Path.Combine(sandbox.BaseDirectory, "cache"),
+            SpawnPath = sandbox.Binaries.Spawn,
+            CommandLine = "cmd.exe /d /c exit 0",
+        };
+
+        var e = await Assert.ThrowsExactlyAsync<LaunchFailedException>(() => new LaunchSession(options).RunAsync());
+
+        Assert.AreEqual(LaunchFailureReason.ShareUnknown, e.Reason);
+        Assert.AreEqual("nope", e.Target);
     }
 
     [TestMethod]

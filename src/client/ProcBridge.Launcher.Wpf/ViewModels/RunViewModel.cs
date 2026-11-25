@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using ProcBridge.Launcher.Enums;
 using ProcBridge.Launcher.Models;
 using ProcBridge.Launcher.Wpf.Enums;
 using ProcBridge.Launcher.Wpf.Interfaces;
@@ -94,6 +95,11 @@ public sealed class RunViewModel : ObservableObject
             State = RunState.Stopped;
             StatusText = "Đã dừng: cả cây process đã bị kill.";
         }
+        catch (LaunchFailedException e)
+        {
+            State = RunState.Failed;
+            StatusText = Describe(e);
+        }
         catch (Exception e)
         {
             State = RunState.Failed;
@@ -105,6 +111,18 @@ public sealed class RunViewModel : ObservableObject
             _cancel = null;
         }
     }
+
+    /// <summary>Vietnamese wording of a run stopped before the target started.</summary>
+    public static string Describe(LaunchFailedException failure) => failure.Reason switch
+    {
+        LaunchFailureReason.AgentUnreachable =>
+            $"Không kết nối được máy B ({failure.Target}): {failure.Detail} Kiểm tra Agent đang chạy trên máy B, địa chỉ hoặc relay, và máy này vẫn còn được ghép cặp.",
+        LaunchFailureReason.ShareUnknown =>
+            $"Máy B không có chia sẻ '{failure.Target}'. Chọn lại chia sẻ trong hồ sơ.",
+        LaunchFailureReason.WorkingDirectoryMissing =>
+            $"Thư mục làm việc '{failure.Target}' không tồn tại (trên máy này, hoặc trên máy B nếu nằm trong thư mục ảo).",
+        _ => failure.Message,
+    };
 
     public void Stop()
     {

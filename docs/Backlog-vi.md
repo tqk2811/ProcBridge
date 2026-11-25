@@ -216,12 +216,6 @@ Hook chờ Broker tối đa `PROCBRIDGE_IPC_TIMEOUT_MS` (mặc định 60 giây)
 trọn file. File lớn qua mạng chậm sẽ quá hạn (`STATUS_IO_TIMEOUT`) dù Broker vẫn đang tải. Cần thời hạn riêng
 cho tải, hoặc Broker trả "đang tải" để Hook chờ tiếp.
 
-## [Vừa] Launcher chưa đủ cho người dùng
-
-- CLI chưa đọc cấu hình từ file.
-- Broker hay Agent không kết nối được lúc khởi động thì Spawn báo `inject failed` và không chạy
-  process đích; chưa có thông báo dễ hiểu hơn.
-
 ## [Vừa] Launcher WPF: phía A không biết danh sách chia sẻ và thư mục gốc của chúng
 
 - Vị trí: `src/client/ProcBridge.Launcher.Wpf/Models/LaunchProfile.cs` (`ShareRoot`), `Services/LaunchOptionsFactory.cs`.

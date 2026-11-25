@@ -60,6 +60,11 @@ internal static class Program
             Console.Error.WriteLine($"ProcBridge.Launcher: {e.Message} {e.FileName}");
             return 2;
         }
+        catch (LaunchFailedException e)
+        {
+            Console.Error.WriteLine($"ProcBridge.Launcher: {e.Message}");
+            return 2;
+        }
     }
 
     /// <summary>
