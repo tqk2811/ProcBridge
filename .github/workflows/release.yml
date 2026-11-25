@@ -1,0 +1,87 @@
+name: release
+
+# A release = a tag vM.N.P pushed by hand (git tag v1.2.3; git push origin v1.2.3) = a GitHub Release of that name.
+# Run by hand (workflow_dispatch) on a tag to redo a release; on a branch it is a dry run: the packages are built,
+# smoke tested and kept as workflow artifacts, no GitHub Release is touched. See docs/Release-vi.md.
+on:
+  push:
+    # TEMPORARY dry run of this branch (workflow_dispatch needs the file on master); remove before merge.
+    branches: [ feature/release ]
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    uses: ./.github/workflows/build.yml
+
+  release:
+    needs: test
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: src
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: src/global.json
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Version
+        id: version
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            if ($env:GITHUB_REF_NAME -notmatch '^v(\d+\.\d+\.\d+)$') { throw "Tag '$env:GITHUB_REF_NAME' is not vM.N.P." }
+            $version = $Matches[1]
+          } else {
+            $version = ''
+          }
+          "value=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Package
+        run: ./scripts/Package.ps1 -Version '${{ steps.version.outputs.value }}'
+
+      - name: Check version
+        id: check
+        run: |
+          $root = Get-ChildItem artifacts -Directory | Select-Object -First 1
+          $exe = Get-ChildItem $root.FullName -Recurse -Filter ProcBridge.Launcher.exe | Select-Object -First 1
+          $built = $exe.VersionInfo.ProductVersion.Split('+')[0]
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and "v$built" -ne $env:GITHUB_REF_NAME) { throw "Built $built, tag $env:GITHUB_REF_NAME." }
+          if ($built -ne $root.Name) { throw "Built $built, package folder $($root.Name)." }
+          "root=$($root.FullName)" >> $env:GITHUB_OUTPUT
+          Write-Host "Version $built"
+
+      - name: Smoke test
+        run: ./scripts/Test-Package.ps1 -PackageRoot '${{ steps.check.outputs.root }}'
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: src/artifacts/*/*.zip
+
+      - name: GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $zips = Get-ChildItem '${{ steps.check.outputs.root }}' -Filter *.zip | ForEach-Object FullName
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --verify-tag --title $tag --generate-notes
+            if ($LASTEXITCODE -ne 0) { throw 'gh release create failed.' }
+          }
+          gh release upload $tag @zips --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'gh release upload failed.' }
