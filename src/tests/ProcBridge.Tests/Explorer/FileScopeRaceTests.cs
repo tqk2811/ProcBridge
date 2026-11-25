@@ -43,9 +43,17 @@ public sealed class FileScopeRaceTests
         Directory.Delete(_base, true);
     }
 
+    private bool _swapped;
+    private IOException? _swapFailure;
+    private string _swapTarget = null!;
+
     /// <summary>Session whose guard swaps <see cref="_folder"/> for a junction to the outside folder after the check of <paramref name="trigger"/>.</summary>
-    private FileExplorerProvider SwappingFiles(string trigger)
+    private FileExplorerProvider SwappingFiles(string trigger) => SwappingFiles(trigger, _folder, _outside);
+
+    /// <summary>Session whose guard moves <paramref name="victim"/> away and puts a junction to <paramref name="destination"/> in its place after the check of <paramref name="trigger"/>.</summary>
+    private FileExplorerProvider SwappingFiles(string trigger, string victim, string destination)
     {
+        _swapTarget = victim;
         var files = new ExplorerSession(new ExplorerPolicy { FileRoots = [_root], Permissions = ReadWrite }, "machine-a").Files;
         files.Guard.AfterScopeCheck = path =>
         {
@@ -53,20 +61,40 @@ public sealed class FileScopeRaceTests
                 return;
             try
             {
-                Directory.Move(_folder, _folder + ".old");
+                Directory.Move(victim, victim + ".old");
             }
-            catch (IOException)
+            catch (IOException ex)
             {
-                return; // the checked handle pins the folder: the swap is impossible, which is fine
+                _swapFailure = ex; // the checked handle pins the folder: the swap is impossible
+                return;
             }
-            catch (UnauthorizedAccessException)
+            catch (UnauthorizedAccessException ex)
             {
+                _swapFailure = new IOException(ex.Message, ex);
                 return;
             }
 
-            CreateJunction(_folder, _outside);
+            CreateJunction(victim, destination);
+            _swapped = true;
         };
         return files;
+    }
+
+    /// <summary>
+    /// A test that never managed to swap proves nothing, so the only accepted reason for a failed swap
+    /// is the checked handle holding the folder (sharing violation or access denied while it is open).
+    /// </summary>
+    private void AssertSwapOutcome()
+    {
+        if (_swapped)
+        {
+            Assert.IsTrue(File.GetAttributes(_swapTarget).HasFlag(FileAttributes.ReparsePoint), "swapped folder is not a junction");
+            return;
+        }
+
+        Assert.IsNotNull(_swapFailure, "the swap hook never ran");
+        var code = _swapFailure.InnerException is UnauthorizedAccessException ? 5 : _swapFailure.HResult & 0xFFFF;
+        Assert.IsTrue(code is 32 or 5, $"swap failed for an unexpected reason: {_swapFailure.Message} (code {code})");
     }
 
     [TestMethod]
@@ -78,6 +106,7 @@ public sealed class FileScopeRaceTests
 
         Assert.AreEqual(ExplorerStatus.Ok, response.Status, response.Error);
         CollectionAssert.Contains(response.Entries.Select(e => e.Name).ToArray(), "only-inside.txt");
+        AssertSwapOutcome();
     }
 
     [TestMethod]
@@ -89,6 +118,7 @@ public sealed class FileScopeRaceTests
 
         Assert.AreEqual(ExplorerStatus.Ok, response.Status, response.Error);
         Assert.AreEqual("inside", System.Text.Encoding.ASCII.GetString(response.Data));
+        AssertSwapOutcome();
     }
 
     [TestMethod]
@@ -101,6 +131,7 @@ public sealed class FileScopeRaceTests
         Assert.AreEqual(ExplorerStatus.Ok, response.Status, response.Error);
         Assert.AreEqual(6, response.Entry!.Size);
         Assert.AreEqual("f.txt", response.Entry.Name);
+        AssertSwapOutcome();
     }
 
     [TestMethod]
@@ -108,9 +139,11 @@ public sealed class FileScopeRaceTests
     {
         var path = Path.Combine(_folder, "f.txt");
 
-        SwappingFiles(path).Delete(new FileDeleteRequest { Path = path });
+        var response = SwappingFiles(path).Delete(new FileDeleteRequest { Path = path });
 
+        Assert.AreEqual(ExplorerStatus.Ok, response.Status, response.Error);
         Assert.IsTrue(File.Exists(Path.Combine(_outside, "f.txt")));
+        AssertSwapOutcome();
     }
 
     [TestMethod]
@@ -121,9 +154,11 @@ public sealed class FileScopeRaceTests
         Directory.CreateDirectory(Path.Combine(_outside, "inner"));
         File.WriteAllText(Path.Combine(_outside, "inner", "keep.txt"), "keep");
 
-        SwappingFiles(path).Delete(new FileDeleteRequest { Path = path, Recursive = true });
+        var response = SwappingFiles(path).Delete(new FileDeleteRequest { Path = path, Recursive = true });
 
+        Assert.AreEqual(ExplorerStatus.Ok, response.Status, response.Error);
         Assert.IsTrue(File.Exists(Path.Combine(_outside, "inner", "keep.txt")));
+        AssertSwapOutcome();
     }
 
     [TestMethod]
@@ -131,9 +166,11 @@ public sealed class FileScopeRaceTests
     {
         var path = Path.Combine(_folder, "made");
 
-        SwappingFiles(path).CreateDirectory(new DirectoryCreateRequest { Path = path });
+        var response = SwappingFiles(path).CreateDirectory(new DirectoryCreateRequest { Path = path });
 
+        Assert.AreEqual(ExplorerStatus.Ok, response.Status, response.Error);
         Assert.IsFalse(Directory.Exists(Path.Combine(_outside, "made")));
+        AssertSwapOutcome();
     }
 
     [TestMethod]
@@ -141,9 +178,11 @@ public sealed class FileScopeRaceTests
     {
         var target = Path.Combine(_folder, "moved.txt");
 
-        SwappingFiles(target).Rename(new FileRenameRequest { Path = Path.Combine(_root, "a.txt"), NewPath = target });
+        var response = SwappingFiles(target).Rename(new FileRenameRequest { Path = Path.Combine(_root, "a.txt"), NewPath = target });
 
+        Assert.AreEqual(ExplorerStatus.Ok, response.Status, response.Error);
         Assert.IsFalse(File.Exists(Path.Combine(_outside, "moved.txt")));
+        AssertSwapOutcome();
     }
 
     [TestMethod]
@@ -151,9 +190,55 @@ public sealed class FileScopeRaceTests
     {
         var source = Path.Combine(_folder, "f.txt");
 
-        SwappingFiles(source).Rename(new FileRenameRequest { Path = source, NewPath = Path.Combine(_root, "taken.txt") });
+        var response = SwappingFiles(source).Rename(new FileRenameRequest { Path = source, NewPath = Path.Combine(_root, "taken.txt") });
 
+        Assert.AreEqual(ExplorerStatus.Ok, response.Status, response.Error);
         Assert.IsTrue(File.Exists(Path.Combine(_outside, "f.txt")));
+        AssertSwapOutcome();
+    }
+
+    // Variants where the swap really happens: the checked entry is opened with share-delete, so it can be
+    // moved away and a junction put in its place; the operation must still act on the object it checked.
+
+    [TestMethod]
+    public void ListDirectory_CheckedFolderReplacedByJunction_ListsCheckedFolder()
+    {
+        File.WriteAllText(Path.Combine(_folder, "only-inside.txt"), "x");
+
+        var response = SwappingFiles(_folder, _folder, _outside).ListDirectory(new DirectoryListRequest { Path = _folder });
+
+        Assert.IsTrue(_swapped, "swap did not happen");
+        Assert.AreEqual(ExplorerStatus.Ok, response.Status, response.Error);
+        CollectionAssert.Contains(response.Entries.Select(e => e.Name).ToArray(), "only-inside.txt");
+    }
+
+    [TestMethod]
+    public void DeleteRecursive_CheckedFolderReplacedByJunction_DeletesCheckedFolderOnly()
+    {
+        var path = Path.Combine(_root, "victim");
+        Directory.CreateDirectory(path);
+        File.WriteAllText(Path.Combine(path, "inside.txt"), "x");
+
+        var response = SwappingFiles(path, path, _outside).Delete(new FileDeleteRequest { Path = path, Recursive = true });
+
+        Assert.IsTrue(_swapped, "swap did not happen");
+        Assert.AreEqual(ExplorerStatus.Ok, response.Status, response.Error);
+        Assert.IsTrue(File.Exists(Path.Combine(_outside, "f.txt")), "content behind the junction was deleted");
+    }
+
+    [TestMethod]
+    public void Rename_CheckedFolderReplacedByJunction_MovesCheckedFolderOnly()
+    {
+        var path = Path.Combine(_root, "victim");
+        Directory.CreateDirectory(path);
+        File.WriteAllText(Path.Combine(path, "inside.txt"), "x");
+        var target = Path.Combine(_root, "renamed");
+
+        var response = SwappingFiles(path, path, _outside).Rename(new FileRenameRequest { Path = path, NewPath = target });
+
+        Assert.IsTrue(_swapped, "swap did not happen");
+        Assert.AreEqual(ExplorerStatus.Ok, response.Status, response.Error);
+        Assert.IsTrue(File.Exists(Path.Combine(_outside, "f.txt")), "folder behind the junction was moved");
     }
 
     private static void CreateJunction(string link, string target)
