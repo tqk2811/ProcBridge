@@ -4,5 +4,6 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="MessagePack" />
+    <InternalsVisibleTo Include="ProcBridge.Tests" />
   </ItemGroup>
 </Project>

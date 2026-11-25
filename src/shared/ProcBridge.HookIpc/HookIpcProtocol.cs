@@ -10,11 +10,12 @@ namespace ProcBridge.HookIpc;
 /// concurrency opens another instance.
 /// Message: <c>header (16 bytes) | body</c>, all little endian. Strings are <c>u16 charCount | UTF-16 chars</c>
 /// with no terminator and no alignment, so the C++ reader copies fields with memcpy.
-/// A reply whose header status is not 0 (an NTSTATUS) has no body.
+/// A reply whose header status is not 0 (an NTSTATUS) has no body. Before the reply the Broker may send any number of
+/// progress messages (<see cref="StatusInProgress"/>) with the same request id.
 /// </remarks>
 public static class HookIpcProtocol
 {
-    public const ushort Version = 4;
+    public const ushort Version = 5;
 
     public const int HeaderSize = 16;
 
@@ -55,6 +56,13 @@ public static class HookIpcProtocol
 
     /// <summary>Bit 1 of the Lock flags: fail at once instead of waiting (NtLockFile FailImmediately).</summary>
     public const ushort LockFlagFailImmediately = 2;
+
+    /// <summary>
+    /// Header status of a progress message (STATUS_PENDING, no body): the Broker is still working on the request (a large
+    /// download) and the real reply follows. The hook waits its call timeout again from each one, so only a Broker that
+    /// stops making progress makes the call time out, however long the file takes.
+    /// </summary>
+    public const uint StatusInProgress = 0x103;
 
     public static string GetPipeName(string sessionId) => PipeNamePrefix + sessionId;
 

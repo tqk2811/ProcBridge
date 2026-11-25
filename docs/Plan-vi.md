@@ -289,13 +289,38 @@ sequenceDiagram
   hiểu nội dung giao thức (mục 9).
 - Khung (frame): `[độ dài][stream id][loại][payload]`, sau lớp mã hoá. Nhiều request chạy song song
   trên cùng một kết nối, mỗi request một `stream id`.
-- Truyền file lớn: chia khối (vd 256 KB), có điều khiển luồng (cửa sổ tín dụng) để một file lớn không
-  chặn các request metadata nhỏ.
+- Truyền file lớn: chia khối (vd 256 KB), có điều khiển luồng để một file lớn không chặn các request metadata nhỏ:
+  - **Cửa sổ tín dụng** (`CreditWindow`, phía Broker, mỗi chiều một cửa sổ cho cả pool): dữ liệu file đang bay (khối
+    `FsRead` đang chờ trả lời, khối `FsWrite` đang gửi) không vượt kích thước cửa sổ; khối mới chờ tới khi khối cũ về.
+    Kích thước bám theo đường truyền: `tốc độ giao × max(100 ms, 2 × RTT) + một khối`, kẹp trong
+    [`DataWindowMin` 512 KB, `DataWindowMax` 16 MB]; RTT là RTT nhỏ nhất của bắt tay `Hello` (lúc kết nối còn rảnh),
+    không lấy độ trễ của chính các khối vì nó gồm cả hàng đợi do cửa sổ tạo ra. Vậy cửa sổ luôn ≥ tích băng thông × độ
+    trễ cộng một khối (đường truyền vẫn đầy) mà hàng đợi trước request nhỏ chỉ cỡ 0,1 s dữ liệu. Trước đây mỗi file giữ
+    8 khối 256 KB đang bay, vài file cùng lúc là vài MB nằm trong buffer socket và trên mạng, request metadata phải xếp
+    sau hết (số đo ở 13.7).
+  - **Ưu tiên khung nhỏ** (`FrameSendGate` trong `StreamFrameChannel`, cả hai phía): khung ≤ 32 KB (request,
+    metadata, `Ping`, file nhỏ) đang chờ gửi được đi trước khung dữ liệu lớn chờ cùng kết nối; sau 16 khung nhỏ liền
+    nhau thì một khung lớn được đi để dữ liệu không bị bỏ đói.
 - Tuần tự hoá: MessagePack hoặc protobuf (chốt ở M2). Có số phiên bản giao thức trong bắt tay.
 - Nhóm message theo "miền" để sau này thêm registry, socket mà không đổi khung: `Fs.*` (Stat, List,
   Open, Read, Write, Rename, Delete, SetInfo, Watch), `Sys.*`, `Proc.*`, `Reg.*` cho chức năng duyệt
   (mục 14), về sau `Net.*`.
 - Mã lỗi: chuyển nguyên `NTSTATUS` từ máy B về, để process đích nhận đúng lỗi như khi chạy cục bộ.
+- Phát hiện kết nối treo (keepalive): kết nối không nhận được khung nào, hoặc không gửi đi khung nào (kết nối chỉ nhận
+  thông báo của watch), trong `KeepAliveInterval` (mặc định 15 s), hoặc vừa có request quá hạn, thì phía A gửi `Ping` (0x0002, header rỗng). Agent trả `Ping` ngay trong vòng đọc, ngoài giới
+  hạn request đồng thời. Trong `KeepAliveTimeout` (mặc định 20 s) mà không nhận được khung nào (khung trả lời lớn đang về
+  cũng tính là còn sống) thì kết nối bị đánh dấu chết: request đang chờ lỗi kiểu mất kết nối, request idempotent được
+  pool gửi lại trên kết nối mới, thay vì mỗi request chờ đủ `RequestTimeout`. `Ping` đi đầu cuối nên qua lane relay cũng
+  vậy. Ngược lại, Agent đóng kết nối im lặng quá `IdleTimeout` (mặc định 2 phút) để máy A biến mất không giữ handle và
+  khoá mãi. `Ping` và luật im lặng này có từ giao thức 3; Broker cũ (giao thức 2) bị từ chối ở Hello.
+- Liệt kê thư mục theo trang (`FsList`, `StartIndex`): trang đầu (`StartIndex` 0) luôn quét và sắp xếp thư mục mới;
+  thư mục trên 256 mục giữ bản quét đó tới khi 10 giây không có trang nào dùng tới (`DirectoryListingCache`, mỗi share tối đa 8 thư mục) để các trang sau
+  cắt từ cùng bản quét thay vì quét lại cả thư mục mỗi trang (trước đây O(n²) với thư mục rất lớn). Cache theo share chứ
+  không theo kết nối vì các trang có thể đi qua những kết nối khác nhau của pool. Các trang sau thấy thư mục như lúc
+  trang đầu, nên thay đổi xen giữa hai trang không làm lặp hay sót mục khi phân trang theo chỉ số. Bản quét hết hạn bị
+  bỏ ở lần gọi kế tiếp bất kỳ. Giới hạn (`FsList` không mang danh tính client): hai client cùng liệt kê một thư mục dùng
+  chung một bản quét, trang đầu của client này thay bản quét client kia đang phân trang (các trang sau của nó lấy từ bản
+  quét mới hơn, như khi không có cache); dừng quá 10 giây giữa hai trang thì quét lại.
 
 ---
 
@@ -575,7 +600,13 @@ người dùng cần nó để chọn thư mục máy B trước khi mở phiên
 
 - Hook nói chuyện với Broker qua `\\.\pipe\ProcBridge-<phiên>` (định dạng `ProcBridge/HookIpc.h`): pool instance
   có khoá (mỗi lời gọi lấy một instance rảnh hoặc mở mới), chế độ message, `TransactNamedPipe` overlapped có
-  thời hạn (`PROCBRIDGE_IPC_TIMEOUT_MS`, mặc định 60 s; quá hạn trả `STATUS_IO_TIMEOUT`). Mỗi instance mới được
+  thời hạn (`PROCBRIDGE_IPC_TIMEOUT_MS`, mặc định 60 s; quá hạn trả `STATUS_IO_TIMEOUT`). Thời hạn tính từ tin nhắn
+  cuối của Broker chứ không từ lúc gửi request: request còn chạy (tải file lớn qua mạng chậm) được Broker gửi tin nhắn
+  tiến độ (`Status = StatusInProgress`, không body, cùng `RequestId`) mỗi `IpcProgressInterval` (mặc định 5 s), hook
+  đọc tiếp và chờ lại đủ thời hạn, nên file lớn không còn quá hạn khi Broker vẫn đang tải, còn Broker treo thật vẫn quá
+  hạn (giao thức IPC v5). Phần việc dưới request bị chặn bởi `RequestTimeout` và keepalive của tầng vận chuyển; việc kẹt
+  ngay trong Broker (chờ khoá, chờ lượt tải khác, đĩa treo) thì sau `IpcMaxProgressDuration` (mặc định 30 phút) Broker
+  thôi gửi tiến độ để hook quá hạn như thường, không treo luồng mãi. Mỗi instance mới được
   kiểm `GetNamedPipeServerProcessId` khớp PID Broker (`PROCBRIDGE_BROKER_PID`), mở với
   `SECURITY_IDENTIFICATION`; sai PID thì khởi động hook thất bại. Mã `0xE000000x` còn sót cũng bị đổi sang mã chuẩn.
 - `BrokerResolver` (cùng giao diện `IPathResolver` với `PathMapper` của M1): lúc khởi động gửi `Hello`, rồi
@@ -836,6 +867,7 @@ Máy dev, một lượt, sau các sửa bên dưới:
 | Mở 500 file nhỏ, read-ahead ×8 (mặc định mới) | 304 ms | 443 ms | 2 926 ms | 7 155 ms |
 | Đọc trọn file 32 MB | 96 ms | 279 ms | 5 453 ms | 27 050 ms |
 | 16 lần đọc 64 KB rải rác trên file 32 MB | 36 ms | 78 ms | 1 400 ms | 5 189 ms |
+| Liệt kê 23 thư mục (không preload) trong lúc tải trọn file 32 MB: trước → sau cửa sổ tín dụng | 11 ms¹ | 88 ms¹ | 3 300 → 2 400 ms | 19 600 → 9 800 ms |
 | Mở ghi + sửa + đóng 20 file nhỏ | 166 ms | 219 ms | 3 455 ms | 8 413 ms |
 | Tạo + ghi ngược file 8 MB | 69 ms | 170 ms | 1 604 ms | 7 252 ms |
 
@@ -853,6 +885,13 @@ Nhận xét:
 - File lớn chạy đủ băng thông (32 MB ở 50 Mbit/s ≈ 5,4 s). Đọc rải rác: mỗi lần 1 RTT cộng một khối 256 KB (ở 10 Mbit/s
   khối 256 KB tốn ~0,2 s, gấp đôi RTT: khối nhỏ hơn cho kiểu đọc này vẫn là việc của Backlog).
 - Ghi ngược file nhỏ còn 2 RTT (`FsWrite` + `FsCommit`), mở ghi 2 RTT (stat + `FsRead`); gộp được, ghi ở Backlog.
+- **Nút cổ chai đã sửa 3 — metadata xếp sau dữ liệu file** (2026-11-26, mục 7): khi đang tải file lớn, mỗi request
+  liệt kê chờ sau ~2 MB dữ liệu đang bay (8 khối 256 KB) trong buffer socket và trên đường truyền: 23 lần liệt kê mất
+  19,6 s ở far (0,85 s mỗi lần) thay vì 2,4 s. Chỉ ưu tiên khung nhỏ trong hàng gửi của tiến trình (`FrameSendGate`)
+  không đổi được số đo (hàng đợi nằm ở socket và mạng, không ở tiến trình); cửa sổ tín dụng `CreditWindow` giữ dữ
+  liệu đang bay cỡ `tốc độ × max(100 ms, 2 RTT) + một khối` nên hàng đợi ngắn lại: far 19,6 → 9,8 s, wan 3,3 → 2,4 s.
+  Tốc độ tải file lớn và mọi ca khác không đổi (trong sai số đo, hai lượt). ¹ loopback và lan: file tải xong trước khi
+  liệt kê bắt đầu nên ca này không đo được gì ở đó.
 - Ở loopback vẫn ~2,5 ms mỗi file nhỏ và ~6 ms mỗi lần đóng ghi: chi phí đĩa (file tạm, đổi tên, hàng đợi ghi), chưa
   đáng tối ưu so với RTT thật.
 

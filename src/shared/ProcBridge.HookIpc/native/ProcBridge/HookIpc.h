@@ -8,6 +8,8 @@
 // String: uint16 charCount followed by charCount UTF-16 code units, no terminator, no alignment.
 // Because strings are unaligned, read the fixed structs below with memcpy, not by casting pointers.
 // A reply whose Status is not 0 (an NTSTATUS for the hooked call) has no body.
+// Before the reply the Broker may send progress messages (Status = StatusInProgress, no body, same RequestId) while a
+// request takes long (a large download): the hook reads on and waits its call timeout again from each one.
 //
 // Bodies:
 //   Hello   request : HelloRequest
@@ -54,7 +56,7 @@
 
 namespace ProcBridge::HookIpc
 {
-    constexpr uint16_t ProtocolVersion = 4;
+    constexpr uint16_t ProtocolVersion = 5;
     constexpr uint32_t HeaderSize = 16;
     constexpr uint32_t MaxMessageSize = 65536;
     constexpr uint32_t FileInfoSize = 64;
@@ -70,6 +72,7 @@ namespace ProcBridge::HookIpc
     constexpr uint32_t FetchReplyFlagComplete = 1;  // FetchRangeReply.Flags
     constexpr uint16_t LockFlagExclusive = 1;
     constexpr uint16_t LockFlagFailImmediately = 2;
+    constexpr uint32_t StatusInProgress = 0x103;   // progress message: the reply follows, wait the call timeout again
     constexpr const wchar_t* PipeNamePrefix = L"\\\\.\\pipe\\ProcBridge-";
 
     enum class MessageType : uint16_t

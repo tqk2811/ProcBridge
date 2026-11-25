@@ -63,13 +63,32 @@ internal sealed class AgentSession
             if (!await HandshakeAsync(cancellationToken).ConfigureAwait(false))
                 return;
 
+            // A machine A that vanished without closing (half-open TCP, relay lane of a dead peer) would keep this
+            // session, its held files and its locks forever: live clients ping (MessageType.Ping), silence ends it.
+            using var idle = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             while (!cancellationToken.IsCancellationRequested)
             {
-                Frame? frame = await _channel.ReceiveAsync(cancellationToken).ConfigureAwait(false);
+                if (_options.IdleTimeout > TimeSpan.Zero)
+                    idle.CancelAfter(_options.IdleTimeout);
+                Frame? frame;
+                try
+                {
+                    frame = await _channel.ReceiveAsync(idle.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    break; // Idle for too long.
+                }
                 if (frame is null)
                     break;
                 if (frame.Value.Kind != FrameKind.Request)
                     break;
+                if (frame.Value.MessageType == MessageType.Ping)
+                {
+                    // Answered here, outside the request limit, so a connection busy with slow requests still answers.
+                    await SendAsync(FrameKind.Response, frame.Value, default, default).ConfigureAwait(false);
+                    continue;
+                }
 
                 await _concurrency.WaitAsync(cancellationToken).ConfigureAwait(false);
                 running.RemoveAll(x => x.IsCompleted);

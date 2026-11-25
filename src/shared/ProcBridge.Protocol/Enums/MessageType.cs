@@ -8,6 +8,8 @@ public enum MessageType : ushort
 {
     /// <summary>Connection handshake: protocol version and share name.</summary>
     Hello = 0x0001,
+    /// <summary>Keepalive probe (empty header both ways); answered at once, outside the request limit of the connection.</summary>
+    Ping = 0x0002,
 
     FsStat = 0x0101,
     FsList = 0x0102,

@@ -54,6 +54,14 @@ Ghi 2026-11-26.
 - Khối khởi tạo không còn biến cấu hình khi process đặt `PROCBRIDGE_MAP` khác đi giữa chừng: Hook dùng giá
   trị lúc khởi tạo, cố ý. Ghi 2026-11-25.
 
+## [Thấp] Keepalive coi kết nối rất chậm là chết khi đang nhận một khung lớn
+
+`ProtocolConnection` chỉ cập nhật `_lastReceived` khi đọc xong trọn một khung (`src/shared/ProcBridge.Protocol/Transport/ProtocolConnection.cs`,
+vòng `ReadLoopAsync`). Trên đường dưới khoảng 13 KB/s, một khung 256 KB mất hơn `KeepAliveInterval` + `KeepAliveTimeout`
+(35 s) mới về đủ nên probe kết luận chết dù byte vẫn đang tới, rồi pool kết nối lại và lặp lại. Cách sửa: tính sống theo
+từng lần đọc byte của kênh; cần thêm tín hiệu tiến độ vào `IFrameChannel` cho cả `StreamFrameChannel` và
+`SecureFrameChannel`, nên chưa làm trong đợt review keepalive. Ghi 2026-11-26.
+
 ## [Thấp] Build server dùng chung nằm ngoài cây process
 
 `VBCSCompiler`, node MSBuild tái sử dụng và MSBuild server sống lâu hơn lệnh build: Spawn chờ cả Job nên sẽ
@@ -216,29 +224,12 @@ mở khoá với Key khác vẫn thành công, khác hành vi NTFS. Ít chương
 `cdb`/`dotnet-dump` (máy test không cài), debug bằng Visual Studio và VS Code, mở DB SQLite trên Agent. Hiện thay bằng
 DbgHelp đọc pdb qua thư mục ảo và kịch bản khoá vùng của NativeProbe.
 
-## [Vừa] Thời hạn IPC cho file lớn
-
-Hook chờ Broker tối đa `PROCBRIDGE_IPC_TIMEOUT_MS` (mặc định 60 giây) cho mọi request, kể cả `Resolve` phải tải
-trọn file. File lớn qua mạng chậm sẽ quá hạn (`STATUS_IO_TIMEOUT`) dù Broker vẫn đang tải. Cần thời hạn riêng
-cho tải, hoặc Broker trả "đang tải" để Hook chờ tiếp.
-
 ## [Thấp] Launcher WPF: Remote Explorer còn thiếu thao tác và test giao diện
 
 - Vị trí: `src/client/ProcBridge.Launcher.Wpf/ViewModels/RemoteExplorerViewModel.cs`, `RegistryViewModel.cs`.
 - Chưa có: tải file về A, đổi tên/tạo thư mục, tạo/sửa giá trị và khoá registry (client đã có API), xoá thư mục.
   Cửa sổ chọn thư mục chưa tự mở tới đường dẫn đã chọn lần trước (chỉ hiện gợi ý).
 - Test mới phủ ViewModel; giao diện chỉ được thử khởi động/tắt và chụp màn hình bằng tay, chưa có test UI tự động.
-
-## [Vừa] Điều khiển luồng bằng cửa sổ tín dụng
-
-Plan mục 7 nói có cửa sổ tín dụng để file lớn không chặn request nhỏ. Hiện chỉ có: khối đọc tối đa
-`MaxReadSize`, giới hạn số request đồng thời mỗi kết nối phía Agent, và nhiều kết nối song song. Chưa có ưu
-tiên metadata hơn dữ liệu trên cùng một kết nối.
-
-## [Vừa] Liệt kê thư mục lớn
-
-Agent liệt kê lại và sắp xếp cả thư mục cho mỗi trang `FsList` (O(n²) với thư mục rất lớn). Nên giữ con trỏ
-liệt kê theo kết nối hoặc cache danh sách ngắn hạn phía Agent.
 
 ## [Vừa] Cache phía Broker
 
@@ -247,11 +238,6 @@ liệt kê theo kết nối hoặc cache danh sách ngắn hạn phía Agent.
 - File cache đang bị process mở mà máy B có bản mới thì `File.Move` thay thế thất bại (lỗi chia sẻ); cần chiến
   lược (giữ bản cũ cho handle đang mở, tải vào tên khác).
 - Thư mục giữ chỗ chưa được đặt thời gian/thuộc tính như máy B (Hook trả metadata từ `FileInfo` nên chưa cần).
-
-## [Vừa] Phát hiện kết nối treo
-
-Request quá hạn trả `STATUS_IO_TIMEOUT` nhưng kết nối vẫn được coi là sống; Agent treo hẳn thì request nào cũng
-chờ đủ `RequestTimeout`. Nên có ping/keepalive và đánh dấu kết nối chết sau vài lần quá hạn liên tiếp.
 
 ## [Thấp] Commit trên Agent và đổi thuộc tính từ máy A khác chạy xen nhau
 
@@ -313,7 +299,8 @@ Hook đã phục vụ thông báo thay đổi trên thư mục ảo (`DirectoryW
 
 Số đo Broker ↔ Agent qua proxy trễ đã có (Plan 13.7). Điều kiện xong M7 còn thiếu: chạy build thật (vd `dotnet build`
 một solution mẫu) qua Hook nối Broker qua `LatencyProxy` và so với chạy cục bộ. Read-ahead (mặc định 8 tải song song
-cho toàn cache) chưa có ưu tiên so với request tiền cảnh (liên quan mục cửa sổ tín dụng) và không bị huỷ khi
+cho toàn cache) chưa có ưu tiên so với request tiền cảnh (cửa sổ tín dụng ở Plan mục 7 chỉ chặn tổng dữ liệu đang bay, không xếp
+read-ahead sau tải tiền cảnh) và không bị huỷ khi
 `BrokerHost` dừng.
 
 ## [Vừa] Bớt round trip khi mở ghi và ghi ngược file nhỏ

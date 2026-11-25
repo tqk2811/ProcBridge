@@ -82,7 +82,7 @@ public sealed class BrokerHost : IAsyncDisposable
         var holds = new RemoteHolds(client, options.HoldShareMode, options.LockWait);
         writeBack.HoldIdLookup = holds.GetHoldId;
         var handler = new HookRequestHandler(cache, options.Mappings, writeBack, options.WriteThrough, holds);
-        var pipe = new HookIpcServer(HookIpcProtocol.GetPipeName(options.SessionId), handler);
+        var pipe = new HookIpcServer(HookIpcProtocol.GetPipeName(options.SessionId), handler, progressInterval: options.IpcProgressInterval, maxProgressDuration: options.IpcMaxProgressDuration);
         pipe.Start();
         writeBack.StartRecovery();
 

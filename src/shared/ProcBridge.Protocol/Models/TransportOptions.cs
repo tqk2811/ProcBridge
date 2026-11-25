@@ -15,6 +15,15 @@ public sealed record TransportOptions
     /// <summary>Chunk requests in flight for one file download.</summary>
     public int MaxParallelChunks { get; init; } = 8;
 
+    /// <summary>
+    /// Least credit window for file data in flight per direction over the whole pool (see Transport.CreditWindow); the
+    /// window starts at <see cref="ReadChunkSize"/> × <see cref="MaxParallelChunks"/> and follows the link between these bounds.
+    /// </summary>
+    public long DataWindowMin { get; init; } = 512 * 1024;
+
+    /// <summary>Largest credit window, for fast links with a long round trip.</summary>
+    public long DataWindowMax { get; init; } = 16 * 1024 * 1024;
+
     public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(10);
 
     /// <summary>Time the secure handshake (or the join of a session) may take once the stream is open; a silent peer is given up on after it.</summary>
@@ -24,6 +33,18 @@ public sealed record TransportOptions
     public TimeSpan ConnectBackoff { get; init; } = TimeSpan.FromSeconds(5);
 
     public TimeSpan RequestTimeout { get; init; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// A connection that received nothing for this long is probed with <see cref="Enums.MessageType.Ping"/>; a request that
+    /// times out probes at once. <see cref="TimeSpan.Zero"/> turns keepalive off.
+    /// </summary>
+    public TimeSpan KeepAliveInterval { get; init; } = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// How long a probe waits for any frame from the peer before the connection is declared dead (its pending requests
+    /// then fail as connection failures and idempotent ones are resent on another connection).
+    /// </summary>
+    public TimeSpan KeepAliveTimeout { get; init; } = TimeSpan.FromSeconds(20);
 
     /// <summary>How many times an idempotent request is resent after its connection broke.</summary>
     public int MaxRetries { get; init; } = 2;
