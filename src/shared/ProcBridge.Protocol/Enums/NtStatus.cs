@@ -21,6 +21,8 @@ public enum NtStatus : uint
     SharingViolation = 0xC0000043,
     RevisionMismatch = 0xC0000059,
     InsufficientResources = 0xC000009A,
+    /// <summary>Write attempt on a read-only share (M2).</summary>
+    MediaWriteProtected = 0xC00000A2,
     IoTimeout = 0xC00000B5,
     FileIsADirectory = 0xC00000BA,
     NotSupported = 0xC00000BB,

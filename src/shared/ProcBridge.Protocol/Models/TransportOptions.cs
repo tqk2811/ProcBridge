@@ -1,7 +1,7 @@
 namespace ProcBridge.Protocol.Models;
 
 /// <summary>Limits and timeouts shared by both ends of the transport.</summary>
-public sealed class TransportOptions
+public sealed record TransportOptions
 {
     /// <summary>Largest frame body (before protection). One read chunk plus header must fit.</summary>
     public int MaxFrameSize { get; init; } = 1024 * 1024 + 64 * 1024;
