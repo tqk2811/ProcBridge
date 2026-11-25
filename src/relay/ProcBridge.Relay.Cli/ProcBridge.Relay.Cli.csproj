@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>procbridge-relay</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ProcBridge.Relay.Integration.Api\ProcBridge.Relay.Integration.Api.csproj" />
+  </ItemGroup>
+</Project>
