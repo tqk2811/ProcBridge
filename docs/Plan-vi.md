@@ -574,6 +574,16 @@ Làm song song với M2, chưa có Broker: cấu hình là `PROCBRIDGE_MAP` cụ
   DACL rỗng).
 - Broker gỡ tên file cache cũ bằng cách đổi tên đi rồi mới xoá, nên một handle còn giữ file không để lại tên
   delete-pending chặn lần mở/thay thế sau.
+- **Sửa sau review M3**: mọi việc gửi/sửa mục hàng đợi của một đường dẫn (đóng, flush, vòng thử lại, recovery, rename và
+  xoá trên máy B) chạy tuần tự qua cổng theo đường dẫn; bản mới của file đang mở thay mục chưa gửi, mục do vòng thử lại
+  gửi xong dời version gốc của file đang mở. Id mục là upload id: Agent nhận lại commit đã áp dụng (nhớ id, hoặc file
+  đã đúng kích thước + thời gian + nội dung) thì trả kết quả cũ, không tạo bản conflict. Bản chép vào hàng đợi lấy giữa
+  hai lần version giống nhau và mang đúng version đó. Lúc file đang có người ghi, `SetInfo` không gửi thời gian ghi và
+  kích thước sang máy B (đi cùng commit), tránh máy B "giống" bản cache rồi bỏ qua ghi ngược. Xoá chỉ chặn ghi ngược sau
+  khi máy B xoá thành công; rename/xoá cập nhật hoặc bỏ mục chưa gửi. File đã xung đột vẫn lưu bản cuối ở lần đóng cuối
+  (thêm một file conflict, tên trùng mili giây có hậu tố). Staging của Agent mở chia sẻ ghi (khối song song). Handle có
+  token kế thừa sang con mang token trong bản ghi khối khởi tạo, cha gửi `Retain` (HookIpc 10) để Broker chờ thêm lần
+  đóng của con. Delete-on-close gửi file ID máy B lúc mở (`DeleteFlagExpectFileId`), Agent không xoá file khác cùng tên.
 - Kiểm: `NativeProbe --write` (tạo, CREATE_NEW trùng, append, truncate, end-of-file, rename, rename thay thế, CREATE_ALWAYS,
   TRUNCATE_EXISTING, FILE_SUPERSEDE, mkdir/rmdir, rename thư mục, xoá, thuộc tính hidden/read-only, xoá file chỉ đọc,
   SetFileTime, delete-on-close, disposition, disposition thư mục không rỗng, mở trùng với chia sẻ, ReplaceFile, lưu kiểu
