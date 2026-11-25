@@ -11,5 +11,6 @@
     <ProjectReference Include="..\..\shared\ProcBridge.HookIpc\ProcBridge.HookIpc.csproj" />
     <ProjectReference Include="..\..\agent\ProcBridge.Agent\ProcBridge.Agent.csproj" />
     <ProjectReference Include="..\..\client\ProcBridge.Broker\ProcBridge.Broker.csproj" />
+    <ProjectReference Include="..\..\client\ProcBridge.Launcher\ProcBridge.Launcher.csproj" />
   </ItemGroup>
 </Project>
