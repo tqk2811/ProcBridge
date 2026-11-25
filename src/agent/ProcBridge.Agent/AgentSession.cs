@@ -168,6 +168,16 @@ internal sealed class AgentSession
     private async Task SendAsync(FrameKind kind, Frame request, ReadOnlyMemory<byte> header, ReadOnlyMemory<byte> payload)
     {
         var frame = new Frame { Kind = kind, MessageType = request.MessageType, RequestId = request.RequestId, Header = header, Payload = payload };
-        await _channel.SendAsync(frame, CancellationToken.None).ConfigureAwait(false);
+        using var timeout = new CancellationTokenSource(_options.SendTimeout);
+        try
+        {
+            await _channel.SendAsync(frame, timeout.Token).ConfigureAwait(false);
+        }
+        catch (Exception e) when (e is OperationCanceledException || e.InnerException is OperationCanceledException)
+        {
+            // The client stopped reading: drop the session instead of keeping a stuck writer (and its buffers) forever.
+            Abort();
+            throw new IOException("Client did not read the response in time.", e);
+        }
     }
 }

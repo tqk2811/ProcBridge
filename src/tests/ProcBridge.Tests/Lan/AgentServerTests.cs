@@ -48,6 +48,33 @@ public sealed class AgentServerTests
     }
 
     [TestMethod]
+    public async Task Client_NotReadingResponses_IsDroppedAfterSendTimeout()
+    {
+        using var share = new TempFolder("agent");
+        share.WriteFile("big.bin", new byte[1024 * 1024]);
+        var options = new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0, SendTimeout = TimeSpan.FromMilliseconds(500) };
+        await using var server = new AgentServer([new ReadOnlyShare("src", share.Path)], options);
+        server.Start();
+
+        using var client = new System.Net.Sockets.TcpClient { ReceiveBufferSize = 4096 };
+        await client.ConnectAsync(IPAddress.Loopback, server.Port);
+        await using var channel = new StreamFrameChannel(client.GetStream(), ownsStream: false, options.MaxFrameSize);
+        var hello = new HelloRequest { ProtocolVersion = ProtocolInfo.Version, ClientName = "test", ShareName = "src" };
+        await channel.SendAsync(new Frame { Kind = FrameKind.Request, MessageType = MessageType.Hello, RequestId = 1, Header = ProtocolSerializer.Serialize(hello) }, CancellationToken.None);
+        Assert.IsNotNull(await channel.ReceiveAsync(CancellationToken.None));
+
+        // Ask for far more data than the socket buffers hold, then never read it.
+        byte[] read = ProtocolSerializer.Serialize(new FsReadRequest { Path = "big.bin", Offset = 0, Length = 1024 * 1024 });
+        for (uint id = 2; id < 80; id++)
+            await channel.SendAsync(new Frame { Kind = FrameKind.Request, MessageType = MessageType.FsRead, RequestId = id, Header = read }, CancellationToken.None);
+
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        while (server.ActiveSessionCount > 0 && watch.Elapsed < TimeSpan.FromSeconds(10))
+            await Task.Delay(50);
+        Assert.AreEqual(0, server.ActiveSessionCount);
+    }
+
+    [TestMethod]
     public async Task StatListRead_Work()
     {
         using var share = new TempFolder("agent");

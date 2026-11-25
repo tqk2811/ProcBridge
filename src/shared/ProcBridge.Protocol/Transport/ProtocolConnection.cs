@@ -111,7 +111,15 @@ public sealed class ProtocolConnection : IAsyncDisposable
             }
             catch (Exception e) when (e is IOException or SocketException or ObjectDisposedException)
             {
+                // A frame may be half written, so the connection is dead whatever the cause.
                 Fail("Send failed: " + e.Message);
+                await DisposeChannelQuietlyAsync().ConfigureAwait(false);
+                if (e.InnerException is OperationCanceledException)
+                {
+                    if (cancellationToken.IsCancellationRequested)
+                        throw new OperationCanceledException(cancellationToken);
+                    throw new ProtocolStatusException(NtStatus.IoTimeout, $"{type} request timed out while sending.", inner: e);
+                }
                 throw ConnectionLost("Send failed: " + e.Message, e);
             }
 
@@ -163,6 +171,18 @@ public sealed class ProtocolConnection : IAsyncDisposable
         finally
         {
             Fail(reason);
+        }
+    }
+
+    private async ValueTask DisposeChannelQuietlyAsync()
+    {
+        try
+        {
+            await _channel.DisposeAsync().ConfigureAwait(false);
+        }
+        catch (Exception e) when (e is IOException or ObjectDisposedException or SocketException)
+        {
+            // Already broken; closing is best effort.
         }
     }
 

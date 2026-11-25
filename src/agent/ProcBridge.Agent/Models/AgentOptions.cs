@@ -20,6 +20,9 @@ public sealed record AgentOptions
     /// <summary>Requests handled at once on one connection; more wait, which applies back pressure on the socket.</summary>
     public int MaxConcurrentRequestsPerConnection { get; init; } = 16;
 
+    /// <summary>Longest a response may take to be written; a client that stops reading is dropped after it.</summary>
+    public TimeSpan SendTimeout { get; init; } = TimeSpan.FromSeconds(30);
+
     /// <summary>Time a new connection has to send Hello.</summary>
     public TimeSpan HelloTimeout { get; init; } = TimeSpan.FromSeconds(10);
 }

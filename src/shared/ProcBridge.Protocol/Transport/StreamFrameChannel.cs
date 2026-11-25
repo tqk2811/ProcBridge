@@ -9,7 +9,8 @@ namespace ProcBridge.Protocol.Transport;
 /// <summary>
 /// Length-prefixed framing over a byte stream (see <see cref="Frame"/> for the layout). Sends are serialized by a
 /// lock so several requests can share one connection; receiving is single reader.
-/// Owns the stream only when <c>ownsStream</c> is true.
+/// Owns the stream only when <c>ownsStream</c> is true. A send abandoned half way (cancellation, timeout, I/O error)
+/// leaves a partial frame on the wire, so the channel becomes unusable and closes an owned stream.
 /// </summary>
 public sealed class StreamFrameChannel : IFrameChannel
 {
@@ -22,6 +23,7 @@ public sealed class StreamFrameChannel : IFrameChannel
     private readonly SemaphoreSlim _sendLock = new(1, 1);
     private readonly byte[] _lengthBuffer = new byte[LengthPrefixSize];
     private readonly byte[] _lengthBufferForSend = new byte[LengthPrefixSize];
+    private volatile bool _broken;
 
     /// <param name="protector">Encryption layer; null sends plain frames (M2, before M5).</param>
     public StreamFrameChannel(Stream stream, bool ownsStream, int maxFrameSize, IFrameProtector? protector = null)
@@ -33,6 +35,11 @@ public sealed class StreamFrameChannel : IFrameChannel
         _protector = protector;
     }
 
+    /// <summary>
+    /// Cancelling while waiting for the send lock is a plain <see cref="OperationCanceledException"/>. Cancelling or
+    /// failing once writing has started breaks the channel; a cancellation then surfaces as an <see cref="IOException"/>
+    /// whose inner exception is the <see cref="OperationCanceledException"/>.
+    /// </summary>
     public async ValueTask SendAsync(Frame frame, CancellationToken cancellationToken)
     {
         int bodyLength = frame.BodyLength;
@@ -47,25 +54,25 @@ public sealed class StreamFrameChannel : IFrameChannel
         {
             WriteFixedPart(prefix, frame, bodyLength);
 
-            // Only the lock wait honours cancellation: abandoning a half written frame would corrupt the stream.
             await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                if (_protector is null)
+                if (_broken)
+                    throw new IOException("Channel is closed after an aborted send.");
+                try
                 {
-                    await _stream.WriteAsync(prefix.AsMemory(0, prefixLength), CancellationToken.None).ConfigureAwait(false);
-                    if (!frame.Payload.IsEmpty)
-                        await _stream.WriteAsync(frame.Payload, CancellationToken.None).ConfigureAwait(false);
+                    await WriteFrameAsync(frame, prefix, prefixLength, bodyLength, cancellationToken).ConfigureAwait(false);
                 }
-                else
+                catch (Exception e)
                 {
-                    frame.Payload.Span.CopyTo(prefix.AsSpan(prefixLength));
-                    ReadOnlyMemory<byte> sealedBody = _protector.Protect(prefix.AsMemory(LengthPrefixSize, bodyLength));
-                    BinaryPrimitives.WriteInt32LittleEndian(_lengthBufferForSend, sealedBody.Length);
-                    await _stream.WriteAsync(_lengthBufferForSend, CancellationToken.None).ConfigureAwait(false);
-                    await _stream.WriteAsync(sealedBody, CancellationToken.None).ConfigureAwait(false);
+                    // Some bytes may be on the wire already: the stream cannot carry another frame.
+                    _broken = true;
+                    if (_ownsStream)
+                        await _stream.DisposeAsync().ConfigureAwait(false);
+                    if (e is OperationCanceledException)
+                        throw new IOException("Send aborted in the middle of a frame.", e);
+                    throw;
                 }
-                await _stream.FlushAsync(CancellationToken.None).ConfigureAwait(false);
             }
             finally
             {
@@ -76,6 +83,25 @@ public sealed class StreamFrameChannel : IFrameChannel
         {
             ArrayPool<byte>.Shared.Return(prefix);
         }
+    }
+
+    private async ValueTask WriteFrameAsync(Frame frame, byte[] prefix, int prefixLength, int bodyLength, CancellationToken cancellationToken)
+    {
+        if (_protector is null)
+        {
+            await _stream.WriteAsync(prefix.AsMemory(0, prefixLength), cancellationToken).ConfigureAwait(false);
+            if (!frame.Payload.IsEmpty)
+                await _stream.WriteAsync(frame.Payload, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            frame.Payload.Span.CopyTo(prefix.AsSpan(prefixLength));
+            ReadOnlyMemory<byte> sealedBody = _protector.Protect(prefix.AsMemory(LengthPrefixSize, bodyLength));
+            BinaryPrimitives.WriteInt32LittleEndian(_lengthBufferForSend, sealedBody.Length);
+            await _stream.WriteAsync(_lengthBufferForSend, cancellationToken).ConfigureAwait(false);
+            await _stream.WriteAsync(sealedBody, cancellationToken).ConfigureAwait(false);
+        }
+        await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Writes <c>u32 bodyLength | fixed part | header</c> at the start of <paramref name="buffer"/>.</summary>
