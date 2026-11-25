@@ -24,10 +24,13 @@
 //   Close   request : TokenRequest (handle with a write token closed: write the cache copy back if it changed)
 //           reply   : no body
 //   Flush   request : TokenRequest; reply: no body
+//   Retain  request : TokenRequest (a child inherited a handle holding the token: Close is then expected once more)
+//           reply   : no body
 //   SetInfo request : SetInfoRequest, then String RelativePath; reply: FileInfo
 //   Rename  request : RenameRequest, then String RelativePath, String NewRelativePath
 //           reply   : FileInfo, then String NewCachePath (machine B renamed; rename the cache handle to it)
-//   Delete  request : PathRequest (Reserved = DeleteFlag*), then String RelativePath; reply: no body
+//   Delete  request : PathRequest (Reserved = DeleteFlag*), then String RelativePath, then uint64 ExpectedFileId
+//                     when DeleteFlagExpectFileId is set; reply: no body
 
 #include <cstdint>
 
@@ -41,6 +44,7 @@ namespace ProcBridge::HookIpc
     constexpr uint16_t HelloFlagWriteThrough = 1;
     constexpr uint16_t RenameFlagReplaceIfExists = 1;
     constexpr uint16_t DeleteFlagKeepItem = 1; // PathRequest.Reserved of Delete: the hook deletes the cache copy itself
+    constexpr uint16_t DeleteFlagExpectFileId = 2; // ExpectedFileId follows: machine B leaves another file under the name alone
     constexpr const wchar_t* PipeNamePrefix = L"\\\\.\\pipe\\ProcBridge-";
 
     enum class MessageType : uint16_t
@@ -54,6 +58,7 @@ namespace ProcBridge::HookIpc
         SetInfo = 7,
         Rename = 8,
         Delete = 9,
+        Retain = 10,
     };
 
     enum class Architecture : uint16_t

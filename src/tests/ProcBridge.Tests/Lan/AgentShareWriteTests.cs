@@ -162,4 +162,85 @@ public sealed class AgentShareWriteTests
         Assert.AreEqual(NtStatus.ObjectNameNotFound, StatusOf(() => share.Delete("missing.txt")));
         Assert.AreEqual(NtStatus.AccessDenied, StatusOf(() => share.Delete("")));
     }
+
+    [TestMethod]
+    public void WriteBlock_ParallelBlocksOfOneUpload_DoNotCollide()
+    {
+        // The Broker uploads several blocks of one file at once (AgentClient.UploadAsync).
+        using var folder = new TempFolder("share");
+        folder.WriteFile("big.bin", []);
+        var share = new AgentShare("src", folder.Path, writable: true);
+        const int blockSize = 4096;
+        const int blocks = 256;
+        byte[] content = new byte[blockSize * blocks];
+        new Random(1).NextBytes(content);
+
+        Parallel.For(0, blocks, new ParallelOptions { MaxDegreeOfParallelism = 16 },
+            i => share.WriteBlock("big.bin", UploadId, (long)i * blockSize, content.AsSpan(i * blockSize, blockSize)));
+        share.Commit("big.bin", UploadId, content.Length, null, null, ConflictPolicy.KeepBoth);
+
+        CollectionAssert.AreEqual(content, File.ReadAllBytes(folder.Combine("big.bin")));
+    }
+
+    [TestMethod]
+    public void Commit_RepeatedAfterSuccess_IsNotAConflict()
+    {
+        // A commit whose reply was lost is sent again (same upload id, same expected version).
+        using var folder = new TempFolder("share");
+        folder.WriteFile("a.txt", "base"u8.ToArray());
+        var share = new AgentShare("src", folder.Path, writable: true);
+        FsVersion start = share.Stat("a.txt").Version;
+        long time = new DateTime(2020, 5, 5, 0, 0, 0, DateTimeKind.Utc).ToFileTimeUtc();
+
+        share.WriteBlock("a.txt", UploadId, 0, "new content"u8);
+        FsCommitResponse first = share.Commit("a.txt", UploadId, 11, start, time, ConflictPolicy.KeepBoth);
+        share.WriteBlock("a.txt", UploadId, 0, "new content"u8);
+        FsCommitResponse again = share.Commit("a.txt", UploadId, 11, start, time, ConflictPolicy.KeepBoth);
+
+        Assert.IsNull(first.ConflictPath);
+        Assert.IsNull(again.ConflictPath);
+        Assert.AreEqual(first.Entry.Version, again.Entry.Version);
+        Assert.AreEqual("new content", File.ReadAllText(folder.Combine("a.txt")));
+        CollectionAssert.AreEqual(new[] { "a.txt" }, Directory.GetFiles(folder.Path).Select(Path.GetFileName).ToArray());
+    }
+
+    [TestMethod]
+    public void Commit_TwoConflictsInARow_KeepBothUploads()
+    {
+        using var folder = new TempFolder("share");
+        folder.WriteFile("a.txt", "base"u8.ToArray());
+        var share = new AgentShare("src", folder.Path, writable: true);
+        var stale = new FsVersion { LastWriteTime = 1, Size = 1 };
+
+        share.WriteBlock("a.txt", UploadId, 0, "one"u8);
+        FsCommitResponse first = share.Commit("a.txt", UploadId, 3, stale, null, ConflictPolicy.KeepBoth);
+        const string second = "fedcba9876543210fedcba9876543210";
+        share.WriteBlock("a.txt", second, 0, "two"u8);
+        FsCommitResponse other = share.Commit("a.txt", second, 3, stale, null, ConflictPolicy.KeepBoth);
+
+        Assert.IsNotNull(first.ConflictPath);
+        Assert.IsNotNull(other.ConflictPath);
+        Assert.AreNotEqual(first.ConflictPath, other.ConflictPath);
+        Assert.AreEqual("one", File.ReadAllText(folder.Combine(first.ConflictPath)));
+        Assert.AreEqual("two", File.ReadAllText(folder.Combine(other.ConflictPath)));
+        Assert.AreEqual("base", File.ReadAllText(folder.Combine("a.txt")));
+    }
+
+    [TestMethod]
+    public void Delete_WithExpectedFileId_LeavesAnotherFileAlone()
+    {
+        using var folder = new TempFolder("share");
+        folder.WriteFile("a.txt", "old"u8.ToArray());
+        var share = new AgentShare("src", folder.Path, writable: true);
+        ulong oldId = share.Stat("a.txt").FileId;
+        // Replaced by another file under the same name since the id was taken.
+        folder.WriteFile("b.txt", "new"u8.ToArray());
+        File.Move(folder.Combine("b.txt"), folder.Combine("a.txt"), overwrite: true);
+        Assert.AreNotEqual(oldId, share.Stat("a.txt").FileId);
+
+        Assert.IsFalse(share.Delete("a.txt", oldId));
+        Assert.AreEqual("new", File.ReadAllText(folder.Combine("a.txt")));
+        Assert.IsTrue(share.Delete("a.txt", share.Stat("a.txt").FileId));
+        Assert.IsFalse(File.Exists(folder.Combine("a.txt")));
+    }
 }

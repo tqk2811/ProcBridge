@@ -164,6 +164,13 @@ public sealed class HookRequestHandler
                 return new HookEmptyReply { Type = type };
             }
 
+            case HookIpcMessageType.Retain:
+            {
+                HookTokenRequest retain = Read(request, (ref HookIpcReader r) => HookTokenRequest.Read(ref r, type));
+                _writeBack?.Retain(retain.WriteToken);
+                return new HookEmptyReply { Type = type };
+            }
+
             case HookIpcMessageType.Flush:
             {
                 HookTokenRequest flush = Read(request, (ref HookIpcReader r) => HookTokenRequest.Read(ref r, type));
@@ -177,17 +184,23 @@ public sealed class HookRequestHandler
                 HookSetInfoRequest set = Read(request, HookSetInfoRequest.Read);
                 string remotePath = ToRemotePath(set.MappingIndex, set.RelativePath);
                 await RequireWritableAsync(cancellationToken).ConfigureAwait(false);
+                // While a writer has the file open, its size and last write time travel with the write-back of the cache
+                // copy (which already holds them). Setting them on machine B now would give machine B's old content the
+                // cache copy's version, and the write-back would then skip a rewrite of the same size.
+                bool contentFieldsLater = _writeBack!.IsBusy(remotePath);
                 var change = new FsSetInfoRequest
                 {
                     Path = remotePath,
                     Attributes = set.Fields.HasFlag(HookSetInfoFields.Attributes) ? set.Attributes : null,
                     CreationTime = set.Fields.HasFlag(HookSetInfoFields.CreationTime) ? set.CreationTime : null,
                     LastAccessTime = set.Fields.HasFlag(HookSetInfoFields.LastAccessTime) ? set.LastAccessTime : null,
-                    LastWriteTime = set.Fields.HasFlag(HookSetInfoFields.LastWriteTime) ? set.LastWriteTime : null,
-                    EndOfFile = set.Fields.HasFlag(HookSetInfoFields.EndOfFile) ? set.EndOfFile : null,
+                    LastWriteTime = set.Fields.HasFlag(HookSetInfoFields.LastWriteTime) && !contentFieldsLater ? set.LastWriteTime : null,
+                    EndOfFile = set.Fields.HasFlag(HookSetInfoFields.EndOfFile) && !contentFieldsLater ? set.EndOfFile : null,
                 };
-                FsEntry entry = await _cache.SetInfoAsync(change, cancellationToken).ConfigureAwait(false);
-                _writeBack!.InfoChanged(remotePath, entry);
+                FsEntry entry = change.Attributes is null && change.CreationTime is null && change.LastAccessTime is null
+                    && change.LastWriteTime is null && change.EndOfFile is null
+                    ? await _cache.StatAsync(remotePath, cancellationToken).ConfigureAwait(false)
+                    : await _cache.SetInfoAsync(change, cancellationToken).ConfigureAwait(false);
                 return new HookStatReply { Info = ToFileInfo(entry), Type = type };
             }
 
@@ -200,8 +213,12 @@ public sealed class HookRequestHandler
                 if (remotePath.Length == 0 || newRemotePath.Length == 0)
                     throw new ProtocolStatusException(NtStatus.AccessDenied, "The share root cannot be renamed.");
                 bool replace = (rename.Flags & HookRenameRequest.FlagReplaceIfExists) != 0;
-                CachedItem item = await _cache.RenameAsync(remotePath, newRemotePath, replace, cancellationToken).ConfigureAwait(false);
-                _writeBack!.Renamed(remotePath, newRemotePath);
+                CachedItem item;
+                using (await _writeBack!.LockPathsAsync([remotePath, newRemotePath], cancellationToken).ConfigureAwait(false))
+                {
+                    item = await _cache.RenameAsync(remotePath, newRemotePath, replace, cancellationToken).ConfigureAwait(false);
+                    _writeBack.Renamed(remotePath, newRemotePath);
+                }
                 return new HookRenameReply { Info = ToFileInfo(item.Entry), NewCachePath = item.LocalPath };
             }
 
@@ -210,8 +227,13 @@ public sealed class HookRequestHandler
                 HookDeleteRequest delete = Read(request, HookDeleteRequest.Read);
                 string remotePath = ToRemotePath(delete.MappingIndex, delete.RelativePath);
                 await RequireWritableAsync(cancellationToken).ConfigureAwait(false);
-                _writeBack!.Deleted(remotePath);
-                await _cache.DeleteAsync(remotePath, (delete.Flags & HookDeleteRequest.FlagKeepItem) != 0, cancellationToken).ConfigureAwait(false);
+                ulong? expectedFileId = (delete.Flags & HookDeleteRequest.FlagExpectFileId) != 0 ? delete.ExpectedFileId : null;
+                using (await _writeBack!.LockPathsAsync([remotePath], cancellationToken).ConfigureAwait(false))
+                {
+                    // Open writers stop writing back only once machine B really deleted the file.
+                    if (await _cache.DeleteAsync(remotePath, (delete.Flags & HookDeleteRequest.FlagKeepItem) != 0, expectedFileId, cancellationToken).ConfigureAwait(false))
+                        _writeBack.Deleted(remotePath);
+                }
                 return new HookEmptyReply { Type = type };
             }
 

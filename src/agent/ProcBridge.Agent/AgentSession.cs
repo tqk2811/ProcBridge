@@ -155,7 +155,7 @@ internal sealed class AgentSession
                 case MessageType.FsDelete:
                 {
                     FsDeleteRequest delete = ProtocolSerializer.Deserialize<FsDeleteRequest>(request.Header);
-                    var response = new FsDeleteResponse { Deleted = _share!.Delete(delete.Path) };
+                    var response = new FsDeleteResponse { Deleted = _share!.Delete(delete.Path, delete.ExpectedFileId) };
                     await SendAsync(FrameKind.Response, request, ProtocolSerializer.Serialize(response), default).ConfigureAwait(false);
                     break;
                 }

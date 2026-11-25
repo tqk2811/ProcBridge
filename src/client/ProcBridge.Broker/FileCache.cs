@@ -290,10 +290,13 @@ public sealed class FileCache
     /// <summary>Deletes on machine B, then drops the cache copy.</summary>
     /// <param name="keepItem">The caller deletes the cache file or placeholder itself through its open handle; only
     /// stale cache copies below a directory are removed here.</param>
-    public async Task DeleteAsync(string remotePath, bool keepItem, CancellationToken cancellationToken)
+    /// <param name="expectedFileId">File id the caller saw; another file under the name is left alone (returns false).</param>
+    public async Task<bool> DeleteAsync(string remotePath, bool keepItem, ulong? expectedFileId, CancellationToken cancellationToken)
     {
-        await _client.DeleteAsync(remotePath, cancellationToken).ConfigureAwait(false);
+        bool deleted = await _client.DeleteAsync(remotePath, expectedFileId, cancellationToken).ConfigureAwait(false);
         InvalidateTree(remotePath);
+        if (!deleted)
+            return false;
         string localPath = GetLocalPath(remotePath);
         if (Directory.Exists(localPath))
         {
@@ -308,6 +311,7 @@ public sealed class FileCache
         {
             RemoveLocal(localPath);
         }
+        return true;
     }
 
     /// <summary>Removes a stale cache file or folder tree; in-use entries stay.</summary>

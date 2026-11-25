@@ -21,4 +21,6 @@ public enum HookIpcMessageType : ushort
     Rename = 8,
     /// <summary>Delete a virtual file or empty directory (disposition, delete-on-close, NtDeleteFile).</summary>
     Delete = 9,
+    /// <summary>A child process inherited a handle holding a write token: the token stays open until the child closes it too.</summary>
+    Retain = 10,
 }

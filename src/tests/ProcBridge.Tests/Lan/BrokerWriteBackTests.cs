@@ -38,12 +38,12 @@ public sealed class BrokerWriteBackTests
         public BrokerHost Broker { get; private set; }
         public FakeHook Hook { get; private set; }
 
-        public static async Task<Session> StartAsync(ConflictPolicy policy = ConflictPolicy.KeepBoth)
+        public static async Task<Session> StartAsync(ConflictPolicy policy = ConflictPolicy.KeepBoth, TimeSpan? retryDelay = null)
         {
             var share = new TempFolder("wshare");
             var work = new TempFolder("wwork");
             AgentServer agent = StartAgent(share, 0);
-            (BrokerHost broker, FakeHook hook) = await StartBrokerAsync(work, agent.Port, policy);
+            (BrokerHost broker, FakeHook hook) = await StartBrokerAsync(work, agent.Port, policy, retryDelay);
             return new Session(share, work, agent, broker, hook);
         }
 
@@ -54,7 +54,7 @@ public sealed class BrokerWriteBackTests
             return agent;
         }
 
-        public static async Task<(BrokerHost, FakeHook)> StartBrokerAsync(TempFolder work, int port, ConflictPolicy policy = ConflictPolicy.KeepBoth)
+        public static async Task<(BrokerHost, FakeHook)> StartBrokerAsync(TempFolder work, int port, ConflictPolicy policy = ConflictPolicy.KeepBoth, TimeSpan? retryDelay = null)
         {
             string session = Guid.NewGuid().ToString("N");
             BrokerHost broker = BrokerHost.Start(new BrokerOptions
@@ -64,7 +64,7 @@ public sealed class BrokerWriteBackTests
                 CacheRoot = Path.Combine(work.Path, "cache"),
                 WriteQueueRoot = Path.Combine(work.Path, "queue"),
                 ConflictPolicy = policy,
-                WriteRetryDelay = TimeSpan.FromMilliseconds(200),
+                WriteRetryDelay = retryDelay ?? TimeSpan.FromMilliseconds(200),
                 Transport = new() { ConnectTimeout = TimeSpan.FromSeconds(2), ConnectBackoff = TimeSpan.Zero },
             });
             FakeHook hook = await FakeHook.ConnectAsync(HookIpcProtocol.GetPipeName(session));
@@ -88,6 +88,16 @@ public sealed class BrokerWriteBackTests
 
         public async Task CloseAsync(ulong token)
             => await Hook.CallOkAsync(new HookTokenRequest { Type = HookIpcMessageType.Close, WriteToken = token }, (ref HookIpcReader _) => 0);
+
+        public async Task FlushAsync(ulong token)
+            => await Hook.CallOkAsync(new HookTokenRequest { Type = HookIpcMessageType.Flush, WriteToken = token }, (ref HookIpcReader _) => 0);
+
+        public async Task WaitQueueEmptyAsync()
+        {
+            for (int i = 0; i < 200 && Broker.WriteBack.PendingCount > 0; i++)
+                await Task.Delay(100);
+            Assert.AreEqual(0, Broker.WriteBack.PendingCount);
+        }
 
         public async ValueTask DisposeAsync()
         {
@@ -261,5 +271,170 @@ public sealed class BrokerWriteBackTests
         Assert.IsFalse(File.Exists(s.Share.Combine(@"full\x.txt")));
         HookListReply list = await s.Hook.CallOkAsync(new HookListRequest { MappingIndex = 0, RelativePath = "full" }, HookListReply.Read);
         CollectionAssert.AreEqual(new[] { "b.txt" }, list.Entries.Select(x => x.Name).ToArray());
+    }
+
+    [TestMethod]
+    public async Task SetFileTimeOnRewrittenSameSizeFile_StillUploadsNewContent()
+    {
+        // CopyFile over a file of the same size: CREATE_ALWAYS, write, then SetFileTime with the source's time.
+        await using Session s = await Session.StartAsync();
+        string remote = s.Share.WriteFile("a.txt", "aaaa"u8.ToArray());
+        long sourceTime = new DateTime(2015, 3, 3, 0, 0, 0, DateTimeKind.Utc).ToFileTimeUtc();
+
+        HookResolveReply open = await s.ResolveAsync("a.txt", GenericWrite, 5 /* FILE_OVERWRITE_IF */);
+        File.WriteAllText(open.CachePath, "bbbb");
+        File.SetLastWriteTimeUtc(open.CachePath, DateTime.FromFileTimeUtc(sourceTime));
+        await s.Hook.CallOkAsync(new HookSetInfoRequest
+        {
+            MappingIndex = 0, RelativePath = "a.txt", Fields = HookSetInfoFields.LastWriteTime, LastWriteTime = sourceTime,
+        }, HookStatReply.Read);
+        await s.CloseAsync(open.WriteToken);
+
+        Assert.AreEqual("bbbb", File.ReadAllText(remote));
+        Assert.AreEqual(sourceTime, File.GetLastWriteTimeUtc(remote).ToFileTimeUtc());
+        Assert.IsEmpty(s.Broker.WriteBack.Conflicts);
+    }
+
+    [TestMethod]
+    public async Task LargeFile_IsUploadedInParallelBlocks()
+    {
+        await using Session s = await Session.StartAsync();
+        string remote = s.Share.WriteFile("big.bin", []);
+        byte[] content = new byte[4 * 1024 * 1024 + 123];
+        new Random(2).NextBytes(content);
+
+        HookResolveReply open = await s.ResolveAsync("big.bin", GenericWrite, 5);
+        File.WriteAllBytes(open.CachePath, content);
+        await s.CloseAsync(open.WriteToken).WaitAsync(TimeSpan.FromSeconds(60));
+
+        Assert.AreEqual(0, s.Broker.WriteBack.PendingCount);
+        CollectionAssert.AreEqual(content, File.ReadAllBytes(remote));
+    }
+
+    [TestMethod]
+    public async Task EntryRetriedWhileFileOpen_MovesTheBase_AndNewerEntryReplacesUnsentOne()
+    {
+        await using Session s = await Session.StartAsync();
+        string remote = s.Share.WriteFile("a.txt", "base"u8.ToArray());
+        int port = s.Agent.Port;
+
+        HookResolveReply open = await s.ResolveAsync("a.txt", GenericRead | GenericWrite, 1);
+        await s.StopAgentAsync();
+        File.WriteAllText(open.CachePath, "v1");
+        await s.FlushAsync(open.WriteToken);
+        File.WriteAllText(open.CachePath, "v2 longer");
+        await s.FlushAsync(open.WriteToken);
+        Assert.AreEqual(1, s.Broker.WriteBack.PendingCount, "the newer content replaces the unsent entry");
+
+        s.StartAgentAgain(port);
+        await s.WaitQueueEmptyAsync();
+        Assert.AreEqual("v2 longer", File.ReadAllText(remote));
+
+        // The retry moved the version the open file compares with: no false conflict on close.
+        File.WriteAllText(open.CachePath, "v3");
+        await s.CloseAsync(open.WriteToken);
+        Assert.AreEqual("v3", File.ReadAllText(remote));
+        Assert.IsEmpty(s.Broker.WriteBack.Conflicts);
+    }
+
+    [TestMethod]
+    public async Task RefusedDelete_KeepsOpenWriterWritingBack()
+    {
+        await using Session s = await Session.StartAsync();
+        string remote = s.Share.WriteFile("a.txt", "base"u8.ToArray());
+
+        HookResolveReply open = await s.ResolveAsync("a.txt", GenericRead | GenericWrite, 1);
+        File.SetAttributes(remote, FileAttributes.ReadOnly);
+        Assert.AreEqual((uint)NtStatus.CannotDelete, (await s.Hook.CallAsync(new HookDeleteRequest { MappingIndex = 0, RelativePath = "a.txt" })).Status);
+        File.SetAttributes(remote, FileAttributes.Normal);
+        File.WriteAllText(open.CachePath, "still mine");
+        await s.CloseAsync(open.WriteToken);
+
+        Assert.AreEqual("still mine", File.ReadAllText(remote));
+    }
+
+    [TestMethod]
+    public async Task DeleteWhileEntryQueued_DropsTheEntry()
+    {
+        await using Session s = await Session.StartAsync(retryDelay: TimeSpan.FromHours(1));
+        s.Share.WriteFile("a.txt", "base"u8.ToArray());
+        int port = s.Agent.Port;
+
+        HookResolveReply open = await s.ResolveAsync("a.txt", GenericRead | GenericWrite, 1);
+        File.WriteAllText(open.CachePath, "offline");
+        await s.StopAgentAsync();
+        await s.CloseAsync(open.WriteToken);
+        Assert.AreEqual(1, s.Broker.WriteBack.PendingCount);
+        s.StartAgentAgain(port);
+
+        await s.Hook.CallOkAsync(new HookDeleteRequest { MappingIndex = 0, RelativePath = "a.txt" }, (ref HookIpcReader _) => 0);
+        await s.Broker.WriteBack.ResendPendingAsync(CancellationToken.None);
+
+        Assert.AreEqual(0, s.Broker.WriteBack.PendingCount);
+        Assert.IsEmpty(Directory.GetFileSystemEntries(s.Share.Path), "the deleted file does not come back, not even as a conflict copy");
+    }
+
+    [TestMethod]
+    public async Task RenameWhileEntryQueued_SendsItToTheNewName()
+    {
+        await using Session s = await Session.StartAsync(retryDelay: TimeSpan.FromHours(1));
+        s.Share.WriteFile("a.txt", "base"u8.ToArray());
+        int port = s.Agent.Port;
+
+        HookResolveReply open = await s.ResolveAsync("a.txt", GenericRead | GenericWrite, 1);
+        File.WriteAllText(open.CachePath, "offline");
+        await s.StopAgentAsync();
+        await s.CloseAsync(open.WriteToken);
+        s.StartAgentAgain(port);
+
+        await s.Hook.CallOkAsync(new HookRenameRequest
+        {
+            MappingIndex = 0, NewMappingIndex = 0, RelativePath = "a.txt", NewRelativePath = "b.txt",
+        }, HookRenameReply.Read);
+        await s.Broker.WriteBack.ResendPendingAsync(CancellationToken.None);
+
+        Assert.AreEqual(0, s.Broker.WriteBack.PendingCount);
+        CollectionAssert.AreEqual(new[] { "b.txt" }, Directory.GetFileSystemEntries(s.Share.Path).Select(Path.GetFileName).ToArray());
+        Assert.AreEqual("offline", File.ReadAllText(s.Share.Combine("b.txt")));
+    }
+
+    [TestMethod]
+    public async Task DeleteOnCloseWithExpectedFileId_LeavesAFileThatTookTheName()
+    {
+        await using Session s = await Session.StartAsync();
+        string remote = s.Share.WriteFile("a.txt", "opened"u8.ToArray());
+        HookResolveReply open = await s.ResolveAsync("a.txt", GenericRead | 0x00010000 /* DELETE */, 1, 0x00001000 /* FILE_DELETE_ON_CLOSE */);
+        // Another file replaced it on machine B before the handle was closed.
+        s.Share.WriteFile("b.txt", "replacement"u8.ToArray());
+        File.Move(s.Share.Combine("b.txt"), remote, overwrite: true);
+
+        await s.Hook.CallOkAsync(new HookDeleteRequest
+        {
+            MappingIndex = 0, RelativePath = "a.txt", Flags = HookDeleteRequest.FlagKeepItem | HookDeleteRequest.FlagExpectFileId,
+            ExpectedFileId = open.Info.FileId,
+        }, (ref HookIpcReader _) => 0);
+
+        Assert.AreNotEqual(0ul, open.Info.FileId);
+        Assert.AreEqual("replacement", File.ReadAllText(remote));
+    }
+
+    [TestMethod]
+    public async Task ConflictedFile_LastCloseKeepsTheFinalVersion()
+    {
+        await using Session s = await Session.StartAsync();
+        string remote = s.Share.WriteFile("a.txt", "base"u8.ToArray());
+
+        HookResolveReply first = await s.ResolveAsync("a.txt", GenericRead | GenericWrite, 1);
+        HookResolveReply second = await s.ResolveAsync("a.txt", GenericRead | GenericWrite, 1);
+        File.WriteAllText(remote, "edited on machine B");
+        File.WriteAllText(first.CachePath, "A first");
+        await s.CloseAsync(first.WriteToken);
+        File.WriteAllText(second.CachePath, "A final version");
+        await s.CloseAsync(second.WriteToken);
+
+        Assert.AreEqual("edited on machine B", File.ReadAllText(remote));
+        WriteConflict[] conflicts = s.Broker.WriteBack.Conflicts.ToArray();
+        Assert.HasCount(2, conflicts);
+        Assert.AreEqual("A final version", File.ReadAllText(s.Share.Combine(conflicts[^1].ConflictPath)));
     }
 }

@@ -25,6 +25,13 @@ public sealed partial class AgentShare
     /// <summary>Commits, renames and deletes are serialized so a version check and the swap that follows are atomic.</summary>
     private readonly Lock _writeLock = new();
 
+    /// <summary>
+    /// Recent commits under <see cref="_writeLock"/>: upload id, the file it went to (the target, or the conflict copy when
+    /// <c>ConflictPath</c> is set) and that file's version afterwards. A repeated commit is answered again.
+    /// </summary>
+    private readonly Queue<(string UploadId, string Path, string? ConflictPath, FsVersion Version)> _commits = new();
+    private const int RememberedCommits = 256;
+
     /// <summary>Upload staging files (<c>name.pbtmp-&lt;id&gt;</c>) are hidden from listings.</summary>
     private static bool IsStagingName(string name) => name.Contains(StagingMarker, StringComparison.OrdinalIgnoreCase);
 
@@ -87,7 +94,8 @@ public sealed partial class AgentShare
         ArgumentOutOfRangeException.ThrowIfNegative(offset);
         string staging = GetStagingPath(ResolveChild(relativePath), uploadId);
         RequireParent(staging);
-        using SafeFileHandle handle = File.OpenHandle(staging, FileMode.OpenOrCreate, FileAccess.Write, FileShare.Read);
+        // Blocks of one upload arrive in parallel on several connections: every writer shares the staging file.
+        using SafeFileHandle handle = File.OpenHandle(staging, FileMode.OpenOrCreate, FileAccess.Write, FileShare.ReadWrite);
         if (GetFileType(handle) != FileTypeDisk)
             throw new ProtocolStatusException(NtStatus.ObjectNameInvalid, "Not a disk file.");
         RandomAccess.Write(handle, data, offset);
@@ -124,11 +132,15 @@ public sealed partial class AgentShare
                     File.SetLastWriteTimeUtc(staging, DateTime.FromFileTimeUtc(time));
 
                 bool exists = File.Exists(path);
+                // The same commit again (its reply was lost): it is done already, do not apply it twice.
+                if (GetRepeatedCommit(relativePath, path, staging, uploadId, size, lastWriteTime) is { } repeated)
+                    return repeated;
                 if (expectedVersion is { } expected && (!exists || CurrentVersion(path) != expected) && policy == ConflictPolicy.KeepBoth)
                 {
-                    string conflict = path + ConflictMarker + DateTime.UtcNow.ToString("yyyyMMddHHmmssfff", CultureInfo.InvariantCulture);
+                    string conflict = GetConflictPath(path);
                     File.Move(staging, conflict);
-                    string relativeConflict = Path.GetRelativePath(RootPath, conflict).Replace(Path.DirectorySeparatorChar, '/');
+                    RememberCommit(uploadId, path, conflict);
+                    string relativeConflict = ToRelative(conflict);
                     return new FsCommitResponse { Entry = exists ? Stat(relativePath) : Stat(relativeConflict), ConflictPath = relativeConflict };
                 }
 
@@ -146,13 +158,75 @@ public sealed partial class AgentShare
                 {
                     File.Move(staging, path);
                 }
+                RememberCommit(uploadId, path, null);
+                return new FsCommitResponse { Entry = Stat(relativePath) };
             }
-            return new FsCommitResponse { Entry = Stat(relativePath) };
         }
         finally
         {
             TryDeleteFile(staging);
         }
+    }
+
+    private string ToRelative(string path) => Path.GetRelativePath(RootPath, path).Replace(Path.DirectorySeparatorChar, '/');
+
+    /// <summary>
+    /// The answer of an earlier commit of <paramref name="uploadId"/> when nothing changed its result since, or a plain
+    /// success when the target already is the upload (same size, write time and content: committed by an Agent that
+    /// forgot it). Null for a new commit.
+    /// </summary>
+    private FsCommitResponse? GetRepeatedCommit(string relativePath, string path, string staging, string uploadId, long size, long? lastWriteTime)
+    {
+        foreach ((string id, string committedPath, string? conflict, FsVersion version) in _commits)
+        {
+            if (id != uploadId || !committedPath.Equals(path, StringComparison.OrdinalIgnoreCase))
+                continue;
+            string result = conflict ?? path;
+            if (!File.Exists(result) || CurrentVersion(result) != version)
+                return null;
+            return conflict is null
+                ? new FsCommitResponse { Entry = Stat(relativePath) }
+                : new FsCommitResponse { Entry = File.Exists(path) ? Stat(relativePath) : Stat(ToRelative(conflict)), ConflictPath = ToRelative(conflict) };
+        }
+        if (lastWriteTime is not { } time || !File.Exists(path) || CurrentVersion(path) != new FsVersion { LastWriteTime = time, Size = size })
+            return null;
+        return SameContent(path, staging) ? new FsCommitResponse { Entry = Stat(relativePath) } : null;
+    }
+
+    private static bool SameContent(string first, string second)
+    {
+        using var a = new FileStream(first, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var b = new FileStream(second, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        if (a.Length != b.Length)
+            return false;
+        byte[] left = new byte[81920];
+        byte[] right = new byte[81920];
+        while (true)
+        {
+            int read = a.ReadAtLeast(left, left.Length, throwOnEndOfStream: false);
+            if (read == 0)
+                return true;
+            b.ReadExactly(right, 0, read);
+            if (!left.AsSpan(0, read).SequenceEqual(right.AsSpan(0, read)))
+                return false;
+        }
+    }
+
+    private void RememberCommit(string uploadId, string path, string? conflictPath)
+    {
+        if (_commits.Count == RememberedCommits)
+            _commits.Dequeue();
+        _commits.Enqueue((uploadId, path, conflictPath, CurrentVersion(conflictPath ?? path)));
+    }
+
+    /// <summary>A free <c>name.procbridge-conflict-&lt;UTC time&gt;</c> (two conflicts within one millisecond get a suffix).</summary>
+    private static string GetConflictPath(string path)
+    {
+        string conflict = path + ConflictMarker + DateTime.UtcNow.ToString("yyyyMMddHHmmssfff", CultureInfo.InvariantCulture);
+        string candidate = conflict;
+        for (int i = 2; Exists(candidate); i++)
+            candidate = conflict + "-" + i.ToString(CultureInfo.InvariantCulture);
+        return candidate;
     }
 
     private static FsVersion CurrentVersion(string path)
@@ -233,13 +307,17 @@ public sealed partial class AgentShare
     }
 
     /// <summary>Deletes a file or an empty directory, with the status NTFS gives a local caller on refusal.</summary>
-    public bool Delete(string relativePath)
+    /// <param name="expectedFileId">File id the caller saw (a delete-on-close sent after the fact): another file now under
+    /// the same name is left alone and false is returned.</param>
+    public bool Delete(string relativePath, ulong? expectedFileId = null)
     {
         EnsureWritable();
         string path = ResolveChild(relativePath);
         lock (_writeLock)
         {
             FileSystemInfo info = GetExistingInfo(path);
+            if (expectedFileId is { } fileId && fileId != 0 && Stat(relativePath).FileId is var current && current != 0 && current != fileId)
+                return false;
             if ((info.Attributes & FileAttributes.ReadOnly) != 0)
                 throw new ProtocolStatusException(NtStatus.CannotDelete, "Read-only file or directory.");
             if (info is DirectoryInfo directory)

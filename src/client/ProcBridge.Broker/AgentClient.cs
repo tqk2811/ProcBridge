@@ -88,9 +88,12 @@ public sealed class AgentClient : IAsyncDisposable
     public Task<FsEntry> RenameAsync(string remotePath, string newRemotePath, bool replaceIfExists, CancellationToken cancellationToken)
         => SendStatAsync(MessageType.FsRename, ProtocolSerializer.Serialize(new FsRenameRequest { Path = remotePath, NewPath = newRemotePath, ReplaceIfExists = replaceIfExists }), cancellationToken);
 
-    public async Task DeleteAsync(string remotePath, CancellationToken cancellationToken)
+    /// <summary>Deletes on machine B; false when <paramref name="expectedFileId"/> was given and another file has the name.</summary>
+    public async Task<bool> DeleteAsync(string remotePath, ulong? expectedFileId, CancellationToken cancellationToken)
     {
-        await Pool.SendAsync(MessageType.FsDelete, ProtocolSerializer.Serialize(new FsDeleteRequest { Path = remotePath }), default, idempotent: false, cancellationToken).ConfigureAwait(false);
+        var request = new FsDeleteRequest { Path = remotePath, ExpectedFileId = expectedFileId };
+        Frame frame = await Pool.SendAsync(MessageType.FsDelete, ProtocolSerializer.Serialize(request), default, idempotent: false, cancellationToken).ConfigureAwait(false);
+        return ProtocolSerializer.Deserialize<FsDeleteResponse>(frame.Header).Deleted;
     }
 
     private async Task<FsEntry> SendStatAsync(MessageType type, byte[] header, CancellationToken cancellationToken)
@@ -103,11 +106,12 @@ public sealed class AgentClient : IAsyncDisposable
     /// Uploads <paramref name="sourcePath"/> as the new content of <paramref name="remotePath"/>: blocks in parallel into
     /// machine B's staging file, then one commit that checks <paramref name="expectedVersion"/> (plan section 10).
     /// </summary>
-    public async Task<FsCommitResponse> UploadAsync(string remotePath, string sourcePath, FsVersion? expectedVersion, ConflictPolicy policy, CancellationToken cancellationToken)
+    /// <param name="uploadId">32 lowercase hex digits, the same for every attempt of one write-back: machine B answers a
+    /// commit it already applied instead of applying it again.</param>
+    public async Task<FsCommitResponse> UploadAsync(string remotePath, string sourcePath, string uploadId, FsVersion? expectedVersion, ConflictPolicy policy, CancellationToken cancellationToken)
     {
         int maxRead = await Pool.GetMaxReadSizeAsync(cancellationToken).ConfigureAwait(false);
         int chunkSize = Math.Max(1, Math.Min(_options.ReadChunkSize, maxRead));
-        string uploadId = Guid.NewGuid().ToString("N");
         long size;
         long lastWriteTime;
         using (var handle = File.OpenHandle(sourcePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, FileOptions.Asynchronous))
