@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 using ProcBridge.Protocol;
 using ProcBridge.Protocol.Enums;
 using ProcBridge.Protocol.Models;
@@ -12,9 +14,21 @@ namespace ProcBridge.Agent;
 public sealed class ReadOnlyShare
 {
     private const int DefaultListPage = 1024;
+    private const uint FileTypeDisk = 1;
 
     private static readonly char[] Separators = ['/', '\\'];
     private static readonly char[] InvalidNameChars = Path.GetInvalidFileNameChars();
+
+    /// <summary>
+    /// Names Windows treats as devices wherever they appear in a path, with any extension. Superscript digits are
+    /// included because the console and LPT/COM handling accepts them too.
+    /// </summary>
+    private static readonly HashSet<string> DosDeviceNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+        "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "COM\u00B9", "COM\u00B2", "COM\u00B3",
+        "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "LPT\u00B9", "LPT\u00B2", "LPT\u00B3",
+    };
     private static readonly EnumerationOptions ListOptions = new()
     {
         AttributesToSkip = 0,
@@ -51,7 +65,7 @@ public sealed class ReadOnlyShare
         string[] segments = relativePath.Split(Separators, StringSplitOptions.RemoveEmptyEntries);
         foreach (string segment in segments)
         {
-            if (segment is "." or ".." || segment.IndexOfAny(InvalidNameChars) >= 0 || segment.EndsWith('.') || segment.EndsWith(' '))
+            if (segment is "." or ".." || segment.IndexOfAny(InvalidNameChars) >= 0 || segment.EndsWith('.') || segment.EndsWith(' ') || IsDosDeviceName(segment))
                 throw new ProtocolStatusException(NtStatus.ObjectNameInvalid, $"Invalid path segment '{segment}'.");
         }
 
@@ -69,6 +83,17 @@ public sealed class ReadOnlyShare
             throw new ProtocolStatusException(NtStatus.AccessDenied, "Path leaves the share.");
         return full;
     }
+
+    /// <summary>True for <c>NUL</c>, <c>com1.txt</c>, <c>CONIN$</c> and the like: the part before the first dot, minus trailing spaces.</summary>
+    private static bool IsDosDeviceName(string segment)
+    {
+        int dot = segment.IndexOf('.');
+        string stem = (dot < 0 ? segment : segment[..dot]).TrimEnd(' ');
+        return DosDeviceNames.Contains(stem);
+    }
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetFileType(SafeFileHandle handle);
 
     /// <summary>Returns false when <paramref name="path"/> does not exist; throws when it is a link leaving the share.</summary>
     private bool CheckLink(string path)
@@ -153,6 +178,9 @@ public sealed class ReadOnlyShare
         ArgumentOutOfRangeException.ThrowIfNegative(offset);
 
         using var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        // Name checks cannot catch every alias of a device; reading from a pipe or console would block the request.
+        if (GetFileType(handle) != FileTypeDisk)
+            throw new ProtocolStatusException(NtStatus.ObjectNameInvalid, "Not a disk file.");
         version = new FsVersion { LastWriteTime = File.GetLastWriteTimeUtc(handle).ToFileTimeUtc(), Size = RandomAccess.GetLength(handle) };
         if (expectedVersion is { } expected && expected != version)
             throw new ProtocolStatusException(NtStatus.FileVersionChanged, "File changed on machine B.");
