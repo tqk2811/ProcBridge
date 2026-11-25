@@ -14,6 +14,7 @@
     <Project Path="agent/ProcBridge.Agent/ProcBridge.Agent.csproj" />
     <Project Path="agent/ProcBridge.Agent.Explorer/ProcBridge.Agent.Explorer.csproj" />
     <Project Path="agent/ProcBridge.Agent.Wpf.Core/ProcBridge.Agent.Wpf.Core.csproj" />
+    <Project Path="agent/ProcBridge.Agent.Wpf/ProcBridge.Agent.Wpf.csproj" />
   </Folder>
   <Folder Name="/tools/">
     <Project Path="tools/ProcBridge.Bench/ProcBridge.Bench.csproj" />
