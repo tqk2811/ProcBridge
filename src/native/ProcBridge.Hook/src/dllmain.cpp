@@ -5,6 +5,8 @@
 #include "BrokerResolver.h"
 #include "FileHooks.h"
 #include "HandleInheritance.h"
+#include "ImageRedirect.h"
+#include "LoaderNames.h"
 #include "PathMapper.h"
 #include "ProcessHooks.h"
 #include <MinHook.h>
@@ -119,6 +121,10 @@ namespace
         {
             return result;
         }
+        // Set by the parent's hook for this process only (a process started from the backing copy of a virtual image):
+        // removed at once so the children of this process do not inherit it.
+        const std::wstring image = GetVariable(ProcBridge::Hook::ImageRedirect::ImageVariable);
+        SetEnvironmentVariableW(ProcBridge::Hook::ImageRedirect::ImageVariable, nullptr);
         const ProcBridge::Hook::IPathResolver* resolver = nullptr;
         if (ProcBridge::Hook::BrokerResolver::IsConfigured())
         {
@@ -153,7 +159,7 @@ namespace
         result = ProcBridge::Hook::InstallFileHooks(*resolver);
         if (result == ERROR_SUCCESS)
         {
-            result = ProcBridge::Hook::InstallProcessHooks(hooks, childEnvironment, inheritance);
+            result = ProcBridge::Hook::InstallProcessHooks(hooks, childEnvironment, inheritance, *resolver);
         }
         if (result != ERROR_SUCCESS)
         {
@@ -161,7 +167,16 @@ namespace
         }
         // Before the hooks run: the inherited handles must already be known to the first name query.
         inheritance.ImportFromParent(data.Handles, data.HandleCount, data.Extra, data.ExtraBytes);
-        return MH_EnableHook(MH_ALL_HOOKS) == MH_OK ? ERROR_SUCCESS : ERROR_GEN_FAILURE;
+        if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK)
+        {
+            return ERROR_GEN_FAILURE;
+        }
+        const size_t separator = image.find(L'*');
+        if (separator != std::wstring::npos)
+        {
+            ProcBridge::Hook::RestoreVirtualImageNames(image.substr(0, separator), image.substr(separator + 1));
+        }
+        return ERROR_SUCCESS;
     }
 
     DWORD InitializeGuarded(const InitData& data) noexcept
