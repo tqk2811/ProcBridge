@@ -114,6 +114,23 @@ public sealed class HookCommandTests
     [TestMethod]
     [DataRow("x64")]
     [DataRow("Win32")]
+    public void NestedVirtualRoots_LongestRootWins(string platform)
+    {
+        using HookSandbox sandbox = new(platform);
+        string inner = sandbox.VirtualRoot + "\\inner";
+
+        // The outer root is listed first on purpose.
+        ProcessResult result = sandbox.RunSpawn(
+            $"--map \"{sandbox.VirtualRoot}\" \"{sandbox.RealRoot}\" --map \"{inner}\" \"{sandbox.RealRoot}\\sub\" "
+            + $"-- cmd.exe /d /c type \"{inner}\\b.txt\"");
+
+        Assert.AreEqual(0, result.ExitCode, result.StandardError);
+        Assert.AreEqual("bee\r\n", result.StandardOutput);
+    }
+
+    [TestMethod]
+    [DataRow("x64")]
+    [DataRow("Win32")]
     public void PathOutsideVirtualFolder_IsNotRedirected(string platform)
     {
         using HookSandbox sandbox = new(platform);

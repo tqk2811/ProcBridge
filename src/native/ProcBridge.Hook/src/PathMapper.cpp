@@ -172,14 +172,17 @@ namespace ProcBridge::Hook
 
     int PathMapper::FindMapping(const UNICODE_STRING& ntPath) const noexcept
     {
+        // Longest root wins when roots are nested, whatever the declaration order.
+        int best = -1;
         for (int i = 0; i < _count; ++i)
         {
-            if (HasPathPrefix(ntPath.Buffer, ntPath.Length, _mappings[i].VirtualNt))
+            const UNICODE_STRING& root = _mappings[i].VirtualNt;
+            if (HasPathPrefix(ntPath.Buffer, ntPath.Length, root) && (best < 0 || root.Length > _mappings[best].VirtualNt.Length))
             {
-                return i;
+                best = i;
             }
         }
-        return -1;
+        return best;
     }
 
     bool PathMapper::TranslateToReal(int mapping, const UNICODE_STRING& ntPath, UNICODE_STRING& realPath) const noexcept
