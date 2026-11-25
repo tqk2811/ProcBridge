@@ -119,6 +119,40 @@ public sealed class BrokerEndToEndTests
     }
 
     [TestMethod]
+    public async Task CacheFile_IsReadOnly_AndRestoredWhenTamperedWith()
+    {
+        using var share = new TempFolder("e2e");
+        share.WriteFile("f.txt", "original"u8.ToArray());
+        using var cacheDir = new TempFolder("cache");
+        await using AgentServer server = StartAgent(share);
+        await using AgentClient client = CreateClient(server.Port);
+        var cache = new FileCache(client, cacheDir.Path, TimeSpan.Zero);
+
+        CachedItem item = await cache.EnsureAsync("f.txt", CancellationToken.None);
+        Assert.AreNotEqual(0, (int)(File.GetAttributes(item.LocalPath) & FileAttributes.ReadOnly));
+
+        // Something bypassed the read-only bit and changed the cached copy: size and time no longer match the version.
+        File.SetAttributes(item.LocalPath, FileAttributes.Normal);
+        File.WriteAllBytes(item.LocalPath, "tampered content"u8.ToArray());
+        CachedItem again = await cache.EnsureAsync("f.txt", CancellationToken.None);
+        Assert.AreEqual("original", File.ReadAllText(again.LocalPath));
+    }
+
+    [TestMethod]
+    public async Task Cache_StartupRemovesLeftoverDownloadTempFiles()
+    {
+        using var cacheDir = new TempFolder("cache");
+        string leftover = cacheDir.WriteFile(@"proj/f.txt.pbdl-0123456789abcdef.tmp", [1, 2, 3]);
+        string keep = cacheDir.WriteFile(@"proj/f.txt", [4]);
+        using var share = new TempFolder("e2e");
+        await using AgentServer server = StartAgent(share);
+        await using AgentClient client = CreateClient(server.Port);
+        _ = new FileCache(client, cacheDir.Path, TimeSpan.Zero);
+        Assert.IsFalse(File.Exists(leftover));
+        Assert.IsTrue(File.Exists(keep));
+    }
+
+    [TestMethod]
     public async Task ConcurrentEnsure_SharesOneDownload()
     {
         using var share = new TempFolder("e2e");

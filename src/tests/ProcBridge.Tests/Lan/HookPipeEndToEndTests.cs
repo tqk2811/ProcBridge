@@ -116,10 +116,43 @@ public sealed class HookPipeEndToEndTests
         {
             MappingIndex = 0, RelativePath = "readme.md", DesiredAccess = 0x40000000 /* GENERIC_WRITE */, CreateDisposition = 1,
         })).Status);
-        Assert.AreEqual((uint)NtStatus.ObjectNameNotFound, (await hook.CallAsync(new HookResolveRequest
+        // Creating a file on the share is a write, so it is refused as such even though the file does not exist.
+        Assert.AreEqual((uint)NtStatus.MediaWriteProtected, (await hook.CallAsync(new HookResolveRequest
         {
             MappingIndex = 0, RelativePath = "new.txt", DesiredAccess = 0x40000000, CreateDisposition = 2 /* FILE_CREATE */,
         })).Status);
+    }
+
+    [TestMethod]
+    public async Task WriteIntents_AreRefusedAndReadOnlyOpensWork()
+    {
+        using var share = new TempFolder("pipe");
+        share.WriteFile("a.txt", "hello"u8.ToArray());
+        using var cacheDir = new TempFolder("cache");
+        await using var agent = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
+        agent.Start();
+        string session = Guid.NewGuid().ToString("N");
+        await using BrokerHost broker = BrokerHost.Start(new BrokerOptions
+        {
+            SessionId = session, AgentHost = "127.0.0.1", AgentPort = agent.Port, ShareName = "src",
+            Mappings = [new VirtualMapping(VirtualRoot, "")], CacheRoot = cacheDir.Path,
+        });
+        await using FakeHook hook = await FakeHook.ConnectAsync(HookIpcProtocol.GetPipeName(session));
+
+        const uint MaximumAllowed = 0x02000000;
+        const uint ReadAccess = 0x80100080;
+        async Task<uint> ResolveAsync(string path, uint access, uint disposition)
+            => (await hook.CallAsync(new HookResolveRequest { MappingIndex = 0, RelativePath = path, DesiredAccess = access, CreateDisposition = disposition })).Status;
+
+        // MAXIMUM_ALLOWED asks for every right the object grants, write included.
+        Assert.AreEqual((uint)NtStatus.MediaWriteProtected, await ResolveAsync("a.txt", MaximumAllowed, 1));
+        // Dispositions that create a file are refused when it is missing; the creating ones also when it exists.
+        foreach (uint disposition in new uint[] { 2, 3, 5 })
+            Assert.AreEqual((uint)NtStatus.MediaWriteProtected, await ResolveAsync("new.txt", ReadAccess, disposition), $"disposition {disposition}");
+        Assert.AreEqual((uint)NtStatus.MediaWriteProtected, await ResolveAsync("a.txt", ReadAccess, 5));
+        Assert.AreEqual((uint)NtStatus.ObjectNameNotFound, await ResolveAsync("new.txt", ReadAccess, 1));
+        // FILE_OPEN_IF on an existing file with read access only just opens it.
+        Assert.AreEqual(0u, await ResolveAsync("a.txt", ReadAccess, 3));
     }
 
     [TestMethod]

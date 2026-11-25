@@ -19,9 +19,12 @@ public sealed class HookRequestHandler
     private const uint WriteAccessMask =
         0x0002 /* FILE_WRITE_DATA */ | 0x0004 /* FILE_APPEND_DATA */ | 0x0010 /* FILE_WRITE_EA */ |
         0x0040 /* FILE_DELETE_CHILD */ | 0x0100 /* FILE_WRITE_ATTRIBUTES */ | 0x00010000 /* DELETE */ |
-        0x00040000 /* WRITE_DAC */ | 0x00080000 /* WRITE_OWNER */ | 0x10000000 /* GENERIC_ALL */ | 0x40000000 /* GENERIC_WRITE */;
+        0x00040000 /* WRITE_DAC */ | 0x00080000 /* WRITE_OWNER */ | 0x02000000 /* MAXIMUM_ALLOWED */ |
+        0x10000000 /* GENERIC_ALL */ | 0x40000000 /* GENERIC_WRITE */;
     private const uint FileOpen = 1;
+    private const uint FileCreate = 2;
     private const uint FileOpenIf = 3;
+    private const uint FileOverwriteIf = 5;
     private const uint FileDeleteOnClose = 0x00001000;
     private const long AllocationUnit = 4096;
 
@@ -80,16 +83,33 @@ public sealed class HookRequestHandler
             {
                 HookResolveRequest resolve = Read(request, HookResolveRequest.Read);
                 string remotePath = ToRemotePath(resolve.MappingIndex, resolve.RelativePath);
+                bool mayCreate = resolve.CreateDisposition is FileCreate or FileOpenIf or FileOverwriteIf;
                 if ((resolve.DesiredAccess & WriteAccessMask) != 0
                     || (resolve.CreateOptions & FileDeleteOnClose) != 0
                     || resolve.CreateDisposition is not (FileOpen or FileOpenIf))
                 {
-                    // Report a missing file as such before the write-protect error, like a read-only volume does.
-                    await _cache.StatAsync(remotePath, cancellationToken).ConfigureAwait(false);
+                    // Report a missing file as such before the write-protect error, like a read-only volume does;
+                    // when the call would create it, the volume's answer is the write-protect error itself.
+                    try
+                    {
+                        await _cache.StatAsync(remotePath, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (ProtocolStatusException e) when (mayCreate && e.Status == NtStatus.ObjectNameNotFound)
+                    {
+                    }
                     throw new ProtocolStatusException(NtStatus.MediaWriteProtected, "Share is read only.");
                 }
-                CachedItem item = await _cache.EnsureAsync(remotePath, cancellationToken).ConfigureAwait(false);
-                return new HookResolveReply { Info = ToFileInfo(item.Entry), CachePath = item.LocalPath };
+
+                try
+                {
+                    CachedItem item = await _cache.EnsureAsync(remotePath, cancellationToken).ConfigureAwait(false);
+                    return new HookResolveReply { Info = ToFileInfo(item.Entry), CachePath = item.LocalPath };
+                }
+                catch (ProtocolStatusException e) when (resolve.CreateDisposition == FileOpenIf && e.Status == NtStatus.ObjectNameNotFound)
+                {
+                    // FILE_OPEN_IF would create the missing file.
+                    throw new ProtocolStatusException(NtStatus.MediaWriteProtected, "Share is read only.");
+                }
             }
 
             case HookIpcMessageType.List:

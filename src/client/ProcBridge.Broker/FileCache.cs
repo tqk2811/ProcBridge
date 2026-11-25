@@ -35,6 +35,15 @@ public sealed class FileCache
         _cacheRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(cacheRoot));
         _ttlMilliseconds = (long)metadataTtl.TotalMilliseconds;
         Directory.CreateDirectory(_cacheRoot);
+        DeleteLeftoverTempFiles();
+    }
+
+    /// <summary>Removes <c>*.pbdl-*.tmp</c> files that a crashed Broker left behind in earlier runs.</summary>
+    private void DeleteLeftoverTempFiles()
+    {
+        var options = new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, AttributesToSkip = FileAttributes.ReparsePoint };
+        foreach (string path in Directory.EnumerateFiles(_cacheRoot, "*.pbdl-*.tmp", options))
+            TryDelete(path);
     }
 
     public string CacheRoot => _cacheRoot;
@@ -90,7 +99,7 @@ public sealed class FileCache
             return new CachedItem(entry, localPath);
         }
 
-        if (_versions.TryGetValue(remotePath, out FsVersion version) && version == entry.Version && File.Exists(localPath))
+        if (_versions.TryGetValue(remotePath, out FsVersion version) && version == entry.Version && MatchesVersion(localPath, version))
             return new CachedItem(entry, localPath);
 
         Lazy<Task<CachedItem>> download = _downloads.GetOrAdd(remotePath,
@@ -105,6 +114,13 @@ public sealed class FileCache
             if (download.IsValueCreated && download.Value.IsCompleted)
                 _downloads.TryRemove(new KeyValuePair<string, Lazy<Task<CachedItem>>>(remotePath, download));
         }
+    }
+
+    /// <summary>True when the cache file exists and still has the size and write time of the downloaded version.</summary>
+    private static bool MatchesVersion(string localPath, FsVersion version)
+    {
+        var info = new FileInfo(localPath);
+        return info.Exists && info.Length == version.Size && info.LastWriteTimeUtc.ToFileTimeUtc() == version.LastWriteTime;
     }
 
     /// <summary>Local path a remote path is cached at.</summary>
@@ -126,7 +142,8 @@ public sealed class FileCache
                 if (File.Exists(localPath))
                     File.SetAttributes(localPath, FileAttributes.Normal);
                 File.Move(temp, localPath, overwrite: true);
-                File.SetAttributes(localPath, MirroredOrNormal(entry.Attributes));
+                // The share is read only, so the cached copy is too, whatever machine B says.
+                File.SetAttributes(localPath, Mirrored(entry.Attributes) | FileAttributes.ReadOnly);
                 _versions[remotePath] = entry.Version;
                 return new CachedItem(entry, localPath);
             }
@@ -151,11 +168,7 @@ public sealed class FileCache
         File.SetLastAccessTimeUtc(path, DateTime.FromFileTimeUtc(entry.LastAccessTime));
     }
 
-    private static FileAttributes MirroredOrNormal(uint attributes)
-    {
-        var mirrored = (FileAttributes)attributes & MirroredAttributes;
-        return mirrored == 0 ? FileAttributes.Normal : mirrored;
-    }
+    private static FileAttributes Mirrored(uint attributes) => (FileAttributes)attributes & MirroredAttributes;
 
     private static void TryDelete(string path)
     {
