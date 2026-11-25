@@ -37,6 +37,13 @@ public sealed class HookCommandTests
         Assert.IsTrue(result.StandardOutput.Split(Environment.NewLine).Any(line => line.EndsWith(" sub", StringComparison.Ordinal)),
             result.StandardOutput);
         Assert.Contains("ro.txt", result.StandardOutput);
+
+        // Bare listing must match the real folder entry for entry.
+        ProcessResult real = sandbox.Run("cmd.exe", $"/d /c dir /b /a \"{sandbox.RealRoot}\"");
+        ProcessResult hooked = sandbox.RunHooked($"cmd.exe /d /c dir /b /a \"{sandbox.VirtualRoot}\"");
+        Assert.AreEqual(0, hooked.ExitCode, hooked.StandardError);
+        Assert.AreEqual(real.StandardOutput, hooked.StandardOutput);
+        Assert.Contains("a.txt", hooked.StandardOutput);
     }
 
     [TestMethod]
@@ -77,11 +84,17 @@ public sealed class HookCommandTests
     public void PathOutsideVirtualFolder_IsNotRedirected(string platform)
     {
         using HookSandbox sandbox = new(platform);
+        // "realx\a.txt" is where "virtual-rootx\a.txt" would land if the prefix match ignored the path boundary.
+        const string marker = "sibling of the real root";
+        string realSibling = sandbox.RealRoot + "x";
+        Directory.CreateDirectory(realSibling);
+        File.WriteAllText(Path.Combine(realSibling, "a.txt"), marker);
 
         ProcessResult result = sandbox.RunHooked($"cmd.exe /d /c type \"{sandbox.RealRoot}\\sub\\b.txt\" \"{sandbox.VirtualRoot}x\\a.txt\"");
 
         // Real path still works; a sibling sharing the prefix ("virtual-rootx") is not inside the virtual root.
         Assert.AreEqual(1, result.ExitCode);
         Assert.Contains("bee", result.StandardOutput);
+        Assert.DoesNotContain(marker, result.StandardOutput);
     }
 }
