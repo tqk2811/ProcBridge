@@ -149,7 +149,10 @@ internal sealed class RangeFile
             return _present[block];
     }
 
-    /// <summary>The shared download of <paramref name="block"/>; a failed one is forgotten so the next reader tries again.</summary>
+    /// <summary>
+    /// The shared download of <paramref name="block"/>; a failed one is forgotten so the next reader tries again, a
+    /// finished one stays (a reader that saw the block missing just before gets the finished task, not a second download).
+    /// </summary>
     private Task Fetch(long block)
     {
         Lazy<Task> fetch = _fetches.GetOrAdd(block, b => new Lazy<Task>(() => FetchBlockAsync(b)));
@@ -162,6 +165,14 @@ internal sealed class RangeFile
     private async Task FetchBlockAsync(long block)
     {
         await Task.Yield();
+        lock (_lock)
+        {
+            // Came in since the caller looked, or the copy is complete (its write handle is closed): nothing to do.
+            if (_present[block])
+                return;
+            if (_closed)
+                throw new ObjectDisposedException(nameof(RangeFile), "The range copy was abandoned.");
+        }
         long offset = block * _blockSize;
         int length = (int)Math.Min(_blockSize, Entry.Size - offset);
         try
@@ -182,7 +193,6 @@ internal sealed class RangeFile
             _present[block] = true;
             last = --_missing == 0;
         }
-        _fetches.TryRemove(block, out _);
         if (last)
             Finish();
     }

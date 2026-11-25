@@ -154,6 +154,63 @@ public sealed class RangeCacheTests
     }
 
     [TestMethod]
+    public async Task BlockAskedAgainAfterItCameIn_IsNotDownloadedTwice_EvenOnceTheCopyIsComplete()
+    {
+        using var share = new TempFolder("rng");
+        using var cacheDir = new TempFolder("cache");
+        CreateSparseFile(share.Combine("one.bin"), 3L * BlockSize, 4, 0);
+        await using AgentServer server = StartAgent(share);
+        await using AgentClient client = CreateClient(server.Port);
+        FsEntry entry = await client.StatAsync("one.bin", CancellationToken.None);
+        RangeFile file = RangeFile.Create(1, "one.bin", entry, cacheDir.Combine("one.bin"), client, BlockSize, 0);
+        try
+        {
+            await file.CompleteAsync(1, CancellationToken.None);
+            Assert.IsTrue(file.IsComplete);
+            long downloaded = file.BytesDownloaded;
+
+            // A reader that saw block 1 missing right before it came in (and the copy closed its write handle) asks for it.
+            var fetch = (Func<long, Task>)Delegate.CreateDelegate(typeof(Func<long, Task>), file,
+                typeof(RangeFile).GetMethod("Fetch", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!);
+            await fetch(1);
+            Assert.AreEqual(downloaded, file.BytesDownloaded);
+        }
+        finally
+        {
+            file.Abandon();
+        }
+    }
+
+    [TestMethod]
+    public async Task UnfinishedCopyReplacedByANewVersion_ClosesItsWriteHandle()
+    {
+        using var share = new TempFolder("rng");
+        using var cacheDir = new TempFolder("cache");
+        string remote = CreateSparseFile(share.Combine("data.bin"), 8L * 1024 * 1024, 5, 0);
+        await using AgentServer server = StartAgent(share);
+        await using AgentClient client = CreateClient(server.Port);
+        var cache = new FileCache(client, cacheDir.Path, Options());
+        try
+        {
+            CachedItem first = await cache.EnsureAsync("data.bin", allowRanges: true, CancellationToken.None);
+            await cache.FetchRangeAsync(first.RangeId, 0, 4096, whole: false, CancellationToken.None);
+            string oldCopy = first.LocalPath;
+            using (var stream = new FileStream(remote, FileMode.Open, FileAccess.Write, FileShare.ReadWrite))
+                stream.SetLength(9L * 1024 * 1024);
+            cache.Invalidate("data.bin");
+
+            CachedItem second = await cache.EnsureAsync("data.bin", allowRanges: true, CancellationToken.None);
+            Assert.AreNotEqual(first.RangeId, second.RangeId);
+            // The old copy's missing blocks fail at once (no download of a version machine B no longer has).
+            await Assert.ThrowsExactlyAsync<ObjectDisposedException>(() => cache.FetchRangeAsync(first.RangeId, 4L * 1024 * 1024, 4096, whole: false, CancellationToken.None));
+        }
+        finally
+        {
+            cache.AbandonRanges();
+        }
+    }
+
+    [TestMethod]
     public async Task WholeOpen_CompletesTheSparseCopyInPlace()
     {
         using var share = new TempFolder("rng");

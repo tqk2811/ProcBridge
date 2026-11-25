@@ -243,7 +243,9 @@ public sealed class FileCache
         if (change.Action is FsChangeAction.Removed or FsChangeAction.RenamedOldName)
         {
             _versions.TryRemove(path, out _);
-            _ranges.TryRemove(path, out _);
+            // Gone from that name on machine B: its missing blocks cannot be fetched any more, close the write handle.
+            if (_ranges.TryRemove(path, out RangeFile? range))
+                range.Abandon();
             RemoveByPrefix(_versions, path + "/");
         }
     }
@@ -367,6 +369,9 @@ public sealed class FileCache
         {
             if (_ranges.TryGetValue(remotePath, out RangeFile? current) && current.Version == entry.Version && !current.IsComplete)
                 return new CachedItem(entry, current.LocalPath, current.Id);
+            // An unfinished copy of an older version: machine B no longer serves its missing blocks (version check), so
+            // its write handle goes; the blocks it has stay readable through the handles that have it open.
+            current?.Abandon();
             Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
             // An older copy stays readable through the handles that have it open (renamed away, its RangeFile keeps
             // serving their ranges); the name is free for the new one.
