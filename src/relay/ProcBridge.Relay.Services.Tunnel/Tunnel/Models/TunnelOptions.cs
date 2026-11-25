@@ -46,4 +46,13 @@ public sealed class TunnelOptions
     /// only 8 digits. The host opens a new slot with a new code when it expires.
     /// </summary>
     public TimeSpan PairingSlotLifetime { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// Failed pairing lookups (no slot for the key) per minute over the whole relay. Past it every lookup gets 429 until
+    /// the minute ends: a guesser spread over many addresses still cannot try more codes than this.
+    /// </summary>
+    public int MaxFailedPairingLookupsPerMinute { get; set; } = 1000;
+
+    /// <summary><c>pairingSlot</c> messages one control channel may send per minute; more are rejected.</summary>
+    public int MaxPairingSlotRequestsPerMinute { get; set; } = 30;
 }

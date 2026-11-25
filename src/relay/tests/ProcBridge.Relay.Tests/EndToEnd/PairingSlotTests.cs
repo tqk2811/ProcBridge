@@ -16,16 +16,16 @@ namespace ProcBridge.Relay.Tests.EndToEnd;
 [TestClass]
 public sealed class PairingSlotTests
 {
-    private static RelayApiFactory NewRelay(int pairingPermits = 100000, string? slotLifetime = null)
+    private static RelayApiFactory NewRelay(int pairingPermits = 100000, TimeProvider? time = null, Dictionary<string, string?>? extra = null)
     {
         var settings = new Dictionary<string, string?>
         {
             ["Relay:RateLimit:PairingPermitLimit"] = pairingPermits.ToString(),
             ["Relay:RateLimit:Window"] = "00:10:00",
         };
-        if (slotLifetime is not null)
-            settings["Relay:Tunnel:PairingSlotLifetime"] = slotLifetime;
-        return new RelayApiFactory(settings);
+        foreach (var (key, value) in extra ?? [])
+            settings[key] = value;
+        return new RelayApiFactory(settings, time);
     }
 
     private static string NewLookupKey() => RelayPairingCode.DeriveLookupKey(RelayPairingCode.Generate());
@@ -56,6 +56,7 @@ public sealed class PairingSlotTests
         Assert.AreEqual(TunnelProtocol.PairingSlotRegisteredMessage, registered.Type);
         Assert.AreEqual(key, registered.LookupKey);
         Assert.IsNotNull(registered.ExpiresAt);
+        Assert.AreEqual(300, registered.ExpiresInSeconds, "The relay gives the lifetime, so the host times it on its own clock.");
         Assert.IsTrue(relay.HasPairingSlot(hostId));
 
         var session = await relay.NewApi().Tunnel.OpenPairingSessionAsync(new OpenPairingSessionRequestVM { LookupKey = key });
@@ -105,13 +106,16 @@ public sealed class PairingSlotTests
     [TestMethod]
     public async Task ChỗGhépCặpHếtHạnVàMấtTheoKênhĐiềuKhiển()
     {
-        await using var factory = NewRelay(slotLifetime: "00:00:01");
+        var clock = new ManualTimeProvider();
+        await using var factory = NewRelay(time: clock);
         var relay = new RelayTestClient(factory);
         using var hostKey = IdentityKey.Generate();
         var (control, hostId) = await relay.ConnectControlAsync(hostKey);
         string key = NewLookupKey();
         await RelayTestClient.RequestPairingSlotAsync(control, key);
-        await Task.Delay(TimeSpan.FromSeconds(1.5));
+        clock.Advance(TimeSpan.FromMinutes(5) - TimeSpan.FromSeconds(1));
+        Assert.IsTrue(relay.HasPairingSlot(hostId), "Còn trong hạn thì chỗ vẫn còn.");
+        clock.Advance(TimeSpan.FromSeconds(2));
         Assert.AreEqual(404, await OpenPairingStatusAsync(relay, key), "Quá hạn thì chỗ biến mất.");
 
         await using var longer = NewRelay();
@@ -175,15 +179,89 @@ public sealed class PairingSlotTests
     }
 
     [TestMethod]
-    public async Task TraCứuBịGiớiHạnTheoĐịaChỉ()
+    public async Task TraCứuBịGiớiHạnTheoDảiMạng()
     {
         await using var factory = NewRelay(pairingPermits: 2);
         var relay = new RelayTestClient(factory);
+        // Same IPv4 /24: one budget, even from different addresses.
         Assert.AreEqual(404, await OpenPairingStatusAsync(relay, NewLookupKey(), "10.2.0.1"));
-        Assert.AreEqual(404, await OpenPairingStatusAsync(relay, NewLookupKey(), "10.2.0.1"));
-        Assert.AreEqual(429, await OpenPairingStatusAsync(relay, NewLookupKey(), "10.2.0.1"));
-        Assert.AreEqual(404, await OpenPairingStatusAsync(relay, NewLookupKey(), "10.2.0.2"), "Địa chỉ khác có hạn mức riêng.");
+        Assert.AreEqual(404, await OpenPairingStatusAsync(relay, NewLookupKey(), "10.2.0.2"));
+        Assert.AreEqual(429, await OpenPairingStatusAsync(relay, NewLookupKey(), "10.2.0.3"));
+        Assert.AreEqual(404, await OpenPairingStatusAsync(relay, NewLookupKey(), "10.2.1.1"), "Dải /24 khác có hạn mức riêng.");
+        // Same IPv6 /64.
+        Assert.AreEqual(404, await OpenPairingStatusAsync(relay, NewLookupKey(), "2001:db8:1:2::1"));
+        Assert.AreEqual(404, await OpenPairingStatusAsync(relay, NewLookupKey(), "2001:db8:1:2:ffff::9"));
+        Assert.AreEqual(429, await OpenPairingStatusAsync(relay, NewLookupKey(), "2001:db8:1:2:abcd::5"));
+        Assert.AreEqual(404, await OpenPairingStatusAsync(relay, NewLookupKey(), "2001:db8:1:3::1"), "Dải /64 khác có hạn mức riêng.");
     }
+
+    [TestMethod]
+    public async Task SốLầnTraSaiToànRelayCóTrần()
+    {
+        var clock = new ManualTimeProvider();
+        await using var factory = NewRelay(time: clock, extra: new() { ["Relay:Tunnel:MaxFailedPairingLookupsPerMinute"] = "2" });
+        var relay = new RelayTestClient(factory);
+        using var hostKey = IdentityKey.Generate();
+        var (control, hostId) = await relay.ConnectControlAsync(hostKey);
+        string key = NewLookupKey();
+        await RelayTestClient.RequestPairingSlotAsync(control, key);
+
+        // A guesser spread over many networks still hits the relay-wide cap of failed lookups.
+        Assert.AreEqual(404, await OpenPairingStatusAsync(relay, NewLookupKey(), "10.5.0.1"));
+        Assert.AreEqual(404, await OpenPairingStatusAsync(relay, NewLookupKey(), "10.6.0.1"));
+        Assert.AreEqual(429, await OpenPairingStatusAsync(relay, NewLookupKey(), "10.7.0.1"));
+        Assert.AreEqual(429, await OpenPairingStatusAsync(relay, key, "10.8.0.1"), "Trong phút bị chặn, kể cả mã đúng cũng phải chờ.");
+        Assert.IsTrue(relay.HasPairingSlot(hostId), "Bị chặn không làm mất chỗ của máy B.");
+
+        clock.Advance(TimeSpan.FromMinutes(1));
+        Assert.AreEqual(200, await OpenPairingStatusAsync(relay, key, "10.8.0.1"), "Sang phút mới thì tra được lại.");
+        control.Abort();
+    }
+
+    [TestMethod]
+    public async Task MởPhiênThấtBạiVẫnBáoMáyBĐổiMã()
+    {
+        await using var factory = NewRelay(extra: new() { ["Relay:Tunnel:MaxSessionsPerHost"] = "0" });
+        var relay = new RelayTestClient(factory);
+        using var hostKey = IdentityKey.Generate();
+        var (control, hostId) = await relay.ConnectControlAsync(hostKey);
+        string key = NewLookupKey();
+        await RelayTestClient.RequestPairingSlotAsync(control, key);
+
+        Assert.AreEqual(409, await OpenPairingStatusAsync(relay, key), "Trần phiên của máy B đã đầy.");
+        var claimed = Newtonsoft.Json.JsonConvert.DeserializeObject<TunnelPairingSlotStateMessageVM>(
+            await RelayTestClient.ReceiveControlMessageAsync(control, TunnelProtocol.PairingSlotClaimedMessage),
+            ProcBridge.Relay.Shared.Json.RelayJsonSettings.Create())!;
+        Assert.AreEqual(key, claimed.LookupKey);
+        Assert.IsNull(claimed.SessionId, "Không có phiên, nhưng máy B vẫn được báo để hiện mã mới.");
+        Assert.IsFalse(relay.HasPairingSlot(hostId), "Chỗ không được trả lại: mỗi mã chỉ thử một lần.");
+        control.Abort();
+    }
+
+    [TestMethod]
+    public async Task MộtKênhXinChỗQuáNhiềuLầnBịTừChối()
+    {
+        var clock = new ManualTimeProvider();
+        await using var factory = NewRelay(time: clock, extra: new() { ["Relay:Tunnel:MaxPairingSlotRequestsPerMinute"] = "2" });
+        var relay = new RelayTestClient(factory);
+        using var hostKey = IdentityKey.Generate();
+        var (control, _) = await relay.ConnectControlAsync(hostKey);
+
+        Assert.AreEqual(TunnelProtocol.PairingSlotRegisteredMessage, (await RelayTestClient.RequestPairingSlotAsync(control, NewLookupKey())).Type);
+        Assert.AreEqual(TunnelProtocol.PairingSlotRegisteredMessage, (await RelayTestClient.RequestPairingSlotAsync(control, NewLookupKey())).Type);
+        Assert.AreEqual(TunnelProtocol.PairingSlotRejectedMessage, (await RelayTestClient.RequestPairingSlotAsync(control, NewLookupKey())).Type);
+        clock.Advance(TimeSpan.FromMinutes(1));
+        Assert.AreEqual(TunnelProtocol.PairingSlotRegisteredMessage, (await RelayTestClient.RequestPairingSlotAsync(control, NewLookupKey())).Type);
+        control.Abort();
+    }
+
+    [TestMethod]
+    [DataRow("10.1.2.3", "10.1.2.0/24")]
+    [DataRow("::ffff:10.1.2.3", "10.1.2.0/24")]
+    [DataRow("2001:db8:1:2:3:4:5:6", "2001:db8:1:2::/64")]
+    [DataRow("unknown", "unknown")]
+    public void DảiMạngCủaĐịaChỉ(string address, string prefix)
+        => Assert.AreEqual(prefix, ProcBridge.Relay.Api.Extensions.HttpContextExtensions.AddressPrefix(address));
 
     [TestMethod]
     public void MãMờiChuẩnHoáVàDẫnXuấtKhoáỔnĐịnh()

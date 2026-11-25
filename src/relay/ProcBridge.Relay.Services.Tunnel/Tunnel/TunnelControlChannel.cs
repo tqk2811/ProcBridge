@@ -14,7 +14,27 @@ internal sealed class TunnelControlChannel
     private readonly WebSocket _socket;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
 
+    private DateTime _slotWindowStart;
+    private int _slotRequests;
+
     public TunnelControlChannel(WebSocket socket) => _socket = socket;
+
+    /// <summary>
+    /// Counts one <c>pairingSlot</c> request in a one-minute fixed window; false once <paramref name="max"/> is reached.
+    /// Only the channel's own read loop calls it, so no lock.
+    /// </summary>
+    public bool TryCountSlotRequest(DateTime now, int max)
+    {
+        if (now - _slotWindowStart >= TimeSpan.FromMinutes(1))
+        {
+            _slotWindowStart = now;
+            _slotRequests = 0;
+        }
+        if (_slotRequests >= max)
+            return false;
+        _slotRequests++;
+        return true;
+    }
 
     /// <summary>
     /// Runs the Noise XX handshake as responder (the host is the initiator) and returns the host's static key, which

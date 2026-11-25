@@ -37,6 +37,8 @@ public sealed class TunnelHub : ITunnelHub, IDisposable
     private readonly object _slotLock = new();
     private readonly Dictionary<string, PairingSlot> _slotsByKey = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _slotKeyByHost = new(StringComparer.Ordinal);
+    private DateTime _failedLookupWindowStart;
+    private int _failedLookups;
     private readonly JsonSerializerSettings _json = RelayJsonSettings.Create();
     private readonly TunnelOptions _options;
     private readonly TimeProvider _time;
@@ -160,7 +162,9 @@ public sealed class TunnelHub : ITunnelHub, IDisposable
     private async Task RegisterSlotAsync(string hostId, TunnelControlChannel channel, string? lookupKey, CancellationToken cancellationToken)
     {
         DateTime? expiresAt = null;
-        if (RelayPairingCode.IsLookupKey(lookupKey))
+        if (!channel.TryCountSlotRequest(Now, _options.MaxPairingSlotRequestsPerMinute))
+            _logger.LogInformation("Máy {HostId} xin chỗ ghép cặp quá nhiều lần, từ chối.", hostId);
+        else if (RelayPairingCode.IsLookupKey(lookupKey))
         {
             lock (_slotLock)
             {
@@ -177,7 +181,8 @@ public sealed class TunnelHub : ITunnelHub, IDisposable
         }
         var reply = expiresAt is null
             ? new TunnelPairingSlotStateMessageVM(TunnelProtocol.PairingSlotRejectedMessage, lookupKey ?? string.Empty)
-            : new TunnelPairingSlotStateMessageVM(TunnelProtocol.PairingSlotRegisteredMessage, lookupKey!, expiresAt);
+            : new TunnelPairingSlotStateMessageVM(TunnelProtocol.PairingSlotRegisteredMessage, lookupKey!, expiresAt,
+                ExpiresInSeconds: _options.PairingSlotLifetime.TotalSeconds);
         if (expiresAt is not null)
             _logger.LogInformation("Máy {HostId} mở chỗ ghép cặp tới {ExpiresAt:u}.", hostId, expiresAt);
         await channel.SendTextAsync(JsonConvert.SerializeObject(reply, _json), cancellationToken);
@@ -214,27 +219,52 @@ public sealed class TunnelHub : ITunnelHub, IDisposable
         PairingSlot? slot;
         lock (_slotLock)
         {
+            var now = Now;
+            if (now - _failedLookupWindowStart >= TimeSpan.FromMinutes(1))
+            {
+                _failedLookupWindowStart = now;
+                _failedLookups = 0;
+            }
+            if (_failedLookups >= _options.MaxFailedPairingLookupsPerMinute)
+                throw ServiceException.TooManyRequests(RelayErrors.TooManyRequests, "Relay đang nhận quá nhiều lần tra mã ghép cặp sai, hãy thử lại sau.");
             PurgeExpiredSlots();
             // Single use: whoever finds the slot takes it, right or wrong, so a code cannot be tried twice.
             if (_slotsByKey.Remove(lookupKey, out slot))
                 _slotKeyByHost.Remove(slot.HostId);
+            else
+                _failedLookups++;
         }
         if (slot is null)
             throw ServiceException.NotFound(RelayErrors.PairingSlotNotFound, "Mã ghép cặp không đúng hoặc đã hết hạn.");
 
-        var session = await OpenSessionAsync(slot.HostId, clientAddress, cancellationToken);
+        TunnelSessionVM session;
+        try
+        {
+            session = await OpenSessionAsync(slot.HostId, clientAddress, cancellationToken);
+        }
+        catch
+        {
+            // The slot is gone either way (not put back: a code is tried once). Tell the host so it shows a new code.
+            await NotifyClaimedAsync(slot, lookupKey, null, cancellationToken);
+            throw;
+        }
         // After sessionOpened (same channel, sends are ordered): the host now knows the ticket and picks a new code.
-        var claimed = new TunnelPairingSlotStateMessageVM(TunnelProtocol.PairingSlotClaimedMessage, lookupKey, SessionId: session.SessionId);
+        await NotifyClaimedAsync(slot, lookupKey, session.SessionId, cancellationToken);
+        _logger.LogInformation("Phiên ghép cặp {SessionId} từ {Address} tới máy {HostId}.", session.SessionId, clientAddress, slot.HostId);
+        return new TunnelPairingSessionVM(session.SessionId, session.Ticket, session.ExpiresAt, slot.HostId);
+    }
+
+    private async Task NotifyClaimedAsync(PairingSlot slot, string lookupKey, Guid? sessionId, CancellationToken cancellationToken)
+    {
+        var claimed = new TunnelPairingSlotStateMessageVM(TunnelProtocol.PairingSlotClaimedMessage, lookupKey, SessionId: sessionId);
         try
         {
             await slot.Channel.SendTextAsync(JsonConvert.SerializeObject(claimed, _json), cancellationToken);
         }
-        catch (Exception ex) when (ex is WebSocketException or ObjectDisposedException or InvalidOperationException)
+        catch (Exception ex) when (ex is WebSocketException or ObjectDisposedException or InvalidOperationException or OperationCanceledException)
         {
-            // The session is open already; the host only misses the hint to show a new code.
+            // The host only misses the hint to show a new code; a reconnect gives it one anyway.
         }
-        _logger.LogInformation("Phiên ghép cặp {SessionId} từ {Address} tới máy {HostId}.", session.SessionId, clientAddress, slot.HostId);
-        return new TunnelPairingSessionVM(session.SessionId, session.Ticket, session.ExpiresAt, slot.HostId);
     }
 
     /// <summary>An open pairing slot: the host, the control channel that opened it, and its deadline (UTC).</summary>
