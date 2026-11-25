@@ -29,6 +29,25 @@ public sealed class RemoteHookTests
     [TestMethod]
     [DataRow("x64")]
     [DataRow("Win32")]
+    public async Task EveryDirectoryClass_ThroughAgent_MatchesRealFolder(string platform)
+    {
+        // Each FILE_*_DIRECTORY_INFORMATION class (ntifs.h numbers) is answered from machine B's listing with the
+        // same names, sizes and attributes as the real folder.
+        using HookSandbox sandbox = new(platform);
+        await using RemoteSession session = RemoteSession.Start(sandbox);
+
+        ProcessResult real = sandbox.Run(sandbox.Binaries.Probe, $"--dir-classes \"{sandbox.RealRoot}\\sub\"");
+        ProcessResult remote = session.Run($"\"{sandbox.Binaries.Probe}\" --dir-classes \"{sandbox.VirtualRoot}\\sub\"");
+
+        Assert.AreEqual(0, real.ExitCode, real.StandardOutput);
+        Assert.AreEqual(0, remote.ExitCode, remote.StandardOutput + remote.StandardError);
+        Assert.Contains("Id64ExtdDirectory: status=0x0", real.StandardOutput);
+        HookComparisonTests.AssertSameLines(real.StandardOutput, remote.StandardOutput);
+    }
+
+    [TestMethod]
+    [DataRow("x64")]
+    [DataRow("Win32")]
     public async Task CmdTypeAndDir_ReadThroughAgent(string platform)
     {
         using HookSandbox sandbox = new(platform);

@@ -37,10 +37,10 @@ namespace ProcBridge::Hook
             { 38, 80, 64, -1, 72, -1, -1 },  // FileIdFullDirectoryInformation
             { 60, 88, 64, 68, -1, 72, -1 },  // FileIdExtdDirectoryInformation
             { 63, 114, 64, 68, -1, 72, 88 }, // FileIdExtdBothDirectoryInformation
-            { 81, 80, 64, 68, 72, -1, -1 },  // FileId64ExtdDirectoryInformation
-            { 82, 106, 64, 68, 72, -1, 80 }, // FileId64ExtdBothDirectoryInformation
-            { 83, 96, 64, 68, 72, 80, -1 },  // FileIdAllExtdDirectoryInformation
-            { 84, 122, 64, 68, 72, 80, 96 }, // FileIdAllExtdBothDirectoryInformation
+            { 78, 80, 64, 68, 72, -1, -1 },  // FileId64ExtdDirectoryInformation
+            { 79, 106, 64, 68, 72, -1, 80 }, // FileId64ExtdBothDirectoryInformation
+            { 80, 96, 64, 68, 72, 80, -1 },  // FileIdAllExtdDirectoryInformation
+            { 81, 122, 64, 68, 72, 80, 96 }, // FileIdAllExtdBothDirectoryInformation
         };
 
         const ClassLayout* FindLayout(ULONG informationClass) noexcept

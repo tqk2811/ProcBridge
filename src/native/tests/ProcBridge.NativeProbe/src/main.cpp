@@ -935,6 +935,87 @@ namespace
         return L"id " + std::to_wstring(id) + L" written " + std::to_wstring(written);
     }
 
+    /// --dir-classes <dir>: lists dir with every directory information class (ntifs.h numbers) and prints,
+    /// per class, the status and each entry's name, attributes and size (sorted, "." and ".." skipped).
+    int DirectoryClasses(const wchar_t* directoryPath)
+    {
+        struct ClassInfo
+        {
+            ULONG Class;
+            const wchar_t* Name;
+            ULONG NameOffset;
+            bool NamesOnly;
+        };
+        constexpr ClassInfo classes[] = {
+            { 1, L"Directory", 64, false }, { 2, L"FullDirectory", 68, false }, { 3, L"BothDirectory", 94, false },
+            { 12, L"Names", 12, true }, { 37, L"IdBothDirectory", 104, false }, { 38, L"IdFullDirectory", 80, false },
+            { 60, L"IdExtdDirectory", 88, false }, { 63, L"IdExtdBothDirectory", 114, false },
+            { 78, L"Id64ExtdDirectory", 80, false }, { 79, L"Id64ExtdBothDirectory", 106, false },
+            { 80, L"IdAllExtdDirectory", 96, false }, { 81, L"IdAllExtdBothDirectory", 122, false },
+        };
+        const auto query = reinterpret_cast<NtQueryDirectoryFileFn>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryDirectoryFile"));
+        const HANDLE directory = CreateFileW(directoryPath, FILE_LIST_DIRECTORY | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        if (directory == INVALID_HANDLE_VALUE)
+        {
+            WriteLine(L"open: error " + std::to_wstring(GetLastError()));
+            return 1;
+        }
+        std::vector<BYTE> buffer(64 * 1024);
+        for (const ClassInfo& info : classes)
+        {
+            std::vector<std::wstring> lines;
+            NTSTATUS status = STATUS_SUCCESS;
+            BOOLEAN restart = TRUE;
+            while (true)
+            {
+                IO_STATUS_BLOCK io{};
+                status = query(directory, nullptr, nullptr, nullptr, &io, buffer.data(), static_cast<ULONG>(buffer.size()), info.Class,
+                    FALSE, nullptr, restart);
+                restart = FALSE;
+                if (!NT_SUCCESS(status))
+                {
+                    break;
+                }
+                const BYTE* entry = buffer.data();
+                while (true)
+                {
+                    ULONG next = 0;
+                    ULONG nameBytes = 0;
+                    memcpy(&next, entry, sizeof(next));
+                    memcpy(&nameBytes, entry + (info.NamesOnly ? 8 : 60), sizeof(nameBytes));
+                    const std::wstring name(reinterpret_cast<const wchar_t*>(entry + info.NameOffset), nameBytes / sizeof(wchar_t));
+                    if (name != L"." && name != L"..")
+                    {
+                        std::wstring line = name;
+                        if (!info.NamesOnly)
+                        {
+                            LONGLONG size = 0;
+                            ULONG attributes = 0;
+                            memcpy(&size, entry + 40, sizeof(size));
+                            memcpy(&attributes, entry + 56, sizeof(attributes));
+                            line += L" size=" + std::to_wstring(size) + L" attributes=" + Hex(attributes & ~FILE_ATTRIBUTE_ARCHIVE);
+                        }
+                        lines.push_back(line);
+                    }
+                    if (next == 0)
+                    {
+                        break;
+                    }
+                    entry += next;
+                }
+            }
+            std::sort(lines.begin(), lines.end());
+            WriteLine(std::wstring(info.Name) + L": " + Status(status == STATUS_NO_MORE_FILES ? STATUS_SUCCESS : status));
+            for (const std::wstring& line : lines)
+            {
+                WriteLine(std::wstring(L"  ") + line);
+            }
+        }
+        CloseHandle(directory);
+        return 0;
+    }
+
     /// --stdin-id: identity of the standard input handle (inherited, plan 5.5).
     int StdinIdentity()
     {
@@ -1501,6 +1582,10 @@ namespace
         if (command == L"--stdin-name" && argc == 2)
         {
             return StdinName();
+        }
+        if (command == L"--dir-classes" && argc == 3)
+        {
+            return DirectoryClasses(argv[2]);
         }
         if (command == L"--stdin-id" && argc == 2)
         {
