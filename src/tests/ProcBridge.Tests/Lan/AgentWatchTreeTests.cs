@@ -127,8 +127,9 @@ public sealed class AgentWatchTreeTests
     public async Task Watch_TooManyChangesInOneBatch_BecomesRescan()
     {
         using var share = new TempFolder("watch");
-        // A long batch window lets every change land in one batch.
-        await using AgentServer server = StartAgent(share, new AgentOptions { AllowPlaintextTransport = true, WatchBatchDelay = TimeSpan.FromSeconds(2) });
+        // The batch window opens at the first change and must outlast writing every file, otherwise the changes split
+        // into several batches under the limit and no rescan happens (seen on slow CI runners with a 2 s window).
+        await using AgentServer server = StartAgent(share, new AgentOptions { AllowPlaintextTransport = true, WatchBatchDelay = TimeSpan.FromSeconds(20) });
         await using ProtocolConnection connection = await ConnectAsync(server);
         BlockingCollection<FsChangeNotification> received = await WatchAsync(connection);
 
@@ -138,7 +139,7 @@ public sealed class AgentWatchTreeTests
             File.WriteAllBytes(Path.Combine(folder, $"f{i}.txt"), []);
 
         // Either the batch limit or a real kernel buffer overflow turns it into a rescan; both are fine.
-        WaitFor(received, x => x.Rescan, TimeSpan.FromSeconds(10));
+        WaitFor(received, x => x.Rescan, TimeSpan.FromSeconds(40));
     }
 
     [TestMethod]
