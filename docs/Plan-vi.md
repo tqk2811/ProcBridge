@@ -639,6 +639,39 @@ Làm song song với M2, chưa có Broker: cấu hình là `PROCBRIDGE_MAP` cụ
   phát hiện xung đột (giữ cả hai / máy A thắng), Agent chết lúc đóng thì mục ở lại hàng đợi và Broker sau gửi, Agent quay
   lại thì vòng thử lại gửi, rename/xoá/SetInfo. `AgentShareWriteTests` cho các mã lỗi phía Agent. Ca chưa phủ ở Backlog.
 
+### 13.6 Kết quả M8 (2026-11-25)
+
+- **Tải theo vùng** (`RangeFile`, `FileCache.EnsureAsync(allowRanges)`): file lớn hơn `RangeThreshold` (mặc định 64 MB,
+  0 = tắt) mở chỉ để đọc thì Broker tạo bản cache **sparse** đúng kích thước, mang thời gian của máy B, giữ một handle
+  ghi; bảng khối (mặc định 256 KB/khối) nằm trong bộ nhớ. Reply `Resolve` mang `FileInfo.RangeId` (ô `Reserved` cũ;
+  giao thức Hook IPC lên bản 3). Hook mở bản cache thêm `FILE_SHARE_WRITE | FILE_SHARE_DELETE` (handle ghi của Broker
+  vẫn mở), chặn `NtReadFile[Scatter]` trên handle có `RangeId`: gửi `FetchRange [offset, len]` (offset lấy từ con trỏ
+  file khi lời gọi không đưa) rồi mới gọi hàm gốc. Đọc nối tiếp lần trước thì Broker tải trước `RangePrefetchBlocks`
+  khối kế (mặc định 4). Đủ khối thì bản cache thành file trọn bình thường (đóng handle ghi, đặt lại thời gian), reply
+  báo `Complete` để Hook thôi hỏi.
+- **Section và ghi** (mục 15): `NtCreateSection[Ex]` trên handle có `RangeId` gửi `FetchRange` cả file trước (thời hạn
+  gấp 10 lần thời hạn IPC); mở có quyền ghi (hoặc xoá, đổi thuộc tính) hoàn tất bản sparse **tại chỗ** trước khi trả,
+  handle đọc khác vẫn dùng tiếp. Handle kế thừa sang con mang `RangeId` theo `FileInfo`.
+- **Khoá file và share mode trên máy B** (`RemoteHolds`, `AgentShare.Handles`): mở có write token thì Broker xin Agent
+  giữ một handle thật (`Fs.OpenHandle`, trên một kết nối riêng) với share mode của process (luôn thêm
+  `FILE_SHARE_DELETE`); người dùng trên máy B đang giữ file trái share mode thì lần mở ở máy A lỗi
+  `STATUS_SHARING_VIOLATION` (`BrokerOptions.HoldShareMode`, mặc định bật; tắt thì handle chỉ mở khi có khoá đầu tiên).
+  `NtLockFile/NtUnlockFile` trên handle có write token gửi `Lock/Unlock` → `Fs.Lock/Fs.Unlock` (`LockFileEx`, chờ tối đa
+  `LockWait` khi không `FailImmediately`), máy B xử lý khoá của mọi process ở máy A và máy B; bản cache **không** bị khoá
+  để Broker vẫn đọc được khi ghi ngược. Commit của file đang được giữ ghi thẳng qua handle giữ (tại chỗ, giữ danh tính và
+  khoá); `Fs.SetInfo` đổi kích thước cũng dùng handle đó. Handle được nhả khi token đóng, khi process đích mất hết kết nối
+  pipe, khi kết nối giữ handle đứt.
+- **Số đo** (Agent và Broker cùng máy, file 1 GB sparse): đọc 1 MB ở offset ngẫu nhiên (không thẳng khối) tải
+  1 310 720 byte (5 khối); 16 lần đọc 64 KB rải rác tải 5 242 880 byte (2 khối/lần do vắt qua ranh giới); kịch bản game
+  qua Hook (1 MB + 4 lần đọc nhỏ) tải 2 359 296 byte (9 khối) thay vì 1 GB.
+- **Test thực tế** (`RemotePurposeTests`, x64 + Win32): đọc ngẫu nhiên file 1 GB khớp từng byte với máy B; map file đang
+  tải dở thấy đủ dữ liệu; `LoadLibrary` một DLL native (bản sao `version.dll`) từ thư mục ảo khi DLL là bản sparse (section
+  `SEC_IMAGE`); `dotnet <ảo>\app\ProcBridge.Launcher.dll` chạy được (assembly lớn là bản sparse); DbgHelp
+  (`SymLoadModuleExW`) đọc pdb qua thư mục ảo và tìm được `wmain`; khoá vùng và share mode thấy được hai chiều giữa máy A
+  và máy B, ghi ngược tại chỗ khi đang khoá; `git status`/`git log` trên repo nằm ở máy B. Chưa chạy: `cdb`/`dotnet-dump`
+  (máy không cài), SQLite (chưa có gói `Microsoft.Data.Sqlite`), debug bằng VS/VS Code, chạy exe nằm trong thư mục ảo
+  (xem Backlog).
+
 ---
 
 ## 14. Duyệt tài nguyên máy B (Remote Explorer)
@@ -688,7 +721,7 @@ Lộ trình: duyệt file và ổ đĩa đi kèm M2 và M3; process, registry, s
 | Rủi ro | Ảnh hưởng | Hướng xử lý |
 |---|---|---|
 | Số lượng `FILE_INFORMATION_CLASS` và hành vi biên của `Nt*` rất lớn | Process gặp lỗi lạ khi gặp class chưa hỗ trợ | Test so sánh (mục 12); class chưa hỗ trợ trả `STATUS_INVALID_INFO_CLASS` và ghi log để bổ sung dần |
-| Memory-mapped file trên file chưa tải trọn | Đọc ra dữ liệu sai | M2–M7 luôn tải trọn trước khi mở; tải theo vùng ở M8 chỉ bật khi file không bị map, hoặc tải trọn khi gặp `NtCreateSection` |
+| Memory-mapped file trên file chưa tải trọn | Đọc ra dữ liệu sai | M2–M7 luôn tải trọn trước khi mở; từ M8 Hook tải trọn khi gặp `NtCreateSection[Ex]` trên bản sparse (mục 13.6) |
 | Antivirus coi inject là hành vi độc hại | Bị chặn hoặc xoá DLL | Ký số DLL, tài liệu hướng dẫn loại trừ, không dùng kỹ thuật inject bất thường |
 | Độ trễ internet làm build rất chậm | Trải nghiệm kém | Lấy metadata cả cây, đọc trước, thư mục loại trừ cho đầu ra build |
 | Ghi ngược trễ, mất điện máy A | Mất dữ liệu chưa gửi | Hàng đợi ghi lưu trên đĩa, gửi lại khi khởi động; có chế độ ghi xuyên |

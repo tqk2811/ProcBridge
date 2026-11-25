@@ -145,6 +145,48 @@ IOCP sẽ không nhận được gói hoàn tất. Bỏ qua `SL_INDEX_SPECIFIED`
   flush/đóng. Chưa có cấu hình ghi xuyên theo thư mục (Plan 10).
 - Remote Explorer (Plan 14) chưa có thao tác file.
 
+## [Vừa] Chạy exe nằm trong thư mục ảo
+
+`NtCreateUserProcess` mở file image trong kernel theo `ImagePathName`, không qua hook mở file, nên exe nằm trong thư mục
+ảo không chạy được (M8 chỉ phủ DLL nạp bằng `LoadLibrary` và app .NET chạy bằng `dotnet <ảo>\app.dll`). Cần dịch đường
+dẫn image sang bản cache (tải trọn trước) trong hook `NtCreateUserProcess`, giữ tên ảo cho `GetModuleFileName`, và lo các
+DLL cạnh exe mà loader tìm theo thư mục của image.
+
+## [Vừa] Tải theo vùng (M8): phần còn thiếu
+
+- Bảng khối chỉ nằm trong bộ nhớ: Broker khởi động lại thì bản sparse cũ bị bỏ, tải lại từ đầu.
+- Ghi vào file đang tải theo vùng: hiện tải trọn trước rồi mới cho mở ghi; có thể chỉ tải vùng bị ghi dở (ghi không
+  thẳng khối) để đỡ tải.
+- File đổi trên máy B khi bản sparse còn thiếu khối: đọc vùng chưa tải báo lỗi mạng (không trộn hai phiên bản), process
+  phải mở lại. Có thể tự mở bản mới khi handle mở lại.
+- Mở bản sparse được thêm `FILE_SHARE_WRITE | FILE_SHARE_DELETE` (handle ghi của Broker còn mở): một process khác ở máy A
+  mở ghi cùng file không bị lỗi chia sẻ như khi chạy cục bộ.
+- `NtReadFile` bất đồng bộ chờ tải đồng bộ trong lời gọi; tải cả file cho section dùng thời hạn gấp 10 lần thời hạn IPC.
+- Chưa có số đo với độ trễ mạng thật, chưa chỉnh kích thước khối theo kiểu đọc (đọc nhỏ rải rác tải 2 khối/lần khi vắt
+  qua ranh giới).
+
+## [Vừa] Khoá file trên máy B (M8): phần còn thiếu
+
+- Khoá trên handle không có write token (mở chỉ đọc) vẫn chỉ khoá bản cache trên máy A, nên khoá đọc ở máy A và khoá của
+  writer (nằm ở máy B) không chặn nhau.
+- `NtLockFile/NtUnlockFile` trên handle có write token được trả lời đồng bộ: không gửi gói completion port, không gọi
+  APC; process khoá bất đồng bộ qua IOCP sẽ không thấy hoàn tất.
+- Handle kế thừa sang con giữ write token: handle giữ trên máy B được nhả khi process mở ban đầu mất hết kết nối pipe,
+  dù con còn dùng.
+- Kết nối giữ handle đứt thì máy B nhả khoá mà process không biết; lần khoá sau mở handle mới.
+- Đổi tên thư mục cha của file đang giữ: đường dẫn giữ trên Agent và trong Broker không theo; `Fs.Read` hoặc commit lặp
+  lại (so nội dung) từ máy A có thể lỗi chia sẻ với share mode của handle giữ.
+- Chưa test với SQLite thật (thiếu gói `Microsoft.Data.Sqlite`).
+
+## [Thấp] Test thực tế M8 chưa chạy
+
+`cdb`/`dotnet-dump` (máy test không cài), debug bằng Visual Studio và VS Code, mở DB SQLite trên Agent. Hiện thay bằng
+DbgHelp đọc pdb qua thư mục ảo và kịch bản khoá vùng của NativeProbe.
+
+## [Thấp] Test chập chờn `ConnectionPoolTests.DisposeWhileRequestInFlight_DoesNotReconnect`
+
+Một lần chạy cả bộ (M8) bài này không thấy `ObjectDisposedException`; chạy lại xanh. Thuộc tầng transport, chưa xem.
+
 ## [Vừa] Thời hạn IPC cho file lớn
 
 Hook chờ Broker tối đa `PROCBRIDGE_IPC_TIMEOUT_MS` (mặc định 60 giây) cho mọi request, kể cả `Resolve` phải tải
