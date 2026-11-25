@@ -119,9 +119,33 @@ cho tải, hoặc Broker trả "đang tải" để Hook chờ tiếp.
 ## [Vừa] Launcher chưa đủ cho người dùng
 
 - `ProcBridge.Spawn`/`ProcBridge.Hook` chưa được đóng gói cạnh Launcher (mặc định tìm trong thư mục của Launcher,
-  `--spawn` để chỉ chỗ khác); chưa đọc cấu hình từ file.
+  `--spawn` để chỉ chỗ khác); CLI chưa đọc cấu hình từ file. Launcher WPF cũng tìm Spawn trong thư mục của nó
+  (`LaunchOptionsFactory`) nên cần cùng bước đóng gói.
 - Broker hay Agent không kết nối được lúc khởi động thì Spawn báo `inject failed` và không chạy
   process đích; chưa có thông báo dễ hiểu hơn.
+
+## [Vừa] Launcher WPF: phía A không biết danh sách chia sẻ và thư mục gốc của chúng
+
+- Vị trí: `src/client/ProcBridge.Launcher.Wpf/Models/LaunchProfile.cs` (`ShareRoot`), `Services/LaunchOptionsFactory.cs`.
+- Giao thức `Fs.*` dùng đường dẫn tương đối trong chia sẻ, còn Remote Explorer trả đường dẫn tuyệt đối trên máy B.
+  Hồ sơ WPF vì vậy bắt người dùng tự nhập tên chia sẻ và chọn "gốc chia sẻ trên B" (thư mục chọn đầu tiên được
+  gợi ý làm gốc), rồi đổi đường dẫn chọn được sang tương đối. Gõ sai gốc thì chỉ lộ lúc chạy (đọc sai thư mục).
+- Hướng: thêm message cho A liệt kê chia sẻ (tên + gốc) mà máy B cho phép, để chọn chia sẻ bằng ComboBox và
+  kiểm thư mục chọn nằm trong gốc ngay khi chọn.
+
+## [Thấp] Launcher WPF: thư mục làm việc không được nằm trong thư mục ảo
+
+- Vị trí: `src/client/ProcBridge.Launcher/LaunchSession.cs` (kiểm `Directory.Exists(WorkingDirectory)`).
+- Spawn được tạo với thư mục làm việc của target, mà Spawn không bị hook nên thư mục ảo không tồn tại với nó.
+  Cần Spawn nhận `--cwd` và truyền `lpCurrentDirectory` cho process đích sau khi hook đã nạp (hoặc đặt thư mục
+  qua hook lúc khởi động).
+
+## [Thấp] Launcher WPF: Remote Explorer còn thiếu thao tác và test giao diện
+
+- Vị trí: `src/client/ProcBridge.Launcher.Wpf/ViewModels/RemoteExplorerViewModel.cs`, `RegistryViewModel.cs`.
+- Chưa có: tải file về A, đổi tên/tạo thư mục, tạo/sửa giá trị và khoá registry (client đã có API), xoá thư mục.
+  Cửa sổ chọn thư mục chưa tự mở tới đường dẫn đã chọn lần trước (chỉ hiện gợi ý).
+- Test mới phủ ViewModel; giao diện chỉ được thử khởi động/tắt và chụp màn hình bằng tay, chưa có test UI tự động.
 
 ## [Vừa] Điều khiển luồng bằng cửa sổ tín dụng
 

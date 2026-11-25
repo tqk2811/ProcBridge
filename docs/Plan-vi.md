@@ -608,6 +608,11 @@ trả lời bình thường mang `ExplorerStatus`. Tải file trả byte bằng 
 Giao diện: đặt trong Launcher (dạng cây + danh sách kiểu Explorer, tab cho File / Process / Registry /
 Service / Hệ thống). Chỗ đặt UI là câu hỏi mở số 5.
 
+Đã làm (nhánh `feature/launcher-wpf`): `ProcBridge.Launcher.Wpf` có tab máy B (ghép cặp: địa chỉ, hai vân tay, mã 6
+số), hồ sơ chạy (ánh xạ thư mục chọn trong cây Remote Explorer tải lười, hiện rõ PermissionDenied/OutOfScope; chạy
+qua `LaunchSession` dùng chung với CLI, log trực tiếp, Dừng kill cả cây) và tab Remote Explorer. A đọc hồ sơ quyền
+của mình bằng `ExplorerSysPolicy` (0x1405) để chỉ hiện thao tác ghi được cấp; mọi thao tác ghi hỏi xác nhận.
+
 Lộ trình: duyệt file và ổ đĩa đi kèm M2 và M3; process, registry, service, thông tin hệ thống là M9.
 
 ---
