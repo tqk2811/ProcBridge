@@ -14,7 +14,7 @@ namespace ProcBridge.HookIpc;
 /// </remarks>
 public static class HookIpcProtocol
 {
-    public const ushort Version = 2;
+    public const ushort Version = 3;
 
     public const int HeaderSize = 16;
 
@@ -43,6 +43,18 @@ public static class HookIpcProtocol
     public const uint InfiniteTimeout = 0xFFFFFFFF;
     /// <summary>Bit 0 of the HelloReply flags: send Flush after every write on a handle with a write token.</summary>
     public const ushort HelloFlagWriteThrough = 1;
+
+    /// <summary>Bit 0 of the FetchRange flags: bring the whole file in (memory mapping, inheritance).</summary>
+    public const uint FetchFlagWhole = 1;
+
+    /// <summary>Bit 0 of the FetchRange reply flags: the cache copy is now complete, stop asking for this range id.</summary>
+    public const uint FetchReplyFlagComplete = 1;
+
+    /// <summary>Bit 0 of the Lock flags: exclusive lock (NtLockFile ExclusiveLock).</summary>
+    public const ushort LockFlagExclusive = 1;
+
+    /// <summary>Bit 1 of the Lock flags: fail at once instead of waiting (NtLockFile FailImmediately).</summary>
+    public const ushort LockFlagFailImmediately = 2;
 
     public static string GetPipeName(string sessionId) => PipeNamePrefix + sessionId;
 

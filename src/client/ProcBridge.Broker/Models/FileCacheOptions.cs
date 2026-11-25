@@ -26,4 +26,19 @@ public sealed record FileCacheOptions
     /// requests, so the default leaves most of it to them.
     /// </summary>
     public int ReadAheadParallelism { get; init; } = 2;
+
+    /// <summary>
+    /// Files larger than this are cached by ranges (M8): a sparse copy of the right size whose blocks are downloaded
+    /// when a read needs them. Opens that may write, and memory mappings, bring the whole file in first. 0 turns it off.
+    /// </summary>
+    public long RangeThreshold { get; init; } = 64L * 1024 * 1024;
+
+    /// <summary>Block size of ranged files: the least a read downloads.</summary>
+    public int RangeBlockSize { get; init; } = 256 * 1024;
+
+    /// <summary>Blocks prefetched in the background when reads of a ranged file are sequential.</summary>
+    public int RangePrefetchBlocks { get; init; } = 4;
+
+    /// <summary>Blocks downloaded at once when a ranged file is brought in whole.</summary>
+    public int RangeParallelism { get; init; } = 4;
 }

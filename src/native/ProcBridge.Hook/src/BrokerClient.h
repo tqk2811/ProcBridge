@@ -57,6 +57,9 @@ namespace ProcBridge::Hook
         /// Changes the per-call timeout; only while no other thread uses the client (end of start-up).
         void SetTimeout(DWORD timeoutMs) noexcept { _timeoutMs = timeoutMs; }
 
+        /// Per-call timeout in milliseconds.
+        DWORD Timeout() const noexcept { return _timeoutMs; }
+
         /// Opens a pipe instance outside the pool for one caller (a directory watch and its WaitChanges long polls,
         /// plan section 10): a long poll never holds an instance other requests wait for, and the open channel keeps
         /// this process known to the Broker while the watch lives. Close it with CloseChannel.

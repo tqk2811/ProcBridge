@@ -21,6 +21,10 @@ public enum NtStatus : uint
     ObjectNameCollision = 0xC0000035,
     ObjectPathNotFound = 0xC000003A,
     SharingViolation = 0xC0000043,
+    /// <summary>A byte range lock conflicts with one held by another open (M8).</summary>
+    LockNotGranted = 0xC0000055,
+    /// <summary>Unlock of a range that is not locked (M8).</summary>
+    RangeNotLocked = 0xC000007E,
     RevisionMismatch = 0xC0000059,
     InsufficientResources = 0xC000009A,
     /// <summary>Write attempt on a read-only share (M2).</summary>

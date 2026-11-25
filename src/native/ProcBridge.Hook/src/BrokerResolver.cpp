@@ -155,6 +155,7 @@ namespace ProcBridge::Hook
         request.CreateDisposition = intent.CreateDisposition;
         request.CreateOptions = intent.CreateOptions;
         request.FileAttributes = intent.FileAttributes;
+        request.ShareAccess = intent.ShareAccess;
         call.Put(&request, sizeof(request));
         call.PutString(relative.Buffer, relative.Length);
         BrokerReply reply;
@@ -201,6 +202,48 @@ namespace ProcBridge::Hook
         realPath.Length = static_cast<USHORT>(bytes);
         realPath.Buffer[bytes / sizeof(wchar_t)] = L'\0';
         return STATUS_SUCCESS;
+    }
+
+    NTSTATUS BrokerResolver::FetchRange(uint32_t rangeId, int64_t offset, int64_t length, bool whole, bool& complete) const noexcept
+    {
+        complete = false;
+        BrokerClient::Call call(_client, HookIpc::MessageType::FetchRange);
+        HookIpc::FetchRangeRequest request{};
+        request.RangeId = rangeId;
+        request.Flags = whole ? HookIpc::FetchFlagWhole : 0;
+        request.Offset = offset;
+        request.Length = length;
+        call.Put(&request, sizeof(request));
+        BrokerReply reply;
+        // A whole file (a mapping) may be large: give it more time than one request, but never wait forever.
+        const ULONGLONG timeout = whole ? static_cast<ULONGLONG>(_client.Timeout()) * 10 : _client.Timeout();
+        const NTSTATUS status = call.Send(reply, nullptr, static_cast<DWORD>(timeout < INFINITE ? timeout : INFINITE - 1));
+        if (!NT_SUCCESS(status))
+        {
+            return status;
+        }
+        MessageReader reader(reply.Body, reply.BodySize);
+        HookIpc::FetchRangeReply body{};
+        if (!reader.Read(&body, sizeof(body)))
+        {
+            return STATUS_INVALID_NETWORK_RESPONSE;
+        }
+        complete = (body.Flags & HookIpc::FetchReplyFlagComplete) != 0;
+        return STATUS_SUCCESS;
+    }
+
+    NTSTATUS BrokerResolver::LockRange(bool lock, uint64_t writeToken, int64_t offset, int64_t length, ULONG key, uint16_t flags) const noexcept
+    {
+        BrokerClient::Call call(_client, lock ? HookIpc::MessageType::Lock : HookIpc::MessageType::Unlock);
+        HookIpc::LockRequest request{};
+        request.WriteToken = writeToken;
+        request.Offset = offset;
+        request.Length = length;
+        request.Key = key;
+        request.Flags = lock ? flags : 0;
+        call.Put(&request, sizeof(request));
+        BrokerReply reply;
+        return call.Send(reply);
     }
 
     NTSTATUS BrokerResolver::SendToken(HookIpc::MessageType type, uint64_t writeToken) const noexcept

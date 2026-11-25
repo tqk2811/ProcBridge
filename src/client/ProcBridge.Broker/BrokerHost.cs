@@ -20,8 +20,9 @@ public sealed class BrokerHost : IAsyncDisposable
     private readonly IDisposable? _factory;
     private int _disposed;
 
-    private BrokerHost(AgentClient client, FileCache cache, ChangeWatcher? watcher, WriteBackQueue writeBack, HookIpcServer pipe, Task preload, CancellationTokenSource stopping, IDisposable? factory)
+    private BrokerHost(AgentClient client, FileCache cache, ChangeWatcher? watcher, WriteBackQueue writeBack, RemoteHolds holds, HookIpcServer pipe, Task preload, CancellationTokenSource stopping, IDisposable? factory)
     {
+        Holds = holds;
         _factory = factory;
         _stopping = stopping;
         Client = client;
@@ -33,6 +34,9 @@ public sealed class BrokerHost : IAsyncDisposable
     }
 
     public AgentClient Client { get; }
+
+    /// <summary>Handles machine B keeps for writers: byte range locks and share mode (M8).</summary>
+    public RemoteHolds Holds { get; }
 
     public FileCache Cache { get; }
 
@@ -58,6 +62,9 @@ public sealed class BrokerHost : IAsyncDisposable
             ReadAheadMaxFileSize = options.ReadAheadMaxFileSize,
             ReadAheadMaxFiles = options.ReadAheadMaxFiles,
             ReadAheadParallelism = options.ReadAheadParallelism,
+            RangeThreshold = options.RangeThreshold,
+            RangeBlockSize = options.RangeBlockSize,
+            RangePrefetchBlocks = options.RangePrefetchBlocks,
         });
 
         ChangeWatcher? watcher = null;
@@ -69,14 +76,15 @@ public sealed class BrokerHost : IAsyncDisposable
         }
 
         var writeBack = new WriteBackQueue(client, cache, options.GetWriteQueueRoot(), options.GetWriteTarget(), options.ConflictPolicy, options.WriteRetryDelay);
-        var handler = new HookRequestHandler(cache, options.Mappings, writeBack, options.WriteThrough);
+        var holds = new RemoteHolds(client, options.HoldShareMode, options.LockWait);
+        var handler = new HookRequestHandler(cache, options.Mappings, writeBack, options.WriteThrough, holds);
         var pipe = new HookIpcServer(HookIpcProtocol.GetPipeName(options.SessionId), handler);
         pipe.Start();
         writeBack.StartRecovery();
 
         var stopping = new CancellationTokenSource();
         Task preload = options.PreloadTree ? PreloadAsync(cache, watcher, options, stopping.Token) : Task.CompletedTask;
-        return new BrokerHost(client, cache, watcher, writeBack, pipe, preload, stopping, factory as IDisposable);
+        return new BrokerHost(client, cache, watcher, writeBack, holds, pipe, preload, stopping, factory as IDisposable);
     }
 
     /// <summary>Encrypted factory when <see cref="BrokerOptions.Security"/> is set; plain only when explicitly allowed.</summary>
@@ -156,6 +164,8 @@ public sealed class BrokerHost : IAsyncDisposable
         {
             // Reported by PreloadAsync already.
         }
+        Cache.AbandonRanges();
+        await Holds.DisposeAsync().ConfigureAwait(false);
         await Client.DisposeAsync().ConfigureAwait(false);
         _factory?.Dispose();
         _stopping.Dispose();

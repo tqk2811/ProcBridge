@@ -87,10 +87,11 @@ public sealed class RemoteWriteTests
         using HookSandbox sandbox = new("x64");
         await using RemoteSession session = RemoteSession.Start(sandbox, writable: true, writeThrough: true);
         string file = Path.Combine(sandbox.RealRoot, "live.txt");
-        // PowerShell checks machine B's copy while its own handle is still open.
+        // PowerShell checks machine B's copy while its own handle is still open (sharing writing: machine B holds the
+        // file for the writer with its share mode, M8, as a local writer would).
         string script = $"$s = [IO.File]::Open('{sandbox.VirtualRoot}\\live.txt', 'CreateNew', 'Write', 'ReadWrite');"
             + "$b = [Text.Encoding]::ASCII.GetBytes('live'); $s.Write($b, 0, 4); $s.Flush();"
-            + $"[IO.File]::ReadAllText('{file}'); $s.Dispose()";
+            + $"(New-Object IO.StreamReader([IO.File]::Open('{file}', 'Open', 'Read', 'ReadWrite'))).ReadToEnd(); $s.Dispose()";
 
         ProcessResult result = session.Run($"powershell.exe -NoProfile -NonInteractive -Command \"{script}\"");
 

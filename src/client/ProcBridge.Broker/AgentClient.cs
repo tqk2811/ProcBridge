@@ -71,6 +71,10 @@ public sealed class AgentClient : IAsyncDisposable
         }
     }
 
+    /// <summary>A new connection of its own to the same Agent and share (not pooled); the caller owns it.</summary>
+    public Task<ProtocolConnection> OpenConnectionAsync(CancellationToken cancellationToken)
+        => ProtocolConnection.OpenAsync(_factory, _hello, _options, cancellationToken);
+
     /// <summary>New, not yet started watcher on a dedicated connection to the same Agent and share. The caller owns it.</summary>
     public ChangeWatcher CreateWatcher(TimeSpan reconnectDelay) => new(_factory, _hello, _options, reconnectDelay);
 
@@ -98,6 +102,29 @@ public sealed class AgentClient : IAsyncDisposable
             if (frame.Payload.Length != length)
                 throw new ProtocolStatusException(NtStatus.FileVersionChanged, $"Short read at {offset}: {frame.Payload.Length} of {length} bytes.");
             await RandomAccess.WriteAsync(handle, frame.Payload, offset, token).ConfigureAwait(false);
+        }).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Reads <paramref name="length"/> bytes at <paramref name="offset"/> of version <paramref name="expected"/> into
+    /// <paramref name="destination"/> at <paramref name="destinationOffset"/>, in chunks fetched in parallel (M8 ranges).
+    /// A change on machine B fails with <see cref="NtStatus.FileVersionChanged"/>.
+    /// </summary>
+    public async Task ReadRangeAsync(string remotePath, FsVersion expected, long offset, int length, Microsoft.Win32.SafeHandles.SafeFileHandle destination, CancellationToken cancellationToken)
+    {
+        int maxRead = await Pool.GetMaxReadSizeAsync(cancellationToken).ConfigureAwait(false);
+        int chunkSize = Math.Max(1, Math.Min(_options.ReadChunkSize, maxRead));
+        long chunkCount = (length + chunkSize - 1) / chunkSize;
+        var parallel = new ParallelOptions { MaxDegreeOfParallelism = _options.MaxParallelChunks, CancellationToken = cancellationToken };
+        await Parallel.ForEachAsync(LongRange(chunkCount), parallel, async (index, token) =>
+        {
+            long start = offset + index * chunkSize;
+            int count = (int)Math.Min(chunkSize, offset + length - start);
+            var request = new FsReadRequest { Path = remotePath, Offset = start, Length = count, ExpectedVersion = expected };
+            Frame frame = await Pool.SendAsync(MessageType.FsRead, ProtocolSerializer.Serialize(request), default, idempotent: true, token).ConfigureAwait(false);
+            if (frame.Payload.Length != count)
+                throw new ProtocolStatusException(NtStatus.FileVersionChanged, $"Short read at {start}: {frame.Payload.Length} of {count} bytes.");
+            await RandomAccess.WriteAsync(destination, frame.Payload, start, token).ConfigureAwait(false);
         }).ConfigureAwait(false);
     }
 

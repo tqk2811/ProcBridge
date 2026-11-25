@@ -47,6 +47,15 @@ public sealed record BrokerOptions
     /// <summary>See <see cref="FileCacheOptions.ReadAheadParallelism"/>.</summary>
     public int ReadAheadParallelism { get; init; } = 2;
 
+    /// <summary>See <see cref="FileCacheOptions.RangeThreshold"/> (M8); 0 downloads every file whole.</summary>
+    public long RangeThreshold { get; init; } = 64L * 1024 * 1024;
+
+    /// <summary>See <see cref="FileCacheOptions.RangeBlockSize"/>.</summary>
+    public int RangeBlockSize { get; init; } = 256 * 1024;
+
+    /// <summary>See <see cref="FileCacheOptions.RangePrefetchBlocks"/>.</summary>
+    public int RangePrefetchBlocks { get; init; } = 4;
+
     public TransportOptions Transport { get; init; } = new();
 
     /// <summary>Identity, paired Agents and the Agent's key: frames are encrypted end to end (plan section 9).</summary>
@@ -62,6 +71,16 @@ public sealed record BrokerOptions
     /// write at once instead of at close or flush (slow; for data that must not wait).
     /// </summary>
     public bool WriteThrough { get; init; }
+
+    /// <summary>
+    /// M8: machine B keeps a handle for every open that may write, with that open's share mode, so users of machine B
+    /// cannot open the file in a way the open forbids (and an open machine B's users forbid fails). Off: a handle is only
+    /// opened for the first byte range lock. Locks are forwarded to machine B either way.
+    /// </summary>
+    public bool HoldShareMode { get; init; } = true;
+
+    /// <summary>Longest a byte range lock that may wait (not FailImmediately) waits for machine B.</summary>
+    public TimeSpan LockWait { get; init; } = TimeSpan.FromSeconds(20);
 
     /// <summary>Folder of pending write-backs; default <c>%LOCALAPPDATA%\ProcBridge\queue</c>. Shared by sessions so a later
     /// Broker for the same Agent and share resends what an earlier one could not.</summary>

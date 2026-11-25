@@ -29,4 +29,10 @@ public enum HookIpcMessageType : ushort
     Delete = 12,
     /// <summary>A child process inherited a handle holding a write token: the token stays open until the child closes it too.</summary>
     Retain = 13,
+    /// <summary>A read (or a mapping) on a handle whose cache copy is only partly downloaded: bring the range in first (M8).</summary>
+    FetchRange = 14,
+    /// <summary>NtLockFile on a handle with a write token: the lock is taken on machine B too (M8).</summary>
+    Lock = 15,
+    /// <summary>NtUnlockFile on a handle with a write token (M8).</summary>
+    Unlock = 16,
 }

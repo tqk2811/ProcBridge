@@ -576,8 +576,21 @@ namespace ProcBridge::Hook
         }
         if (info != nullptr)
         {
+            const uint32_t rangeId = state->Self.RangeId;
             state->Self = *info;
+            state->Self.RangeId = rangeId;
         }
+        Unlock(state);
+    }
+
+    void RemoteHandleTable::ClearRange(HANDLE handle) noexcept
+    {
+        State* state = Lock(handle);
+        if (state == nullptr)
+        {
+            return;
+        }
+        state->Self.RangeId = 0;
         Unlock(state);
     }
 

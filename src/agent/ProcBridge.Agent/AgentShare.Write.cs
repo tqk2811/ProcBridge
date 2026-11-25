@@ -144,7 +144,13 @@ public sealed partial class AgentShare
                     return new FsCommitResponse { Entry = exists ? Stat(relativePath) : Stat(relativeConflict), ConflictPath = relativeConflict };
                 }
 
-                if (exists)
+                if (exists && FindHeldWriter(path) is { } held)
+                {
+                    // Machine A holds the file open (M8): write in place through that handle, which keeps the file's
+                    // identity, its share mode and the byte range locks taken on it.
+                    CommitInPlace(held, staging, size, lastWriteTime);
+                }
+                else if (exists)
                 {
                     // Replace keeps the target's identity: creation time, attributes, ACL, file id of the name.
                     FileAttributes attributes = File.GetAttributes(path);
@@ -246,10 +252,18 @@ public sealed partial class AgentShare
             if (isDirectory)
                 throw new ProtocolStatusException(NtStatus.FileIsADirectory, "A directory has no size.");
             ArgumentOutOfRangeException.ThrowIfNegative(length);
-            using SafeFileHandle handle = File.OpenHandle(path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
-            if (GetFileType(handle) != FileTypeDisk)
-                throw new ProtocolStatusException(NtStatus.ObjectNameInvalid, "Not a disk file.");
-            RandomAccess.SetLength(handle, length);
+            if (FindHeldWriter(path) is { } held)
+            {
+                // Its share mode may refuse a second writer: use the held handle itself (M8).
+                RandomAccess.SetLength(held.Handle, length);
+            }
+            else
+            {
+                using SafeFileHandle handle = File.OpenHandle(path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
+                if (GetFileType(handle) != FileTypeDisk)
+                    throw new ProtocolStatusException(NtStatus.ObjectNameInvalid, "Not a disk file.");
+                RandomAccess.SetLength(handle, length);
+            }
         }
 
         // Times first: a read-only attribute set afterwards would refuse them.
@@ -302,6 +316,7 @@ public sealed partial class AgentShare
                 Directory.Move(source, target);
             else
                 File.Move(source, target, overwrite: replaceIfExists && !sameName);
+            RenameHeld(source, target);
         }
         return Stat(newRelativePath);
     }

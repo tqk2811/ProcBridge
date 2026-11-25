@@ -59,8 +59,9 @@ public sealed class HookIpcCodecTests
 
         HookResolveRequest resolve = RoundTrip(new HookResolveRequest
         {
-            MappingIndex = 1, Flags = 2, DesiredAccess = 0x80100080, CreateDisposition = 1, CreateOptions = 0x60, RelativePath = "",
+            MappingIndex = 1, Flags = 2, DesiredAccess = 0x80100080, CreateDisposition = 1, CreateOptions = 0x60, ShareAccess = 5, RelativePath = "",
         }, HookResolveRequest.Read);
+        Assert.AreEqual(5u, resolve.ShareAccess);
         Assert.AreEqual(0x80100080u, resolve.DesiredAccess);
         Assert.AreEqual(1u, resolve.CreateDisposition);
         Assert.AreEqual(0x60u, resolve.CreateOptions);
@@ -70,6 +71,34 @@ public sealed class HookIpcCodecTests
         HookResolveReply reply = RoundTrip(new HookResolveReply { Info = SampleInfo, CachePath = @"C:\cache\a.cs" }, HookResolveReply.Read);
         Assert.AreEqual(SampleInfo, reply.Info);
         Assert.AreEqual(@"C:\cache\a.cs", reply.CachePath);
+        Assert.AreEqual(9u, RoundTrip(new HookResolveReply { Info = SampleInfo with { RangeId = 9 }, CachePath = "c" }, HookResolveReply.Read).Info.RangeId);
+    }
+
+    [TestMethod]
+    public void RangeAndLock_RoundTrip()
+    {
+        HookFetchRangeRequest fetch = RoundTrip(new HookFetchRangeRequest { RangeId = 7, Flags = HookIpcProtocol.FetchFlagWhole, Offset = 1L << 33, Length = 4096 }, HookFetchRangeRequest.Read);
+        Assert.AreEqual(7u, fetch.RangeId);
+        Assert.IsTrue(fetch.Whole);
+        Assert.AreEqual(1L << 33, fetch.Offset);
+        Assert.AreEqual(4096L, fetch.Length);
+        Assert.IsTrue(RoundTrip(new HookFetchRangeReply { Flags = HookIpcProtocol.FetchReplyFlagComplete }, HookFetchRangeReply.Read).Complete);
+
+        byte[] buffer = new byte[256];
+        var lockRequest = new HookLockRequest
+        {
+            Type = HookIpcMessageType.Lock, WriteToken = 0x1122334455667788, Offset = 0x40000000, Length = 510, Key = 3,
+            Flags = HookIpcProtocol.LockFlagExclusive | HookIpcProtocol.LockFlagFailImmediately,
+        };
+        int size = HookIpcCodec.Encode(buffer, 1, lockRequest);
+        Assert.AreEqual(HookIpcProtocol.HeaderSize + 32, size, "LockRequest is 32 bytes like the C++ struct.");
+        var reader = new HookIpcReader(buffer.AsSpan(0, size));
+        HookLockRequest read = HookLockRequest.Read(ref reader, HookIpcMessageType.Lock);
+        Assert.AreEqual(0x1122334455667788ul, read.WriteToken);
+        Assert.AreEqual(0x40000000L, read.Offset);
+        Assert.AreEqual(510L, read.Length);
+        Assert.AreEqual(3u, read.Key);
+        Assert.IsTrue(read.Exclusive && read.FailImmediately);
     }
 
     [TestMethod]
@@ -125,7 +154,7 @@ public sealed class HookIpcCodecTests
         // header(16) + u16 + u16 + u16 len + 2 chars
         Assert.AreEqual(16 + 2 + 2 + 2 + 4, size);
         CollectionAssert.AreEqual(
-            new byte[] { 26, 0, 0, 0, 2, 0, 2, 0, 4, 3, 2, 1, 0, 0, 0, 0, 0x0B, 0x0A, 0, 0, 2, 0, (byte)'a', 0, (byte)'b', 0 },
+            new byte[] { 26, 0, 0, 0, 3, 0, 2, 0, 4, 3, 2, 1, 0, 0, 0, 0, 0x0B, 0x0A, 0, 0, 2, 0, (byte)'a', 0, (byte)'b', 0 },
             buffer[..size]);
 
         size = HookIpcCodec.Encode(buffer, 0, new HookStatReply { Info = SampleInfo });

@@ -31,6 +31,11 @@ public sealed class FileCache
     private readonly ConcurrentDictionary<string, FsVersion> _versions = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, Lazy<Task<CachedItem>>> _downloads = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, PendingStat> _pendingStats = new(StringComparer.OrdinalIgnoreCase);
+    // M8: files cached by ranges, by share path (the current copy) and by id (every copy a hook may still read).
+    private readonly ConcurrentDictionary<string, RangeFile> _ranges = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<uint, RangeFile> _rangesById = new();
+    private readonly object _rangeLock = new();
+    private uint _nextRangeId;
     // Bumped by every invalidation; a fetch that started under an older value may hold stale data and gets the short TTL.
     private long _epoch;
     private volatile bool _watchActive;
@@ -238,6 +243,7 @@ public sealed class FileCache
         if (change.Action is FsChangeAction.Removed or FsChangeAction.RenamedOldName)
         {
             _versions.TryRemove(path, out _);
+            _ranges.TryRemove(path, out _);
             RemoveByPrefix(_versions, path + "/");
         }
     }
@@ -325,7 +331,74 @@ public sealed class FileCache
     /// <summary>Makes sure <paramref name="remotePath"/> is in the cache with the current remote version.</summary>
     /// <remarks>Opening a small file starts the read-ahead of its directory (<see cref="FileCacheOptions.ReadAheadMaxFileSize"/>).</remarks>
     public Task<CachedItem> EnsureAsync(string remotePath, CancellationToken cancellationToken)
-        => EnsureAsync(remotePath, readAhead: true, cancellationToken);
+        => EnsureAsync(remotePath, readAhead: true, allowRanges: false, cancellationToken);
+
+    /// <summary>
+    /// Like <see cref="EnsureAsync(string, CancellationToken)"/>; with <paramref name="allowRanges"/> a file above
+    /// <see cref="FileCacheOptions.RangeThreshold"/> may come back as a sparse copy (<see cref="CachedItem.RangeId"/>)
+    /// instead of being downloaded whole. Without it a ranged copy of the current version is completed in place.
+    /// </summary>
+    public Task<CachedItem> EnsureAsync(string remotePath, bool allowRanges, CancellationToken cancellationToken)
+        => EnsureAsync(remotePath, readAhead: true, allowRanges, cancellationToken);
+
+    /// <summary>Bytes downloaded into ranged copies so far (M8), for tests and measurements.</summary>
+    public long RangeBytesDownloaded => _rangesById.Values.Sum(x => x.BytesDownloaded);
+
+    /// <summary>
+    /// Brings [<paramref name="offset"/>, +<paramref name="length"/>) of ranged copy <paramref name="rangeId"/> in, or the
+    /// whole file with <paramref name="whole"/>. Returns true when the copy is complete.
+    /// </summary>
+    public async Task<bool> FetchRangeAsync(uint rangeId, long offset, long length, bool whole, CancellationToken cancellationToken)
+    {
+        if (!_rangesById.TryGetValue(rangeId, out RangeFile? range))
+            throw new ProtocolStatusException(NtStatus.InvalidParameter, $"Unknown range id {rangeId}.");
+        if (whole)
+            await range.CompleteAsync(_options.RangeParallelism, cancellationToken).ConfigureAwait(false);
+        else
+            await range.EnsureAsync(offset, length, cancellationToken).ConfigureAwait(false);
+        return range.IsComplete;
+    }
+
+    /// <summary>Starts a sparse copy of <paramref name="entry"/> (or joins the current one of the same version).</summary>
+    private async Task<CachedItem> StartRangeAsync(string remotePath, FsEntry entry, string localPath, CancellationToken cancellationToken)
+    {
+        bool writable = await IsWritableAsync(cancellationToken).ConfigureAwait(false);
+        lock (_rangeLock)
+        {
+            if (_ranges.TryGetValue(remotePath, out RangeFile? current) && current.Version == entry.Version && !current.IsComplete)
+                return new CachedItem(entry, current.LocalPath, current.Id);
+            Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
+            // An older copy stays readable through the handles that have it open (renamed away, its RangeFile keeps
+            // serving their ranges); the name is free for the new one.
+            RemoveLocal(localPath);
+            _versions.TryRemove(remotePath, out _);
+            uint id = ++_nextRangeId;
+            RangeFile range = RangeFile.Create(id, remotePath, entry, localPath, _client, _options.RangeBlockSize, _options.RangePrefetchBlocks);
+            range.OnComplete = OnRangeComplete;
+            _rangesById[id] = range;
+            if (!range.IsComplete)
+                _ranges[remotePath] = range;
+            else
+                _versions[remotePath] = entry.Version;
+            FileAttributes attributes = Mirrored(entry.Attributes) | (writable ? 0 : FileAttributes.ReadOnly);
+            File.SetAttributes(localPath, attributes != 0 ? attributes : FileAttributes.Normal);
+            return new CachedItem(entry, localPath, range.IsComplete ? 0 : id);
+        }
+    }
+
+    /// <summary>Closes the write handles of unfinished ranged copies (Broker shutdown); their hooks then fail reads.</summary>
+    public void AbandonRanges()
+    {
+        foreach (RangeFile range in _rangesById.Values)
+            range.Abandon();
+    }
+
+    private void OnRangeComplete(RangeFile range)
+    {
+        // The copy holds exactly that version now, like a whole download.
+        if (_ranges.TryRemove(new KeyValuePair<string, RangeFile>(range.RemotePath, range)))
+            _versions[range.RemotePath] = range.Version;
+    }
 
     /// <summary>Files downloaded by read-ahead so far, for diagnostics, tests and benchmarks.</summary>
     public int ReadAheadDownloads => Volatile.Read(ref _readAheadDownloads);
@@ -336,7 +409,7 @@ public sealed class FileCache
     /// <summary>Completes when every read-ahead started so far has finished.</summary>
     public Task WaitForReadAheadAsync() => Task.WhenAll(_readAheadTasks.Keys);
 
-    private async Task<CachedItem> EnsureAsync(string remotePath, bool readAhead, CancellationToken cancellationToken)
+    private async Task<CachedItem> EnsureAsync(string remotePath, bool readAhead, bool allowRanges, CancellationToken cancellationToken)
     {
         FsEntry entry = await StatAsync(remotePath, cancellationToken).ConfigureAwait(false);
         string localPath = GetLocalPath(remotePath);
@@ -354,6 +427,17 @@ public sealed class FileCache
         // A writer's unsent changes win over machine B's newer version until its write-back decides (conflict policy).
         if (IsPinned(remotePath) && File.Exists(localPath))
             return new CachedItem(entry, localPath);
+
+        if (_ranges.TryGetValue(remotePath, out RangeFile? range) && range.Version == entry.Version)
+        {
+            if (allowRanges && !range.IsComplete)
+                return new CachedItem(entry, range.LocalPath, range.Id);
+            // A writer or a whole-file reader: complete the sparse copy in place (readers keep their handles).
+            await range.CompleteAsync(_options.RangeParallelism, cancellationToken).ConfigureAwait(false);
+            return new CachedItem(entry, range.LocalPath);
+        }
+        if (allowRanges && _options.RangeThreshold > 0 && entry.Size > _options.RangeThreshold)
+            return await StartRangeAsync(remotePath, entry, localPath, cancellationToken).ConfigureAwait(false);
 
         Lazy<Task<CachedItem>> download = _downloads.GetOrAdd(remotePath,
             key => new Lazy<Task<CachedItem>>(() => DownloadAsync(key, entry, localPath, CancellationToken.None)));
@@ -412,7 +496,7 @@ public sealed class FileCache
             }
             try
             {
-                CachedItem item = await EnsureAsync(path, readAhead: false, token).ConfigureAwait(false);
+                CachedItem item = await EnsureAsync(path, readAhead: false, allowRanges: false, token).ConfigureAwait(false);
                 // The file may have grown since it was listed; it is downloaded by then, but count only real read-ahead.
                 if (item.Entry.Size <= _options.ReadAheadMaxFileSize)
                     Interlocked.Increment(ref _readAheadDownloads);

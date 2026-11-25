@@ -39,12 +39,17 @@
 //           reply   : FileInfo, then String NewCachePath (machine B renamed; rename the cache handle to it)
 //   Delete  request : PathRequest (Reserved = DeleteFlag*), then String RelativePath, then uint64 ExpectedFileId
 //                     when DeleteFlagExpectFileId is set; reply: no body
+//   FetchRange request : FetchRangeRequest (M8: FileInfo.RangeId of the Resolve reply was not 0, the cache copy is a
+//                        sparse file downloaded by ranges; read or map only after the range is in)
+//              reply   : FetchRangeReply; Flags & FetchReplyFlagComplete = the copy is complete, stop asking
+//   Lock / Unlock request : LockRequest (M8, handle with a write token: the lock is also taken on machine B)
+//                 reply   : no body; STATUS_LOCK_NOT_GRANTED when machine B holds a conflicting lock
 
 #include <cstdint>
 
 namespace ProcBridge::HookIpc
 {
-    constexpr uint16_t ProtocolVersion = 2;
+    constexpr uint16_t ProtocolVersion = 3;
     constexpr uint32_t HeaderSize = 16;
     constexpr uint32_t MaxMessageSize = 65536;
     constexpr uint32_t FileInfoSize = 64;
@@ -56,6 +61,10 @@ namespace ProcBridge::HookIpc
     constexpr uint16_t RenameFlagReplaceIfExists = 1;
     constexpr uint16_t DeleteFlagKeepItem = 1; // PathRequest.Reserved of Delete: the hook deletes the cache copy itself
     constexpr uint16_t DeleteFlagExpectFileId = 2; // ExpectedFileId follows: machine B leaves another file under the name alone
+    constexpr uint32_t FetchFlagWhole = 1;          // FetchRangeRequest.Flags: the whole file (mapping, inheritance)
+    constexpr uint32_t FetchReplyFlagComplete = 1;  // FetchRangeReply.Flags
+    constexpr uint16_t LockFlagExclusive = 1;
+    constexpr uint16_t LockFlagFailImmediately = 2;
     constexpr const wchar_t* PipeNamePrefix = L"\\\\.\\pipe\\ProcBridge-";
 
     enum class MessageType : uint16_t
@@ -73,6 +82,9 @@ namespace ProcBridge::HookIpc
         Rename = 11,
         Delete = 12,
         Retain = 13,
+        FetchRange = 14,
+        Lock = 15,
+        Unlock = 16,
     };
 
     enum class Architecture : uint16_t
@@ -95,7 +107,7 @@ namespace ProcBridge::HookIpc
     struct FileInfo
     {
         uint32_t Attributes;  // FILE_ATTRIBUTE_* of machine B
-        uint32_t Reserved;
+        uint32_t RangeId;     // Resolve replies only: non-zero = partly downloaded cache copy (FetchRange), 0 elsewhere
         int64_t Size;
         int64_t AllocationSize;
         int64_t CreationTime; // FILETIME UTC
@@ -132,7 +144,7 @@ namespace ProcBridge::HookIpc
         uint32_t CreateDisposition;
         uint32_t CreateOptions;
         uint32_t FileAttributes;
-        uint32_t Reserved;
+        uint32_t ShareAccess;       // FILE_SHARE_*: machine B keeps a handle with it for a writer (M8)
     };
 
     struct ListRequest
@@ -215,6 +227,28 @@ namespace ProcBridge::HookIpc
         uint16_t Flags;       // RenameFlagReplaceIfExists
         uint16_t Reserved;
     };
+    struct FetchRangeRequest
+    {
+        uint32_t RangeId;
+        uint32_t Flags;       // FetchFlagWhole
+        int64_t Offset;
+        int64_t Length;
+    };
+
+    struct FetchRangeReply
+    {
+        uint32_t Flags;       // FetchReplyFlagComplete
+    };
+
+    struct LockRequest
+    {
+        uint64_t WriteToken;
+        int64_t Offset;
+        int64_t Length;
+        uint32_t Key;
+        uint16_t Flags;       // LockFlag* (Lock only)
+        uint16_t Reserved;
+    };
 #pragma pack(pop)
 
     static_assert(sizeof(MessageHeader) == HeaderSize);
@@ -234,4 +268,7 @@ namespace ProcBridge::HookIpc
     static_assert(sizeof(TokenRequest) == 8);
     static_assert(sizeof(SetInfoRequest) == 40);
     static_assert(sizeof(RenameRequest) == 8);
+    static_assert(sizeof(FetchRangeRequest) == 24);
+    static_assert(sizeof(FetchRangeReply) == 4);
+    static_assert(sizeof(LockRequest) == 32);
 }

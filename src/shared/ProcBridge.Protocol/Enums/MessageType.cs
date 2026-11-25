@@ -54,4 +54,10 @@ public enum MessageType : ushort
     FsSetInfo = 0x010A,
     FsRename = 0x010B,
     FsDelete = 0x010C,
+    /// <summary>Opens a handle machine B keeps for an open on machine A (M8, locks and share mode).</summary>
+    FsOpenHandle = 0x010D,
+    FsCloseHandle = 0x010E,
+    /// <summary>Byte range lock on a handle of FsOpenHandle (M8).</summary>
+    FsLock = 0x010F,
+    FsUnlock = 0x0110,
 }

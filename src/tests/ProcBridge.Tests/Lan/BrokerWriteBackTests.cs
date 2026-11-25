@@ -73,6 +73,9 @@ public sealed class BrokerWriteBackTests
                 ConflictPolicy = policy,
                 WriteRetryDelay = retryDelay ?? TimeSpan.FromMilliseconds(200),
                 Transport = new() { ConnectTimeout = TimeSpan.FromSeconds(2), ConnectBackoff = TimeSpan.Zero },
+                // These tests change machine B's file while a writer has it open on machine A (conflicts): the handle
+                // machine B keeps for writers (M8 share mode) would refuse that, so it is only opened for locks here.
+                HoldShareMode = false,
             });
             FakeHook hook = await FakeHook.ConnectAsync(HookIpcProtocol.GetPipeName(session));
             await hook.CallOkAsync(new HookHelloRequest { ProcessId = 1, Architecture = HookArchitecture.X64 }, HookHelloReply.Read);

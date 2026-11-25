@@ -22,6 +22,7 @@ namespace ProcBridge::Hook
         ULONG CreateDisposition;
         ULONG CreateOptions;
         ULONG FileAttributes = 0; // given to a file the open creates
+        ULONG ShareAccess = 0;    // FILE_SHARE_* of the open (machine B keeps a handle with it for a writer, M8)
     };
 
     /// How a path given to the resolver is spelled.
@@ -173,6 +174,25 @@ namespace ProcBridge::Hook
 
         /// Removes watch watchId on machine B, then closes its channel (may be null).
         virtual void Unwatch(WatchChannel* /*channel*/, uint32_t /*watchId*/) const noexcept {}
+
+        // M8: ranged cache copies and byte range locks of a remote resolver.
+
+        /// Brings [offset, offset + length) of ranged copy rangeId (FileInfo.RangeId of a Resolve) into the cache copy,
+        /// or the whole file with whole. complete receives true once the copy is complete.
+        virtual NTSTATUS FetchRange(uint32_t /*rangeId*/, int64_t /*offset*/, int64_t /*length*/, bool /*whole*/,
+            bool& complete) const noexcept
+        {
+            complete = true;
+            return STATUS_SUCCESS;
+        }
+
+        /// Takes (lock) or releases (!lock) a byte range lock on machine B for the open holding writeToken.
+        /// flags: HookIpc::LockFlag* (lock only).
+        virtual NTSTATUS LockRange(bool /*lock*/, uint64_t /*writeToken*/, int64_t /*offset*/, int64_t /*length*/, ULONG /*key*/,
+            uint16_t /*flags*/) const noexcept
+        {
+            return STATUS_SUCCESS;
+        }
     };
 
     /// Mappings read from the PROCBRIDGE_MAP environment variable:

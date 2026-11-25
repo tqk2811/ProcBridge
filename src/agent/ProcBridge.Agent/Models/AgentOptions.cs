@@ -68,4 +68,10 @@ public sealed record AgentOptions
 
     /// <summary>Unfinished FsTree walks one connection may hold at once.</summary>
     public int MaxTreeWalksPerConnection { get; init; } = 4;
+
+    /// <summary>Files one connection may hold open for opens on machine A (M8, locks and share mode).</summary>
+    public int MaxHeldFilesPerConnection { get; init; } = 4096;
+
+    /// <summary>Longest a byte range lock from machine A waits for a conflicting one (M8).</summary>
+    public TimeSpan MaxLockWait { get; init; } = TimeSpan.FromSeconds(30);
 }

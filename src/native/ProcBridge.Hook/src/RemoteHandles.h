@@ -61,7 +61,11 @@ namespace ProcBridge::Hook
         /// Sets or clears delete-on-close of handle (FILE_DISPOSITION_ON_CLOSE). False when not tracked.
         bool SetDeleteOnClose(HANDLE handle, bool deleteOnClose) noexcept;
 
+        /// The ranged cache copy of handle is complete (M8): reads stop asking the Broker.
+        void ClearRange(HANDLE handle) noexcept;
+
         /// After a rename (newPath, copied) or an attribute change (info): the entry follows. Either may be null.
+        /// The range id of the entry is kept (metadata replies carry none).
         void Update(HANDLE handle, const UNICODE_STRING* newPath, const HookIpc::FileInfo* info) noexcept;
 
         /// A rename replaced the file at path: other handles still open on the old file no longer have a name on

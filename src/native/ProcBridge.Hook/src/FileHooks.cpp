@@ -28,6 +28,7 @@
 #include "RemoteHandles.h"
 #include <MinHook.h>
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 
 namespace ProcBridge::Hook
@@ -77,6 +78,14 @@ namespace ProcBridge::Hook
         NtCancelIoFileFn g_ntCancelIoFile = nullptr;
         NtCancelIoFileExFn g_ntCancelIoFileEx = nullptr;
         NtCancelSynchronousIoFileFn g_ntCancelSynchronousIoFile = nullptr;
+        NtReadFileFn g_ntReadFile = nullptr;
+        NtReadFileScatterFn g_ntReadFileScatter = nullptr;
+        NtCreateSectionFn g_ntCreateSection = nullptr;
+        NtCreateSectionExFn g_ntCreateSectionEx = nullptr;
+        NtLockFileFn g_ntLockFile = nullptr;
+        NtUnlockFileFn g_ntUnlockFile = nullptr;
+        // M8: set once a ranged cache copy was opened (or inherited); until then reads and mappings skip the table.
+        std::atomic<bool> g_anyRange{ false };
 
         /// Resolves OBJECT_ATTRIBUTES against the virtual roots and owns the rewritten name.
         /// The caller's structures are read once into a snapshot (SEH-guarded); an unreadable pointer
@@ -430,6 +439,203 @@ namespace ProcBridge::Hook
             TrackRemoteHandle(handle, redirect, deleteOnClose);
         }
 
+        /// A ranged cache copy (M8) is still written by the Broker's own handle: the process's open must share writing
+        /// (and deleting, so a newer copy can take the name) or it would fail with a sharing violation. The copy is
+        /// private to the session, so nothing else is let in.
+        ULONG RangeShareAccess(const RedirectedAttributes& redirect, ULONG shareAccess) noexcept
+        {
+            if (redirect.Info().RangeId == 0)
+            {
+                return shareAccess;
+            }
+            g_anyRange.store(true, std::memory_order_relaxed);
+            return shareAccess | FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+        }
+
+        /// Ranged cache copy of handle (M8): brings [offset, offset + length) in before a read (offset nullptr = the file
+        /// pointer), or the whole file. Untracked or complete handles return at once.
+        NTSTATUS EnsureRange(HANDLE fileHandle, const LARGE_INTEGER* offset, ULONG length, bool whole) noexcept
+        {
+            HookIpc::FileInfo info{};
+            if (g_remoteHandles.IsEmpty() || !g_remoteHandles.GetInfo(fileHandle, info) || info.RangeId == 0)
+            {
+                return STATUS_SUCCESS;
+            }
+            int64_t start = 0;
+            if (!whole)
+            {
+                if (offset != nullptr)
+                {
+                    start = offset->QuadPart;
+                }
+                else
+                {
+                    LARGE_INTEGER position{};
+                    IO_STATUS_BLOCK io{};
+                    if (NT_SUCCESS(g_ntQueryInformationFile(fileHandle, &io, &position, sizeof(position), FilePositionInformation)))
+                    {
+                        start = position.QuadPart;
+                    }
+                    else
+                    {
+                        whole = true;
+                    }
+                }
+            }
+            bool complete = false;
+            const NTSTATUS status = g_resolver->FetchRange(info.RangeId, start, length, whole, complete);
+            if (NT_SUCCESS(status) && complete)
+            {
+                g_remoteHandles.ClearRange(fileHandle);
+            }
+            return status;
+        }
+
+        /// Offset argument of NtReadFile[Scatter]: nullptr when the read uses the file pointer.
+        bool ReadOffset(PLARGE_INTEGER byteOffset, LARGE_INTEGER& offset) noexcept
+        {
+            if (byteOffset == nullptr || !SafeCopy(&offset, byteOffset, sizeof(offset)))
+            {
+                return false;
+            }
+            return !(offset.HighPart == -1 && offset.LowPart == FileUseFilePointerPosition);
+        }
+
+        NTSTATUS NTAPI HookNtReadFile(HANDLE fileHandle, HANDLE event, PIO_APC_ROUTINE apcRoutine, PVOID apcContext,
+            PIO_STATUS_BLOCK ioStatusBlock, PVOID buffer, ULONG length, PLARGE_INTEGER byteOffset, PULONG key)
+        {
+            if (g_anyRange.load(std::memory_order_relaxed))
+            {
+                ReentryGuard guard;
+                if (guard.IsOutermost())
+                {
+                    LARGE_INTEGER offset{};
+                    const bool explicitOffset = ReadOffset(byteOffset, offset);
+                    const NTSTATUS fetched = EnsureRange(fileHandle, explicitOffset ? &offset : nullptr, length, false);
+                    if (!NT_SUCCESS(fetched))
+                    {
+                        return fetched;
+                    }
+                }
+            }
+            return g_ntReadFile(fileHandle, event, apcRoutine, apcContext, ioStatusBlock, buffer, length, byteOffset, key);
+        }
+
+        NTSTATUS NTAPI HookNtReadFileScatter(HANDLE fileHandle, HANDLE event, PIO_APC_ROUTINE apcRoutine, PVOID apcContext,
+            PIO_STATUS_BLOCK ioStatusBlock, PVOID segments, ULONG length, PLARGE_INTEGER byteOffset, PULONG key)
+        {
+            if (g_anyRange.load(std::memory_order_relaxed))
+            {
+                ReentryGuard guard;
+                if (guard.IsOutermost())
+                {
+                    LARGE_INTEGER offset{};
+                    const bool explicitOffset = ReadOffset(byteOffset, offset);
+                    const NTSTATUS fetched = EnsureRange(fileHandle, explicitOffset ? &offset : nullptr, length, false);
+                    if (!NT_SUCCESS(fetched))
+                    {
+                        return fetched;
+                    }
+                }
+            }
+            return g_ntReadFileScatter(fileHandle, event, apcRoutine, apcContext, ioStatusBlock, segments, length, byteOffset, key);
+        }
+
+        /// A mapping (data or image, plan 15) sees the file without reads to hook: bring the whole copy in first.
+        NTSTATUS EnsureWholeForSection(HANDLE fileHandle) noexcept
+        {
+            if (fileHandle == nullptr || !g_anyRange.load(std::memory_order_relaxed))
+            {
+                return STATUS_SUCCESS;
+            }
+            ReentryGuard guard;
+            return guard.IsOutermost() ? EnsureRange(fileHandle, nullptr, 0, true) : STATUS_SUCCESS;
+        }
+
+        NTSTATUS NTAPI HookNtCreateSection(PHANDLE sectionHandle, ACCESS_MASK desiredAccess, POBJECT_ATTRIBUTES objectAttributes,
+            PLARGE_INTEGER maximumSize, ULONG pageProtection, ULONG allocationAttributes, HANDLE fileHandle)
+        {
+            const NTSTATUS fetched = EnsureWholeForSection(fileHandle);
+            if (!NT_SUCCESS(fetched))
+            {
+                return fetched;
+            }
+            return g_ntCreateSection(sectionHandle, desiredAccess, objectAttributes, maximumSize, pageProtection, allocationAttributes, fileHandle);
+        }
+
+        NTSTATUS NTAPI HookNtCreateSectionEx(PHANDLE sectionHandle, ACCESS_MASK desiredAccess, POBJECT_ATTRIBUTES objectAttributes,
+            PLARGE_INTEGER maximumSize, ULONG pageProtection, ULONG allocationAttributes, HANDLE fileHandle, PVOID extendedParameters,
+            ULONG extendedParameterCount)
+        {
+            const NTSTATUS fetched = EnsureWholeForSection(fileHandle);
+            if (!NT_SUCCESS(fetched))
+            {
+                return fetched;
+            }
+            return g_ntCreateSectionEx(sectionHandle, desiredAccess, objectAttributes, maximumSize, pageProtection, allocationAttributes,
+                fileHandle, extendedParameters, extendedParameterCount);
+        }
+
+        /// Write token and range of a lock call on a virtual handle; false when the call stays local.
+        bool RemoteLockArguments(HANDLE fileHandle, PLARGE_INTEGER byteOffset, PLARGE_INTEGER length, uint64_t& token,
+            LARGE_INTEGER& offset, LARGE_INTEGER& size) noexcept
+        {
+            if (g_remoteHandles.IsEmpty())
+            {
+                return false;
+            }
+            token = g_remoteHandles.GetWriteToken(fileHandle);
+            return token != 0 && byteOffset != nullptr && length != nullptr && SafeCopy(&offset, byteOffset, sizeof(offset))
+                && SafeCopy(&size, length, sizeof(size));
+        }
+
+        /// Completes a lock call the hook answered itself: synchronously, with the I/O status block and the event set.
+        NTSTATUS CompleteLockCall(PIO_STATUS_BLOCK ioStatusBlock, HANDLE event, NTSTATUS status) noexcept
+        {
+            SafeSetIoStatus(ioStatusBlock, status, 0);
+            if (event != nullptr && NT_SUCCESS(status))
+            {
+                SetEvent(event);
+            }
+            return status;
+        }
+
+        /// NtLockFile on a virtual handle that may write (M8): the lock is taken on machine B only, where the Agent holds a
+        /// handle for every such open (of any process of this machine too), so machine B arbitrates between all of them.
+        /// The cache copy is not locked: the Broker must be able to read all of it for a write-back while locks are held.
+        /// Answered synchronously (no completion port packet, no APC).
+        NTSTATUS NTAPI HookNtLockFile(HANDLE fileHandle, HANDLE event, PIO_APC_ROUTINE apcRoutine, PVOID apcContext,
+            PIO_STATUS_BLOCK ioStatusBlock, PLARGE_INTEGER byteOffset, PLARGE_INTEGER length, ULONG key, BOOLEAN failImmediately,
+            BOOLEAN exclusiveLock)
+        {
+            ReentryGuard guard;
+            uint64_t token = 0;
+            LARGE_INTEGER offset{};
+            LARGE_INTEGER size{};
+            if (!guard.IsOutermost() || !RemoteLockArguments(fileHandle, byteOffset, length, token, offset, size))
+            {
+                return g_ntLockFile(fileHandle, event, apcRoutine, apcContext, ioStatusBlock, byteOffset, length, key, failImmediately,
+                    exclusiveLock);
+            }
+            const uint16_t flags = static_cast<uint16_t>((exclusiveLock ? HookIpc::LockFlagExclusive : 0)
+                | (failImmediately ? HookIpc::LockFlagFailImmediately : 0));
+            return CompleteLockCall(ioStatusBlock, event, g_resolver->LockRange(true, token, offset.QuadPart, size.QuadPart, key, flags));
+        }
+
+        NTSTATUS NTAPI HookNtUnlockFile(HANDLE fileHandle, PIO_STATUS_BLOCK ioStatusBlock, PLARGE_INTEGER byteOffset, PLARGE_INTEGER length,
+            ULONG key)
+        {
+            ReentryGuard guard;
+            uint64_t token = 0;
+            LARGE_INTEGER offset{};
+            LARGE_INTEGER size{};
+            if (!guard.IsOutermost() || !RemoteLockArguments(fileHandle, byteOffset, length, token, offset, size))
+            {
+                return g_ntUnlockFile(fileHandle, ioStatusBlock, byteOffset, length, key);
+            }
+            return CompleteLockCall(ioStatusBlock, nullptr, g_resolver->LockRange(false, token, offset.QuadPart, size.QuadPart, key, 0));
+        }
+
         NTSTATUS NTAPI HookNtCreateFile(PHANDLE fileHandle, ACCESS_MASK desiredAccess, POBJECT_ATTRIBUTES objectAttributes,
             PIO_STATUS_BLOCK ioStatusBlock, PLARGE_INTEGER allocationSize, ULONG fileAttributes, ULONG shareAccess,
             ULONG createDisposition, ULONG createOptions, PVOID eaBuffer, ULONG eaLength)
@@ -440,12 +646,13 @@ namespace ProcBridge::Hook
                 return g_ntCreateFile(fileHandle, desiredAccess, objectAttributes, ioStatusBlock, allocationSize,
                     fileAttributes, shareAccess, createDisposition, createOptions, eaBuffer, eaLength);
             }
-            const OpenIntent intent{ desiredAccess, createDisposition, createOptions, fileAttributes };
+            const OpenIntent intent{ desiredAccess, createDisposition, createOptions, fileAttributes, shareAccess };
             RedirectedAttributes redirect(objectAttributes, &intent);
             if (redirect.Error() != STATUS_SUCCESS)
             {
                 return redirect.Error();
             }
+            shareAccess = RangeShareAccess(redirect, shareAccess);
             const NTSTATUS status = g_ntCreateFile(fileHandle, desiredAccess, redirect.Get(), ioStatusBlock,
                 allocationSize, fileAttributes, shareAccess, createDisposition, createOptions, eaBuffer, eaLength);
             if (NT_SUCCESS(status))
@@ -467,12 +674,13 @@ namespace ProcBridge::Hook
             {
                 return g_ntOpenFile(fileHandle, desiredAccess, objectAttributes, ioStatusBlock, shareAccess, openOptions);
             }
-            const OpenIntent intent{ desiredAccess, FileOpenDisposition, openOptions };
+            const OpenIntent intent{ desiredAccess, FileOpenDisposition, openOptions, 0, shareAccess };
             RedirectedAttributes redirect(objectAttributes, &intent);
             if (redirect.Error() != STATUS_SUCCESS)
             {
                 return redirect.Error();
             }
+            shareAccess = RangeShareAccess(redirect, shareAccess);
             const NTSTATUS status = g_ntOpenFile(fileHandle, desiredAccess, redirect.Get(), ioStatusBlock, shareAccess, openOptions);
             if (NT_SUCCESS(status))
             {
@@ -1726,6 +1934,10 @@ namespace ProcBridge::Hook
                     path.Length = static_cast<USHORT>(record.PathBytes);
                     // The parent retained the token for this process: its last close sends Close like the parent's.
                     g_remoteHandles.Add(handle, mapping, path, record.Info, record.WriteToken);
+                    if (record.Info.RangeId != 0)
+                    {
+                        g_anyRange.store(true, std::memory_order_relaxed); // reads of the inherited handle ask for ranges too
+                    }
                     FreeString(path);
                 }
             }
@@ -1845,6 +2057,15 @@ namespace ProcBridge::Hook
                 reinterpret_cast<void**>(&g_ntNotifyChangeDirectoryFile) },
             { remote ? "NtNotifyChangeDirectoryFileEx" : nullptr, reinterpret_cast<void*>(&HookNtNotifyChangeDirectoryFileEx),
                 reinterpret_cast<void**>(&g_ntNotifyChangeDirectoryFileEx), true },
+            // M8 (Broker only): reads and mappings of ranged cache copies, byte range locks forwarded to machine B.
+            { remote ? "NtReadFile" : nullptr, reinterpret_cast<void*>(&HookNtReadFile), reinterpret_cast<void**>(&g_ntReadFile) },
+            { remote ? "NtReadFileScatter" : nullptr, reinterpret_cast<void*>(&HookNtReadFileScatter),
+                reinterpret_cast<void**>(&g_ntReadFileScatter), true },
+            { remote ? "NtCreateSection" : nullptr, reinterpret_cast<void*>(&HookNtCreateSection), reinterpret_cast<void**>(&g_ntCreateSection) },
+            { remote ? "NtCreateSectionEx" : nullptr, reinterpret_cast<void*>(&HookNtCreateSectionEx),
+                reinterpret_cast<void**>(&g_ntCreateSectionEx), true },
+            { remote ? "NtLockFile" : nullptr, reinterpret_cast<void*>(&HookNtLockFile), reinterpret_cast<void**>(&g_ntLockFile) },
+            { remote ? "NtUnlockFile" : nullptr, reinterpret_cast<void*>(&HookNtUnlockFile), reinterpret_cast<void**>(&g_ntUnlockFile) },
             { remote ? "NtCancelIoFile" : nullptr, reinterpret_cast<void*>(&HookNtCancelIoFile), reinterpret_cast<void**>(&g_ntCancelIoFile) },
             { remote ? "NtCancelIoFileEx" : nullptr, reinterpret_cast<void*>(&HookNtCancelIoFileEx),
                 reinterpret_cast<void**>(&g_ntCancelIoFileEx), true },

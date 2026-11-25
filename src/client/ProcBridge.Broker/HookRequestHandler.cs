@@ -42,11 +42,15 @@ public sealed class HookRequestHandler : IDisposable
     private readonly IReadOnlyList<VirtualMapping> _mappings;
     private readonly WriteBackQueue? _writeBack;
     private readonly bool _writeThrough;
+    private readonly RemoteHolds? _holds;
 
     /// <param name="writeBack">Write-back queue; null serves the share read only whatever the Agent allows (tests).</param>
     /// <param name="writeThrough">Tell hooks to flush after every write (<see cref="Models.BrokerOptions.WriteThrough"/>).</param>
-    public HookRequestHandler(FileCache cache, IReadOnlyList<VirtualMapping> mappings, WriteBackQueue? writeBack = null, bool writeThrough = false)
+    /// <param name="holds">Handles machine B keeps for writers (M8 locks and share mode); null keeps locks on machine A only.</param>
+    public HookRequestHandler(FileCache cache, IReadOnlyList<VirtualMapping> mappings, WriteBackQueue? writeBack = null, bool writeThrough = false,
+        RemoteHolds? holds = null)
     {
+        _holds = holds;
         if (mappings.Count > ushort.MaxValue)
             throw new ArgumentException("Too many mappings.", nameof(mappings));
         _cache = cache;
@@ -57,10 +61,18 @@ public sealed class HookRequestHandler : IDisposable
     }
 
     /// <summary>A pipe connection of client <paramref name="clientId"/> (its process id) opened.</summary>
-    public void ClientConnected(long clientId) => Watches.Attach(clientId);
+    public void ClientConnected(long clientId)
+    {
+        Watches.Attach(clientId);
+        _holds?.ClientConnected(clientId);
+    }
 
     /// <summary>A pipe connection of <paramref name="clientId"/> closed; the watches of its last connection go with it.</summary>
-    public void ClientDisconnected(long clientId) => Watches.Detach(clientId);
+    public void ClientDisconnected(long clientId)
+    {
+        Watches.Detach(clientId);
+        _holds?.ClientDisconnected(clientId);
+    }
 
     /// <summary>Directory watches of the hook (WatchDirectory, WaitChanges, Unwatch).</summary>
     public HookWatchRegistry Watches { get; }
@@ -130,7 +142,7 @@ public sealed class HookRequestHandler : IDisposable
                 HookResolveRequest resolve = Read(request, HookResolveRequest.Read);
                 string remotePath = ToRemotePath(resolve.MappingIndex, resolve.RelativePath);
                 if (_writeBack is not null && await _cache.IsWritableAsync(cancellationToken).ConfigureAwait(false))
-                    return await ResolveWritableAsync(resolve, remotePath, cancellationToken).ConfigureAwait(false);
+                    return await ResolveWritableAsync(clientId, resolve, remotePath, cancellationToken).ConfigureAwait(false);
                 bool mayCreate = resolve.CreateDisposition is FileCreate or FileOpenIf or FileOverwriteIf;
                 if ((resolve.DesiredAccess & WriteAccessMask) != 0
                     || (resolve.CreateOptions & FileDeleteOnClose) != 0
@@ -154,14 +166,37 @@ public sealed class HookRequestHandler : IDisposable
 
                 try
                 {
-                    CachedItem item = await _cache.EnsureAsync(remotePath, cancellationToken).ConfigureAwait(false);
-                    return new HookResolveReply { Info = ToFileInfo(item.Entry), CachePath = item.LocalPath };
+                    CachedItem item = await _cache.EnsureAsync(remotePath, allowRanges: true, cancellationToken).ConfigureAwait(false);
+                    return new HookResolveReply { Info = ToFileInfo(item.Entry) with { RangeId = item.RangeId }, CachePath = item.LocalPath };
                 }
                 catch (ProtocolStatusException e) when (resolve.CreateDisposition == FileOpenIf && e.Status == NtStatus.ObjectNameNotFound)
                 {
                     // FILE_OPEN_IF would create the missing file.
                     throw new ProtocolStatusException(NtStatus.MediaWriteProtected, "Share is read only.");
                 }
+            }
+
+            case HookIpcMessageType.FetchRange:
+            {
+                HookFetchRangeRequest fetch = Read(request, HookFetchRangeRequest.Read);
+                bool complete = await _cache.FetchRangeAsync(fetch.RangeId, fetch.Offset, fetch.Length, fetch.Whole, cancellationToken).ConfigureAwait(false);
+                return new HookFetchRangeReply { Flags = complete ? HookIpcProtocol.FetchReplyFlagComplete : 0 };
+            }
+
+            case HookIpcMessageType.Lock:
+            case HookIpcMessageType.Unlock:
+            {
+                HookLockRequest range = Read(request, (ref HookIpcReader r) => HookLockRequest.Read(ref r, type));
+                if (range.Offset < 0 || range.Length < 0)
+                    throw new ProtocolStatusException(NtStatus.InvalidParameter, "Negative lock range.");
+                if (_holds is not null)
+                {
+                    if (type == HookIpcMessageType.Lock)
+                        await _holds.LockAsync(range.WriteToken, range.Offset, range.Length, range.Exclusive, range.FailImmediately, cancellationToken).ConfigureAwait(false);
+                    else
+                        await _holds.UnlockAsync(range.WriteToken, range.Offset, range.Length, cancellationToken).ConfigureAwait(false);
+                }
+                return new HookEmptyReply { Type = type };
             }
 
             case HookIpcMessageType.List:
@@ -196,8 +231,17 @@ public sealed class HookRequestHandler : IDisposable
             case HookIpcMessageType.Close:
             {
                 HookTokenRequest close = Read(request, (ref HookIpcReader r) => HookTokenRequest.Read(ref r, type));
-                if (_writeBack is not null)
-                    await _writeBack.CloseAsync(close.WriteToken, cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    if (_writeBack is not null)
+                        await _writeBack.CloseAsync(close.WriteToken, cancellationToken).ConfigureAwait(false);
+                }
+                finally
+                {
+                    // After the write-back: a commit writes through the held handle while it is open.
+                    if (_holds is not null)
+                        await _holds.ReleaseAsync(close.WriteToken).ConfigureAwait(false);
+                }
                 return new HookEmptyReply { Type = type };
             }
 
@@ -290,7 +334,7 @@ public sealed class HookRequestHandler : IDisposable
     /// folder errors come from there); the cache name is then left free for the hook's real call to create. Existing
     /// files opened to be overwritten are not downloaded. Opens that may change content get a write token.
     /// </summary>
-    private async Task<IHookIpcMessage> ResolveWritableAsync(HookResolveRequest resolve, string remotePath, CancellationToken cancellationToken)
+    private async Task<IHookIpcMessage> ResolveWritableAsync(long clientId, HookResolveRequest resolve, string remotePath, CancellationToken cancellationToken)
     {
         bool mayChange = (resolve.DesiredAccess & WriteAccessMask) != 0 || (resolve.CreateOptions & FileDeleteOnClose) != 0
             || resolve.CreateDisposition is not (FileOpen or FileOpenIf);
@@ -324,7 +368,7 @@ public sealed class HookRequestHandler : IDisposable
             catch (ProtocolStatusException e) when (e.Status == NtStatus.ObjectNameCollision && resolve.CreateDisposition != FileCreate)
             {
                 // Created on machine B since the stat: open it instead.
-                return await ResolveWritableAsync(resolve, remotePath, cancellationToken).ConfigureAwait(false);
+                return await ResolveWritableAsync(clientId, resolve, remotePath, cancellationToken).ConfigureAwait(false);
             }
         }
         else if (resolve.CreateDisposition == FileCreate)
@@ -342,15 +386,31 @@ public sealed class HookRequestHandler : IDisposable
         }
         else
         {
-            item = await _cache.EnsureAsync(remotePath, cancellationToken).ConfigureAwait(false);
+            // Opens that only read may get a ranged copy; anything that may write brings the whole file in first.
+            item = await _cache.EnsureAsync(remotePath, allowRanges: !mayChange, cancellationToken).ConfigureAwait(false);
         }
 
         ulong token = 0;
         bool contentWrite = (resolve.DesiredAccess & ContentWriteMask) != 0 || resolve.CreateDisposition is FileSupersede or FileOverwrite or FileOverwriteIf
             || (created && resolve.CreateDisposition != FileOpen);
         if (contentWrite && !item.Entry.IsDirectory)
+        {
             token = _writeBack!.Open(remotePath, item.Entry.Version);
-        return new HookResolveReply { Info = ToFileInfo(item.Entry), CachePath = item.LocalPath, WriteToken = token };
+            if (_holds is not null)
+            {
+                try
+                {
+                    await _holds.OpenAsync(token, remotePath, resolve.ShareAccess, clientId, cancellationToken).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // A user of machine B holds the file in a way this open forbids (or the Agent is gone): no open.
+                    await _writeBack.CloseAsync(token, CancellationToken.None).ConfigureAwait(false);
+                    throw;
+                }
+            }
+        }
+        return new HookResolveReply { Info = ToFileInfo(item.Entry) with { RangeId = item.RangeId }, CachePath = item.LocalPath, WriteToken = token };
     }
 
     private static HookListReply BuildListPage(IReadOnlyList<FsEntry> entries, int start)

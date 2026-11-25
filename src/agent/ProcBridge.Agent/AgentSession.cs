@@ -25,6 +25,9 @@ internal sealed class AgentSession
     private readonly SemaphoreSlim _concurrency;
     private readonly Func<AgentShare, ShareWatcher> _getWatcher;
     private readonly ConcurrentDictionary<ulong, ShareTreeWalk> _walks = new();
+    // M8: handles kept for opens on machine A; they live as long as this connection.
+    private readonly ConcurrentDictionary<ulong, AgentShare.HeldFile> _heldFiles = new();
+    private long _nextHeldId;
     private readonly object _watchLock = new();
     private Channel<FsChangeNotification>? _notifications;
     private IDisposable? _watchSubscription;
@@ -77,6 +80,9 @@ internal sealed class AgentSession
         {
             _client.Dispose();
             await Task.WhenAll(running).ConfigureAwait(false);
+            foreach (AgentShare.HeldFile held in _heldFiles.Values)
+                held.Dispose();
+            _heldFiles.Clear();
             StopWatching();
             await _notificationPump.ConfigureAwait(false);
             await _channel.DisposeAsync().ConfigureAwait(false);
@@ -202,6 +208,45 @@ internal sealed class AgentSession
                     await SendAsync(FrameKind.Response, request, ProtocolSerializer.Serialize(response), default).ConfigureAwait(false);
                     break;
                 }
+                case MessageType.FsOpenHandle:
+                {
+                    FsOpenHandleRequest open = ProtocolSerializer.Deserialize<FsOpenHandleRequest>(request.Header);
+                    if (_heldFiles.Count >= _options.MaxHeldFilesPerConnection)
+                        throw new ProtocolStatusException(NtStatus.InsufficientResources, "Too many held files on this connection.");
+                    AgentShare.HeldFile held = Share.OpenHeld(open.Path, open.ShareAccess, open.Write);
+                    ulong id = (ulong)Interlocked.Increment(ref _nextHeldId);
+                    _heldFiles[id] = held;
+                    await SendHandleAsync(request, id).ConfigureAwait(false);
+                    break;
+                }
+                case MessageType.FsCloseHandle:
+                {
+                    FsLockRequest close = ProtocolSerializer.Deserialize<FsLockRequest>(request.Header);
+                    if (_heldFiles.TryRemove(close.HandleId, out AgentShare.HeldFile? held))
+                        held.Dispose();
+                    await SendHandleAsync(request, close.HandleId).ConfigureAwait(false);
+                    break;
+                }
+                case MessageType.FsLock:
+                case MessageType.FsUnlock:
+                {
+                    FsLockRequest range = ProtocolSerializer.Deserialize<FsLockRequest>(request.Header);
+                    if (!_heldFiles.TryGetValue(range.HandleId, out AgentShare.HeldFile? held))
+                        throw new ProtocolStatusException(NtStatus.InvalidHandle, $"Unknown held file {range.HandleId}.");
+                    if (range.Offset < 0 || range.Length < 0)
+                        throw new ProtocolStatusException(NtStatus.InvalidParameter, "Negative lock range.");
+                    if (request.MessageType == MessageType.FsLock)
+                    {
+                        TimeSpan wait = TimeSpan.FromMilliseconds(Math.Clamp(range.WaitMilliseconds, 0, (int)_options.MaxLockWait.TotalMilliseconds));
+                        await held.LockAsync(range.Offset, range.Length, range.Exclusive, wait, cancellationToken).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        held.Unlock(range.Offset, range.Length);
+                    }
+                    await SendHandleAsync(request, range.HandleId).ConfigureAwait(false);
+                    break;
+                }
                 default:
                     throw new ProtocolStatusException(NtStatus.NotImplemented, $"Message {request.MessageType} is not supported.");
             }
@@ -222,6 +267,9 @@ internal sealed class AgentSession
             _concurrency.Release();
         }
     }
+
+    private Task SendHandleAsync(Frame request, ulong handleId)
+        => SendAsync(FrameKind.Response, request, ProtocolSerializer.Serialize(new FsHandleResponse { HandleId = handleId }), default);
 
     private FsTreeResponse NextTreePage(FsTreeRequest request)
     {

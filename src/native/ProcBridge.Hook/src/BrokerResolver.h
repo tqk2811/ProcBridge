@@ -69,6 +69,8 @@ namespace ProcBridge::Hook
         NTSTATUS WaitChanges(WatchChannel*& channel, uint32_t watchId, HANDLE cancelEvent, BYTE* buffer,
             ChangeBatch& batch) const noexcept override;
         void Unwatch(WatchChannel* channel, uint32_t watchId) const noexcept override;
+        NTSTATUS FetchRange(uint32_t rangeId, int64_t offset, int64_t length, bool whole, bool& complete) const noexcept override;
+        NTSTATUS LockRange(bool lock, uint64_t writeToken, int64_t offset, int64_t length, ULONG key, uint16_t flags) const noexcept override;
 
     private:
         /// View of path below the virtual root ('\' separated, no leading '\'; empty for the root itself).
