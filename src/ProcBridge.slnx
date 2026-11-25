@@ -24,6 +24,8 @@
     <Project Path="relay/ProcBridge.Relay.Services.Shares/ProcBridge.Relay.Services.Shares.csproj" />
     <Project Path="relay/ProcBridge.Relay.Services.Tunnel/ProcBridge.Relay.Services.Tunnel.csproj" />
     <Project Path="relay/ProcBridge.Relay.Services/ProcBridge.Relay.Services.csproj" />
+    <Project Path="relay/ProcBridge.Relay.Integration.Api/ProcBridge.Relay.Integration.Api.csproj" />
+    <Project Path="relay/ProcBridge.Relay.Api/ProcBridge.Relay.Api.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/ProcBridge.Tests/ProcBridge.Tests.csproj" />
