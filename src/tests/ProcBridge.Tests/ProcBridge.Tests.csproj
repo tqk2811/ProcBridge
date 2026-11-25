@@ -8,5 +8,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\shared\ProcBridge.Protocol\ProcBridge.Protocol.csproj" />
+    <ProjectReference Include="..\..\agent\ProcBridge.Agent\ProcBridge.Agent.csproj" />
   </ItemGroup>
 </Project>
