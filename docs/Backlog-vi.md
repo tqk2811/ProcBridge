@@ -204,9 +204,7 @@ cho tải, hoặc Broker trả "đang tải" để Hook chờ tiếp.
 
 ## [Vừa] Launcher chưa đủ cho người dùng
 
-- `ProcBridge.Spawn`/`ProcBridge.Hook` chưa được đóng gói cạnh Launcher (mặc định tìm trong thư mục của Launcher,
-  `--spawn` để chỉ chỗ khác); CLI chưa đọc cấu hình từ file. Launcher WPF cũng tìm Spawn trong thư mục của nó
-  (`LaunchOptionsFactory`) nên cần cùng bước đóng gói.
+- CLI chưa đọc cấu hình từ file.
 - Broker hay Agent không kết nối được lúc khởi động thì Spawn báo `inject failed` và không chạy
   process đích; chưa có thông báo dễ hiểu hơn.
 
