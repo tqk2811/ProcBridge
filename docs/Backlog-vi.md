@@ -340,17 +340,6 @@ nghe lén trong LAN có thể gửi trước id kênh kế tiếp để "đốt"
 lại (chỉ là từ chối dịch vụ, không lộ dữ liệu). Nên chỉ ghi nhận id kênh sau khi khung đầu tiên giải mã được, hoặc
 thêm MAC theo khoá phiên vào yêu cầu join. Ghi 2026-11-25.
 
-## [Thấp] Phiên mã hoá theo đường relay (M6)
-
-`SecureConnectionFactory`/`SecureServer` làm việc trên `IStreamConnector`/`Stream`, mới có `TcpStreamConnector`. Relay
-cần một connector WebSocket và phía Agent gọi `SecureServer.AcceptAsync` cho từng tunnel. Ghi 2026-11-25.
-
-## [Vừa] Agent và Broker chưa đi qua relay
-
-M6 mới có phía server + CLI. Điều kiện xong M6 trong mục 13 của Plan ("làm được M4 qua Relay") cần thư viện
-phía client: Agent giữ `/tunnel/control`, nhận `sessionOpened` rồi mở lane; Broker gọi `api/tunnel/sessions`
-rồi mở lane, chia khung dữ liệu ra nhiều lane, mã hoá đầu cuối (M5) chạy trên đó. Ghi 2026-11-25 (M6).
-
 ## [Vừa] Relay chỉ chạy được một instance
 
 `TunnelHub` giữ kênh điều khiển và phiên trong bộ nhớ tiến trình. Chạy nhiều instance sau load balancer thì
@@ -386,3 +375,23 @@ Cố ý làm gọn ở M6, nên bù khi relay lớn lên:
 - CLI lưu token phiên dạng chữ trong `%APPDATA%\ProcBridge\relay-cli.json`; nên bọc DPAPI.
 
 Ghi 2026-11-25 (M6).
+
+## [Vừa] Relay: ghép cặp và chọn chia sẻ vẫn phải làm tay
+
+Agent và Launcher đã đi qua relay (M6), nhưng ghép cặp vẫn chỉ chạy trong LAN (`--pair --agent host`), và
+người dùng phải tự chép token máy (`procbridge-relay device register`) và mã chia sẻ (`device shares`) vào Agent
+và Launcher. Nên có: ghép cặp qua relay (relay chuyển khoá công khai, người dùng so vân tay), Launcher WPF đăng
+nhập relay rồi chọn chia sẻ từ danh sách, Agent tự đăng ký máy và khai chia sẻ. Relay cũng chưa đối chiếu khoá
+công khai đã khai trên relay với khoá đã ghép cặp (`TunnelSessionVM.HostPublicKey`). Ghi 2026-11-25.
+
+## [Thấp] Token relay trên dòng lệnh
+
+`--relay-token` của Agent và Launcher console hiện trong danh sách tiến trình; đã có biến môi trường
+`PROCBRIDGE_RELAY_TOKEN` thay thế. Nên lưu token vào kho DPAPI trong thư mục dữ liệu (như app WPF) và bỏ
+dần tham số. Ghi 2026-11-25.
+
+## [Thấp] Test CrossArchitectureInjection_DoesNotLeakHandlesToSiblings đỏ trên một máy dev
+
+`ChildCreationTests.CrossArchitectureInjection_DoesNotLeakHandlesToSiblings` (x64/Win32 cả hai chiều) báo
+`leaked: 9..28` trên máy dev, kể cả ở commit chưa có thay đổi relay; CI (windows-latest) xanh. Chưa rõ do môi
+trường (phần mềm bảo vệ, tiến trình khác giữ handle) hay lỗi đua trong hook. Ghi 2026-11-25.

@@ -52,6 +52,9 @@ public sealed record BrokerOptions
     /// <summary>Identity, paired Agents and the Agent's key: frames are encrypted end to end (plan section 9).</summary>
     public BrokerSecurity? Security { get; init; }
 
+    /// <summary>Reach the Agent through a relay (plan 8.2) instead of <see cref="AgentHost"/>:<see cref="AgentPort"/>.</summary>
+    public BrokerRelayOptions? Relay { get; init; }
+
     /// <summary>Development and old tests only: talk plain frames when <see cref="Security"/> is null. Off by default.</summary>
     public bool AllowPlaintextTransport { get; init; }
     /// <summary>What a write-back does when the file changed on machine B meanwhile (plan section 10).</summary>
@@ -74,7 +77,7 @@ public sealed record BrokerOptions
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ProcBridge", "queue");
 
     /// <summary>Key of the Agent and share in write queue entries.</summary>
-    public string GetWriteTarget() => $"{AgentHost}:{AgentPort}/{ShareName}";
+    public string GetWriteTarget() => Relay is { } relay ? $"relay:{relay.ShareId}/{ShareName}" : $"{AgentHost}:{AgentPort}/{ShareName}";
 
     public string GetCacheRoot() => CacheRoot ?? Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ProcBridge", "cache", SessionId);

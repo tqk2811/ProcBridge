@@ -5,6 +5,7 @@ using ProcBridge.Agent.Explorer;
 using ProcBridge.Agent.Models;
 using ProcBridge.Protocol.Interfaces;
 using ProcBridge.Protocol.Transport;
+using ProcBridge.Transport.Relay;
 using ProcBridge.Transport.Secure;
 using ProcBridge.Transport.Secure.Models;
 
@@ -15,6 +16,8 @@ namespace ProcBridge.Agent;
 /// connection. With an <see cref="AgentSecurity"/> every connection first goes through the <see cref="SecureServer"/>
 /// (Noise IK handshake against the paired machines, or a pairing) and frames are encrypted end to end (plan section 9).
 /// Without it the server only starts when <see cref="AgentOptions.AllowPlaintextTransport"/> is set (development).
+/// With <see cref="AgentOptions.Relay"/> it also serves lanes coming through the relay (plan 8.2), through the same
+/// <see cref="SecureServer"/>: a lane is handled exactly like an accepted socket.
 /// </summary>
 public sealed class AgentServer : IAsyncDisposable
 {
@@ -22,20 +25,23 @@ public sealed class AgentServer : IAsyncDisposable
     private readonly AgentOptions _options;
     private readonly TcpListener _listener;
     private readonly CancellationTokenSource _stopping = new();
-    private readonly ConcurrentDictionary<TcpClient, Connection> _connections = new();
+    private readonly ConcurrentDictionary<Connection, byte> _connections = new();
     private readonly ConcurrentDictionary<string, Lazy<ShareWatcher>> _watchers = new(StringComparer.OrdinalIgnoreCase);
     private readonly SecureServer? _secure;
     private readonly AgentSecurity? _security;
+    private readonly RelayHostLink? _relay;
     private Task _acceptLoop = Task.CompletedTask;
     private Task _refreshLoop = Task.CompletedTask;
     private int _disposed;
 
     /// <param name="security">Identity and paired machines; null serves plain frames and needs <see cref="AgentOptions.AllowPlaintextTransport"/>.</param>
-    /// <exception cref="ArgumentException">No security and plain transport not allowed.</exception>
+    /// <exception cref="ArgumentException">No security and plain transport not allowed, or a relay without security.</exception>
     public AgentServer(IEnumerable<AgentShare> shares, AgentOptions options, AgentSecurity? security = null)
     {
         if (security is null && !options.AllowPlaintextTransport)
             throw new ArgumentException("The Agent needs an identity and paired machines (AgentSecurity); plain transport is for development only.", nameof(security));
+        if (security is null && options.Relay is not null)
+            throw new ArgumentException("Serving through a relay needs the encrypted transport (AgentSecurity).", nameof(security));
         _shares = shares.ToDictionary(x => x.Name, StringComparer.OrdinalIgnoreCase);
         _options = options;
         _listener = new TcpListener(options.BindAddress, options.Port);
@@ -55,7 +61,12 @@ public sealed class AgentServer : IAsyncDisposable
             security.ExplorerPolicies.Changed += AbortPeer;
             _secure.PairingRequested += OnPairingRequested;
         }
+        if (options.Relay is { } relay)
+            _relay = new RelayHostLink(relay.Endpoint, AcceptRelayLaneAsync, relay.Sockets);
     }
+
+    /// <summary>Link to the relay (control channel state); null when <see cref="AgentOptions.Relay"/> is not set.</summary>
+    public RelayHostLink? Relay => _relay;
 
     /// <summary>
     /// A machine A asks to pair: show <see cref="PairingRequest.Code"/> and <see cref="PairingRequest.PeerFingerprint"/>,
@@ -89,7 +100,7 @@ public sealed class AgentServer : IAsyncDisposable
 
     /// <summary>Snapshot of the open connections (one machine A usually holds several: the pool).</summary>
     public IReadOnlyList<AgentConnectionInfo> GetConnections()
-        => _connections.Values.Select(x => new AgentConnectionInfo
+        => _connections.Keys.Select(x => new AgentConnectionInfo
         {
             RemoteAddress = x.RemoteAddress,
             PeerFingerprint = x.PeerFingerprint,
@@ -104,6 +115,7 @@ public sealed class AgentServer : IAsyncDisposable
     {
         _listener.Start();
         _acceptLoop = Task.Run(AcceptLoopAsync);
+        _relay?.Start();
         if (_secure is not null && _options.TrustRefreshInterval > TimeSpan.Zero)
             _refreshLoop = Task.Run(RefreshLoopAsync);
     }
@@ -154,11 +166,27 @@ public sealed class AgentServer : IAsyncDisposable
             }
 
             client.NoDelay = true;
-            // Registered before it runs, so a connection that fails at once cannot be removed before it is added.
-            var connection = new Connection(client);
-            _connections[client] = connection;
-            connection.Run = Task.Run(() => RunConnectionAsync(connection));
+            Register(new Connection(client.GetStream(), client, client.Client.RemoteEndPoint?.ToString() ?? string.Empty));
         }
+    }
+
+    /// <summary>A lane from the relay: served like an accepted socket. Returns at once (the lane runs on its own task).</summary>
+    private Task AcceptRelayLaneAsync(Stream lane, string remoteAddress)
+    {
+        if (_stopping.IsCancellationRequested)
+        {
+            lane.Dispose();
+            return Task.CompletedTask;
+        }
+        Register(new Connection(lane, lane, remoteAddress));
+        return Task.CompletedTask;
+    }
+
+    private void Register(Connection connection)
+    {
+        // Registered before it runs, so a connection that fails at once cannot be removed before it is added.
+        _connections[connection] = 0;
+        connection.Run = Task.Run(() => RunConnectionAsync(connection));
     }
 
     private async Task RunConnectionAsync(Connection connection)
@@ -169,12 +197,11 @@ public sealed class AgentServer : IAsyncDisposable
             ExplorerDispatcher? explorer = null;
             if (_secure is null)
             {
-                channel = new StreamFrameChannel(connection.Client.GetStream(), ownsStream: true, _options.MaxFrameSize);
+                channel = new StreamFrameChannel(connection.Stream, ownsStream: true, _options.MaxFrameSize);
             }
             else
             {
-                string remote = connection.Client.Client.RemoteEndPoint?.ToString() ?? string.Empty;
-                SecureFrameChannel? secure = await _secure.AcceptAsync(connection.Client.GetStream(), remote, _stopping.Token).ConfigureAwait(false);
+                SecureFrameChannel? secure = await _secure.AcceptAsync(connection.Stream, connection.RemoteAddress, _stopping.Token).ConfigureAwait(false);
                 if (secure is null)
                     return;
                 connection.PeerFingerprint = secure.PeerFingerprint;
@@ -188,7 +215,7 @@ public sealed class AgentServer : IAsyncDisposable
                 // The Explorer acts for the authenticated machine A only, within the profile machine B set for it.
                 explorer = new ExplorerDispatcher(new ExplorerSession(_security!.ExplorerPolicies.Get(secure.PeerFingerprint), secure.PeerFingerprint, _security.ExplorerAudit));
             }
-            var session = new AgentSession(channel, connection.Client, _shares, _options, GetWatcher, explorer);
+            var session = new AgentSession(channel, connection.Owner, _shares, _options, GetWatcher, explorer);
             await session.RunAsync(_stopping.Token).ConfigureAwait(false);
         }
         catch (Exception e) when (e is not OutOfMemoryException)
@@ -197,8 +224,8 @@ public sealed class AgentServer : IAsyncDisposable
         }
         finally
         {
-            connection.Client.Dispose();
-            _connections.TryRemove(connection.Client, out _);
+            connection.Owner.Dispose();
+            _connections.TryRemove(connection, out _);
         }
     }
 
@@ -221,10 +248,10 @@ public sealed class AgentServer : IAsyncDisposable
     /// <summary>Closes every connection of a machine whose trust or Explorer profile changed.</summary>
     private void AbortPeer(string fingerprint)
     {
-        foreach (Connection connection in _connections.Values)
+        foreach (Connection connection in _connections.Keys)
         {
             if (connection.PeerFingerprint == fingerprint)
-                connection.Client.Dispose();
+                connection.Owner.Dispose();
         }
     }
 
@@ -235,6 +262,8 @@ public sealed class AgentServer : IAsyncDisposable
             return;
         _stopping.Cancel();
         _listener.Stop();
+        if (_relay is not null)
+            await _relay.DisposeAsync().ConfigureAwait(false);
         try
         {
             await _acceptLoop.ConfigureAwait(false);
@@ -243,9 +272,9 @@ public sealed class AgentServer : IAsyncDisposable
         {
         }
         await _refreshLoop.ConfigureAwait(false);
-        foreach (Connection connection in _connections.Values)
-            connection.Client.Dispose();
-        await Task.WhenAll(_connections.Values.Select(x => x.Run)).ConfigureAwait(false);
+        foreach (Connection connection in _connections.Keys)
+            connection.Owner.Dispose();
+        await Task.WhenAll(_connections.Keys.Select(x => x.Run)).ConfigureAwait(false);
         if (_secure is not null)
         {
             _secure.PeerRevoked -= OnPeerRevoked;
@@ -260,14 +289,19 @@ public sealed class AgentServer : IAsyncDisposable
         _stopping.Dispose();
     }
 
-    /// <summary>One accepted socket; <see cref="PeerFingerprint"/> is set once the handshake authenticated the peer.</summary>
-    private sealed class Connection(TcpClient client)
+    /// <summary>
+    /// One accepted socket or relay lane; <see cref="PeerFingerprint"/> is set once the handshake authenticated the peer.
+    /// Disposing <see cref="Owner"/> closes it.
+    /// </summary>
+    private sealed class Connection(Stream stream, IDisposable owner, string remoteAddress)
     {
         private volatile string? _peerFingerprint;
 
-        public TcpClient Client { get; } = client;
+        public Stream Stream { get; } = stream;
 
-        public string RemoteAddress { get; } = client.Client.RemoteEndPoint?.ToString() ?? string.Empty;
+        public IDisposable Owner { get; } = owner;
+
+        public string RemoteAddress { get; } = remoteAddress;
 
         public DateTime ConnectedAtUtc { get; } = DateTime.UtcNow;
 

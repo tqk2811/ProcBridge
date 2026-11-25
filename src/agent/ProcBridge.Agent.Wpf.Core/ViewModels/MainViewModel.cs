@@ -4,6 +4,8 @@ using ProcBridge.Agent.Models;
 using ProcBridge.Agent.Wpf.Core.Interfaces;
 using ProcBridge.Agent.Wpf.Core.Models;
 using ProcBridge.Agent.Wpf.Core.Mvvm;
+using ProcBridge.Crypto.Identity;
+using ProcBridge.Transport.Relay.Models;
 using ProcBridge.Transport.Secure;
 using ProcBridge.Transport.Secure.Models;
 
@@ -29,6 +31,9 @@ public sealed class MainViewModel : ObservableObject
     private HashSet<string> _connectedFingerprints = new(StringComparer.Ordinal);
     private string _port;
     private string _bindAddress;
+    private string _relayUrl;
+    private string _relayToken;
+    private string? _relayState;
     private bool _isRunning;
     private bool _sharesChangedWhileRunning;
     private bool _pairingOpen;
@@ -55,6 +60,8 @@ public sealed class MainViewModel : ObservableObject
         _settings = settingsStore.Load();
         _port = _settings.Port.ToString();
         _bindAddress = _settings.BindAddress;
+        _relayUrl = _settings.RelayUrl;
+        _relayToken = UnprotectToken(_settings.RelayTokenProtected);
         foreach (ShareSettings share in _settings.Shares)
             AddShareItem(new ShareItemViewModel(share));
 
@@ -90,6 +97,27 @@ public sealed class MainViewModel : ObservableObject
     {
         get => _bindAddress;
         set => SetProperty(ref _bindAddress, value);
+    }
+
+    /// <summary>Relay URL (internet access, plan 8.2); empty for the LAN only.</summary>
+    public string RelayUrl
+    {
+        get => _relayUrl;
+        set => SetProperty(ref _relayUrl, value);
+    }
+
+    /// <summary>Device token of this machine on the relay; saved DPAPI-protected.</summary>
+    public string RelayToken
+    {
+        get => _relayToken;
+        set => SetProperty(ref _relayToken, value);
+    }
+
+    /// <summary>Relay link state while running (null without relay).</summary>
+    public string? RelayState
+    {
+        get => _relayState;
+        private set => SetProperty(ref _relayState, value);
     }
 
     public bool IsRunning
@@ -213,12 +241,12 @@ public sealed class MainViewModel : ObservableObject
     {
         if (IsRunning)
             return;
-        if (!TryReadEndpoint(out IPAddress? address, out int port) || !TryReadShares(out List<ShareSettings>? shares))
+        if (!TryReadEndpoint(out IPAddress? address, out int port) || !TryReadShares(out List<ShareSettings>? shares) || !TryReadRelay(out RelayEndpoint? relay))
             return;
         Save();
         try
         {
-            _host.Start(shares, address, port);
+            _host.Start(shares, address, port, relay);
         }
         catch (Exception e) when (e is DirectoryNotFoundException or System.Net.Sockets.SocketException or ArgumentException or IOException)
         {
@@ -228,7 +256,8 @@ public sealed class MainViewModel : ObservableObject
         ErrorText = null;
         SharesNeedRestart = false;
         IsRunning = true;
-        StatusText = $"Đang chạy trên {address}:{_host.Port}, mã hoá đầu cuối, {shares.Count} thư mục chia sẻ";
+        StatusText = $"Đang chạy trên {address}:{_host.Port}{(relay is null ? string.Empty : $" và qua relay {relay.BaseUrl.Host}")}, mã hoá đầu cuối, {shares.Count} thư mục chia sẻ";
+        RelayState = _host.RelayState;
     }
 
     public async Task StopAsync()
@@ -238,6 +267,7 @@ public sealed class MainViewModel : ObservableObject
         await _host.StopAsync();
         IsRunning = false;
         StatusText = "Đã dừng";
+        RelayState = null;
         Refresh();
     }
 
@@ -248,6 +278,8 @@ public sealed class MainViewModel : ObservableObject
             _settings.Port = port;
         _settings.BindAddress = BindAddress.Trim();
         _settings.Shares = Shares.Select(x => x.ToSettings()).ToList();
+        _settings.RelayUrl = RelayUrl.Trim();
+        _settings.RelayTokenProtected = ProtectToken(RelayToken.Trim());
         try
         {
             _settingsStore.Save(_settings);
@@ -264,6 +296,7 @@ public sealed class MainViewModel : ObservableObject
     /// </summary>
     public void Refresh()
     {
+        RelayState = _host.RelayState;
         IReadOnlyList<AgentConnectionInfo> connections = _host.GetConnections();
         DateTime now = _utcNow();
         var grouped = connections
@@ -444,6 +477,45 @@ public sealed class MainViewModel : ObservableObject
         }
         address = parsed;
         return true;
+    }
+
+    /// <summary>Relay from the form: none when the URL is empty; an URL needs a token.</summary>
+    private bool TryReadRelay(out RelayEndpoint? relay)
+    {
+        relay = null;
+        string url = RelayUrl.Trim();
+        if (url.Length == 0)
+            return true;
+        if (!Uri.TryCreate(url, UriKind.Absolute, out Uri? parsed) || parsed.Scheme is not ("https" or "http"))
+        {
+            ErrorText = $"'{url}' không phải địa chỉ relay (vd https://relay.example.com/).";
+            return false;
+        }
+        if (RelayToken.Trim().Length == 0)
+        {
+            ErrorText = "Cần token máy của relay (lấy bằng procbridge-relay device register).";
+            return false;
+        }
+        relay = new RelayEndpoint(parsed, RelayToken.Trim());
+        return true;
+    }
+
+    private static string? ProtectToken(string token)
+        => token.Length == 0 ? null : Convert.ToBase64String(new DpapiKeyProtector().Protect(System.Text.Encoding.UTF8.GetBytes(token)));
+
+    /// <summary>The saved token, or empty when there is none or it cannot be read (other user, other machine).</summary>
+    private static string UnprotectToken(string? protectedToken)
+    {
+        if (string.IsNullOrEmpty(protectedToken))
+            return string.Empty;
+        try
+        {
+            return System.Text.Encoding.UTF8.GetString(new DpapiKeyProtector().Unprotect(Convert.FromBase64String(protectedToken)));
+        }
+        catch (Exception e) when (e is FormatException or System.Security.Cryptography.CryptographicException)
+        {
+            return string.Empty;
+        }
     }
 
     private bool TryReadShares(out List<ShareSettings> shares)

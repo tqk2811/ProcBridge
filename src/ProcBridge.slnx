@@ -4,6 +4,7 @@
     <Project Path="shared/ProcBridge.Crypto/ProcBridge.Crypto.csproj" />
     <Project Path="shared/ProcBridge.HookIpc/ProcBridge.HookIpc.csproj" />
     <Project Path="shared/ProcBridge.Transport.Secure/ProcBridge.Transport.Secure.csproj" />
+    <Project Path="shared/ProcBridge.Transport.Relay/ProcBridge.Transport.Relay.csproj" />
   </Folder>
   <Folder Name="/client/">
     <Project Path="client/ProcBridge.Launcher/ProcBridge.Launcher.csproj" />

@@ -67,5 +67,8 @@ public sealed record AgentOptions
     public int DefaultTreeDepth { get; init; } = 64;
 
     /// <summary>Unfinished FsTree walks one connection may hold at once.</summary>
+    /// <summary>Also serve machines A through this relay (plan 8.2); needs the encrypted transport.</summary>
+    public AgentRelayOptions? Relay { get; init; }
+
     public int MaxTreeWalksPerConnection { get; init; } = 4;
 }

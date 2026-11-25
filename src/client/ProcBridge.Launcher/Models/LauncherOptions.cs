@@ -45,6 +45,9 @@ public sealed record LauncherOptions
     /// <summary>What a write-back does when the file changed on machine B (<see cref="BrokerOptions.ConflictPolicy"/>).</summary>
     public ConflictPolicy ConflictPolicy { get; init; } = ConflictPolicy.KeepBoth;
 
+    /// <summary><c>--relay</c>: reach the Agent through a relay instead of <see cref="AgentHost"/>:<see cref="AgentPort"/>.</summary>
+    public LauncherRelay? Relay { get; init; }
+
     /// <summary>Target command line, passed to CreateProcess as is (cmd.exe has its own quoting rules).</summary>
     public required string CommandLine { get; init; }
 

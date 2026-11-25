@@ -19,7 +19,8 @@ namespace ProcBridge.Transport.Secure;
 /// When the Agent no longer knows the session (restart) a join is refused and the next connection handshakes again.
 /// <para>
 /// The peer must be in <paramref name="pairedMachines"/> at every handshake and join, so revoking it stops new
-/// connections at once. The identity key and the store are borrowed; the connector too.
+/// connections at once. The identity key and the store are borrowed; the connector is disposed with the factory when
+/// it is disposable (the relay connector holds an HTTP client).
 /// </para>
 /// </summary>
 public sealed class SecureConnectionFactory : IConnectionFactory, IDisposable
@@ -187,6 +188,7 @@ public sealed class SecureConnectionFactory : IConnectionFactory, IDisposable
 
     public void Dispose()
     {
+        (_connector as IDisposable)?.Dispose();
         Interlocked.Exchange(ref _session, null)?.Dispose();
         _handshakeLock.Dispose();
     }

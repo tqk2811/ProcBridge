@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Runtime.Versioning;
 using ProcBridge.Broker;
 using ProcBridge.Broker.Models;
+using ProcBridge.Transport.Relay.Models;
 using ProcBridge.HookIpc;
 using ProcBridge.Launcher.Models;
 
@@ -64,6 +65,9 @@ public sealed class LaunchSession
             AllowPlaintextTransport = _options.AllowPlaintextTransport,
             WriteThrough = _options.WriteThrough,
             ConflictPolicy = _options.ConflictPolicy,
+            Relay = _options.Relay is { } relay
+                ? new BrokerRelayOptions { Endpoint = new RelayEndpoint(relay.Url, relay.DeviceToken), ShareId = relay.ShareId }
+                : null,
         });
         try
         {

@@ -36,6 +36,18 @@ public sealed record LaunchProfile
     /// <summary><c>--conflict overwrite</c>: when machine B changed a file meanwhile, this machine wins; otherwise both are kept.</summary>
     public bool OverwriteOnConflict { get; init; }
 
+    /// <summary>Reach machine B through a relay (<c>--relay</c>) instead of its LAN address.</summary>
+    public bool UseRelay { get; init; }
+
+    /// <summary>Relay URL (<c>--relay</c>).</summary>
+    public string RelayUrl { get; init; } = string.Empty;
+
+    /// <summary>Relay share id the Agent serves (<c>--relay-share</c>).</summary>
+    public string RelayShareId { get; init; } = string.Empty;
+
+    /// <summary>Device token of this machine on the relay, DPAPI-protected (base64); never stored in clear.</summary>
+    public string? RelayTokenProtected { get; init; }
+
     /// <summary>x64 or x86: which ProcBridge.Spawn starts the target.</summary>
     public string Architecture { get; init; } = "x64";
 }

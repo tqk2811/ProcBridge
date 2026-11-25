@@ -326,6 +326,12 @@ Broker kết nối TCP thẳng tới Agent (cổng cấu hình được). Tìm A
   - Máy A mở lane theo nhu cầu (mỗi kết nối của pool là một lane, lấy số nhỏ nhất còn trống). Khi đầu
     của A tới trước, relay đẩy `laneRequested {sessionId, lane}` qua kênh điều khiển và máy B mở đúng lane
     đó bằng vé của mình; máy B không phải mở sẵn lane chờ.
+  - Bắt tay Noise IK và mã hoá khung (mục 9) chạy BÊN TRONG mỗi lane, y như trên một kết nối TCP ở LAN:
+    relay chỉ thấy byte đã mã hoá. Phía A là `RelayStreamConnector` dưới `SecureConnectionFactory`, phía B
+    là `RelayHostLink` chuyển từng lane cho `SecureServer` của Agent (project `ProcBridge.Transport.Relay`).
+  - Cấu hình: Agent console `--relay <url>` + `--relay-token` (hoặc `PROCBRIDGE_RELAY_TOKEN`), app WPF của
+    Agent có ô relay và token máy (lưu DPAPI). Launcher console `--relay <url> --relay-share <shareId>
+    --agent-fingerprint <fp>` (+ token như trên), Launcher WPF có mục "Kết nối qua relay" trong hồ sơ.
   - Thu hồi máy, thu hồi quyền hay xoá chia sẻ cắt luôn kênh điều khiển và các lane đang mở liên quan.
   - Tài khoản: mặc định tắt tự đăng ký (`Relay:Accounts:AllowRegistration=false`); người vận hành tạo
     tài khoản bằng `ProcBridge.Relay.Api account create <user>` trên máy relay. `login`/`register` giới hạn

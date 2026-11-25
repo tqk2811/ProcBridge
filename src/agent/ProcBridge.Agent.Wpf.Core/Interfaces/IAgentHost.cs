@@ -1,6 +1,7 @@
 using System.Net;
 using ProcBridge.Agent.Models;
 using ProcBridge.Agent.Wpf.Core.Models;
+using ProcBridge.Transport.Relay.Models;
 
 namespace ProcBridge.Agent.Wpf.Core.Interfaces;
 
@@ -21,10 +22,14 @@ public interface IAgentHost : IAsyncDisposable
     /// <summary>Raised on a background thread when a machine A asks to pair while <see cref="AllowPairing"/> is on.</summary>
     event Action<IPairingPrompt>? PairingRequested;
 
+    /// <summary>State of the relay link while running: null without relay, else a short text for the status bar.</summary>
+    string? RelayState { get; }
+
+    /// <param name="relay">Also serve through this relay (plan 8.2); null for the LAN only.</param>
     /// <exception cref="InvalidOperationException">Already running.</exception>
     /// <exception cref="DirectoryNotFoundException">A share folder does not exist.</exception>
     /// <exception cref="System.Net.Sockets.SocketException">The port cannot be listened on.</exception>
-    void Start(IReadOnlyList<ShareSettings> shares, IPAddress bindAddress, int port);
+    void Start(IReadOnlyList<ShareSettings> shares, IPAddress bindAddress, int port, RelayEndpoint? relay = null);
 
     Task StopAsync();
 

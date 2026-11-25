@@ -19,7 +19,7 @@ namespace ProcBridge.Agent;
 internal sealed class AgentSession
 {
     private readonly IFrameChannel _channel;
-    private readonly TcpClient _client;
+    private readonly IDisposable _client;
     private readonly IReadOnlyDictionary<string, AgentShare> _shares;
     private readonly AgentOptions _options;
     private readonly SemaphoreSlim _concurrency;
@@ -35,7 +35,8 @@ internal sealed class AgentSession
     private AgentShare? _share;
 
     /// <param name="explorer">Remote Explorer of the authenticated machine A; null (plain transport) refuses Explorer messages.</param>
-    public AgentSession(IFrameChannel channel, TcpClient client, IReadOnlyDictionary<string, AgentShare> shares, AgentOptions options, Func<AgentShare, ShareWatcher> getWatcher, ExplorerDispatcher? explorer = null)
+    /// <param name="client">Closes the connection (TCP socket or relay lane); disposing it ends <see cref="RunAsync"/>.</param>
+    public AgentSession(IFrameChannel channel, IDisposable client, IReadOnlyDictionary<string, AgentShare> shares, AgentOptions options, Func<AgentShare, ShareWatcher> getWatcher, ExplorerDispatcher? explorer = null)
     {
         _explorer = explorer;
         _getWatcher = getWatcher;

@@ -37,6 +37,19 @@ public sealed class LaunchOptionsFactory
             errors.Add("Chưa nhập chương trình cần chạy.");
         if (profile.Architecture is not ("x64" or "x86"))
             errors.Add("Kiến trúc phải là x64 hoặc x86.");
+        LauncherRelay? relay = null;
+        if (profile.UseRelay)
+        {
+            string token = RelayTokenProtection.Unprotect(profile.RelayTokenProtected);
+            if (!Uri.TryCreate(profile.RelayUrl.Trim(), UriKind.Absolute, out Uri? relayUrl) || relayUrl.Scheme is not ("https" or "http"))
+                errors.Add("Địa chỉ relay phải là URL http(s), vd https://relay.example.com/.");
+            if (!Guid.TryParse(profile.RelayShareId.Trim(), out Guid relayShare))
+                errors.Add("Mã chia sẻ trên relay phải là GUID (procbridge-relay device shares).");
+            if (token.Length == 0)
+                errors.Add("Chưa nhập token máy của relay.");
+            if (relayUrl is not null && relayShare != Guid.Empty && token.Length > 0)
+                relay = new LauncherRelay(relayUrl, token, relayShare);
+        }
 
         var mappings = new List<VirtualMapping>();
         foreach (FolderMapping mapping in profile.Mappings)
@@ -59,7 +72,10 @@ public sealed class LaunchOptionsFactory
         if (errors.Count > 0 || machine is null)
             throw new ProfileValidationException(errors);
 
-        (string host, int port) = LauncherCommandLine.ParseAgent(machine.Address);
+        // Through the relay the LAN address is not used (the paired machine is picked by fingerprint).
+        (string host, int port) = relay is not null
+            ? (relay.Url.Host, Protocol.ProtocolInfo.DefaultPort)
+            : LauncherCommandLine.ParseAgent(machine.Address);
         string commandLine = LauncherCommandLine.Quote(profile.Program.Trim());
         if (!string.IsNullOrWhiteSpace(profile.Arguments))
             commandLine += " " + profile.Arguments.Trim();
@@ -74,6 +90,7 @@ public sealed class LaunchOptionsFactory
             DisableBuildServers = profile.DisableBuildServers,
             WriteThrough = profile.WriteThrough,
             ConflictPolicy = profile.OverwriteOnConflict ? ConflictPolicy.Overwrite : ConflictPolicy.KeepBoth,
+            Relay = relay,
             WorkingDirectory = string.IsNullOrWhiteSpace(profile.WorkingDirectory) ? null : profile.WorkingDirectory.Trim(),
             CommandLine = commandLine,
         };

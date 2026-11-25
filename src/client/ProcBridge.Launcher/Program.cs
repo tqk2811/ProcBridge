@@ -37,7 +37,9 @@ internal static class Program
                 : store.FindByAddress($"{options.AgentHost}:{options.AgentPort}");
             if (agent is null)
             {
-                Console.Error.WriteLine($"ProcBridge.Launcher: no paired Agent for {options.AgentHost}:{options.AgentPort}; run --pair first.");
+                Console.Error.WriteLine(options.AgentFingerprint is not null
+                    ? $"ProcBridge.Launcher: Agent {options.AgentFingerprint} is not paired; run --pair first (on the LAN)."
+                    : $"ProcBridge.Launcher: no paired Agent for {options.AgentHost}:{options.AgentPort}; run --pair first.");
                 return 2;
             }
             options = options with { Security = new BrokerSecurity { Identity = identity, PairedMachines = store, AgentPublicKey = agent.PublicKey } };
