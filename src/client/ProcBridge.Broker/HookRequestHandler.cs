@@ -240,7 +240,7 @@ public sealed class HookRequestHandler : IDisposable
                 {
                     // After the write-back: a commit writes through the held handle while it is open.
                     if (_holds is not null)
-                        await _holds.ReleaseAsync(close.WriteToken).ConfigureAwait(false);
+                        await _holds.ReleaseAsync(close.WriteToken, clientId).ConfigureAwait(false);
                 }
                 return new HookEmptyReply { Type = type };
             }
@@ -249,6 +249,7 @@ public sealed class HookRequestHandler : IDisposable
             {
                 HookTokenRequest retain = Read(request, (ref HookIpcReader r) => HookTokenRequest.Read(ref r, type));
                 _writeBack?.Retain(retain.WriteToken);
+                _holds?.Retain(retain.WriteToken, clientId);
                 return new HookEmptyReply { Type = type };
             }
 

@@ -23,6 +23,7 @@ public enum NtStatus : uint
     SharingViolation = 0xC0000043,
     /// <summary>A byte range lock conflicts with one held by another open (M8).</summary>
     LockNotGranted = 0xC0000055,
+    FileLockConflict = 0xC0000054,
     /// <summary>Unlock of a range that is not locked (M8).</summary>
     RangeNotLocked = 0xC000007E,
     RevisionMismatch = 0xC0000059,
