@@ -339,6 +339,11 @@ Broker kết nối TCP thẳng tới Agent (cổng cấu hình được). Tìm A
 - Ghép cặp: chạy trong phiên XX, kiểu commit-rồi-reveal (A cam kết nonce, B gửi nonce, A lộ nonce),
   mã 6 chữ số = SHA-256(h, Na, Nb). Kẻ đứng giữa chỉ có 1/10^6 cơ hội mỗi lần thử. A nhập mã một lần;
   B vẫn cần người dùng bấm chấp nhận sau khi A báo thành công, vì kênh người dùng chỉ đi một chiều B→A.
+- Ngoài ghép cặp, bắt tay luôn phải có delegate kiểm khoá bên kia. Chỉ `NoiseHandshake.CreatePairing`
+  nhận khoá lạ; phiên của nó chưa tin cậy, chỉ mở được kênh ghép cặp dành riêng (`GetPairingChannel`),
+  kênh dữ liệu bị chặn tới khi `ConfirmCode` (A) / `Accept` (B) thành công.
+- Nhiều luồng cùng gửi trên một kênh thì dùng `SealAndWriteAsync` để khung lên dây đúng thứ tự counter.
+- Payload của message 1 bắt tay phát lại được, tầng trên không coi nó là lệnh.
 
 ```mermaid
 sequenceDiagram

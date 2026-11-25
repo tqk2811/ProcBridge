@@ -1,8 +1,19 @@
 # Backlog
 
+## [Vừa] UI ghép cặp phía B phải bắt so vân tay A
+
+- Kênh người dùng của mã 6 số chỉ đi B→A, nên thông điệp confirm chỉ chứng minh mã khớp ở phía A chứ
+  không chứng minh người gửi là A thật (kẻ đứng giữa cũng có mã của riêng nó).
+- Trước khi gọi `PairingResponder.Accept` ([PairingResponder.cs](../src/shared/ProcBridge.Crypto/Pairing/PairingResponder.cs)),
+  WPF của Agent phải bắt người dùng so `PeerFingerprint` với vân tay A hiển thị, không để nút chấp nhận
+  bấm được ngay. Phương án khác: SAS hai chiều (A cũng hiện mã để nhập ở B).
+- Ghi từ review bảo mật M5 (2026-11-25).
+
 ## [Vừa] Gắn ProcBridge.Crypto vào transport (M2/M6)
 
-- Broker/Agent chạy bắt tay IK khi mở phiên, XX + `PairingInitiator`/`PairingResponder` khi ghép cặp.
+- Broker/Agent chạy bắt tay IK khi mở phiên, `NoiseHandshake.CreatePairing` + `PairingInitiator`/`PairingResponder`
+  khi ghép cặp (thông điệp ghép cặp đi qua `GetPairingChannel`).
+- Gửi khung bằng `SecureChannel.SealAndWriteAsync` khi nhiều luồng cùng ghi một kết nối.
 - Kết nối phụ của cùng phiên gửi id kênh ở dạng rõ trước khung đầu, bên kia gọi `AcceptChannel`.
 - Prologue nên chứa số phiên bản giao thức (`ProtocolInfo.Version`) để hai bản lệch nhau bị từ chối.
 - Điều kiện xong M5 "bắt gói trên dây không thấy nội dung" cần kiểm khi đã có transport.
