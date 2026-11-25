@@ -133,7 +133,8 @@ public sealed class RelayHostLinkTests
         await using var link = new RelayHostLink(Endpoint, (_, _) => Task.CompletedTask, sockets)
         {
             MaxControlMessageBytes = 64 * 1024,
-            ReconnectDelay = TimeSpan.FromMilliseconds(20),
+            // Long enough to read LastError before the reconnect clears it.
+            ReconnectDelay = TimeSpan.FromMilliseconds(500),
         };
         link.Start();
         var first = await sockets.ControlAsync();
@@ -142,9 +143,10 @@ public sealed class RelayHostLinkTests
         for (int i = 0; i < 80; i++)
             first.PushPartial(1024);
 
-        await WaitAsync(() => first.Aborted, "oversized message drops the channel");
+        // The socket is aborted before the read loop records the error: wait for the error itself.
+        await WaitAsync(() => link.LastError?.Contains("larger than") == true, "oversized message drops the channel");
+        Assert.IsTrue(first.Aborted);
         Assert.AreEqual(System.Net.WebSockets.WebSocketCloseStatus.MessageTooBig, first.ClosedWith);
-        StringAssert.Contains(link.LastError ?? string.Empty, "larger than");
         await sockets.ControlAsync(1);
     }
 
