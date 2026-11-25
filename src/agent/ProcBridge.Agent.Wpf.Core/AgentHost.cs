@@ -56,6 +56,8 @@ public sealed class AgentHost : IAgentHost
         _ => "relay: đang kết nối",
     };
 
+    public string? RelayPairingCode => _server?.RelayPairingCode;
+
     public void Start(IReadOnlyList<ShareSettings> shares, IPAddress bindAddress, int port, RelayEndpoint? relay = null)
     {
         if (_server is not null)

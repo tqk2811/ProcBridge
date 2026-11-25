@@ -46,6 +46,20 @@
                                              ToolTip="Địa chỉ relay, vd https://relay.example.com/. Để trống thì chỉ phục vụ trong LAN. Không cần tài khoản: máy A tìm máy này theo vân tay khoá." />
                                 </StackPanel>
                                 <TextBlock Text="{Binding RelayState}" Margin="0,2,0,0" Foreground="Gray" />
+                                <TextBlock Margin="0,2,0,0"
+                                           ToolTip="Máy A chỉ thấy máy này qua relay thì nhập mã này để tìm máy này (dùng một lần, tự đổi sau vài phút). Sau đó vẫn so vân tay và nhập mã 6 số như trong LAN.">
+                                    <TextBlock.Style>
+                                        <Style TargetType="TextBlock">
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding RelayPairingCode}" Value="{x:Null}">
+                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                    <Run Text="Mã ghép cặp qua relay: " />
+                                    <Run Text="{Binding RelayPairingCode, Mode=OneWay}" FontFamily="Consolas" FontWeight="Bold" />
+                                </TextBlock>
                             </StackPanel>
                             <StackPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,8">
                                 <Button Content="Khởi động" Command="{Binding StartCommand}" />
