@@ -22,6 +22,7 @@ public sealed class ProtocolConnection : IAsyncDisposable
     private Task _readLoop = Task.CompletedTask;
     private Task _keepAliveLoop = Task.CompletedTask;
     private long _lastReceived = Environment.TickCount64;
+    private long _lastSent = Environment.TickCount64;
     private int _nextRequestId;
     private long _completedRequests;
     private volatile bool _alive = true;
@@ -131,6 +132,7 @@ public sealed class ProtocolConnection : IAsyncDisposable
             try
             {
                 await _channel.SendAsync(new Frame { Kind = FrameKind.Request, MessageType = type, RequestId = id, Header = header, Payload = payload }, timeout.Token).ConfigureAwait(false);
+                Interlocked.Exchange(ref _lastSent, Environment.TickCount64);
             }
             catch (Exception e) when (e is IOException or SocketException or ObjectDisposedException)
             {
@@ -187,8 +189,9 @@ public sealed class ProtocolConnection : IAsyncDisposable
     }
 
     /// <summary>
-    /// Probes the peer with <see cref="MessageType.Ping"/> once nothing came in for <see cref="TransportOptions.KeepAliveInterval"/>
-    /// (or a request timed out). Any frame received while the probe waits proves the peer alive (a large response
+    /// Probes the peer with <see cref="MessageType.Ping"/> once nothing came in, or nothing went out, for
+    /// <see cref="TransportOptions.KeepAliveInterval"/> (or a request timed out). The second case keeps a connection that
+    /// only receives (a change watch fed by notifications) alive at the Agent, which drops a client it hears nothing from. Any frame received while the probe waits proves the peer alive (a large response
     /// may hold the answer back); silence for <see cref="TransportOptions.KeepAliveTimeout"/> kills the connection.
     /// </summary>
     private async Task KeepAliveLoopAsync()
@@ -197,10 +200,12 @@ public sealed class ProtocolConnection : IAsyncDisposable
         {
             while (_alive)
             {
-                long idle = Environment.TickCount64 - Interlocked.Read(ref _lastReceived);
+                long now = Environment.TickCount64;
+                long idle = Math.Max(now - Interlocked.Read(ref _lastReceived), now - Interlocked.Read(ref _lastSent));
                 long wait = (long)_options.KeepAliveInterval.TotalMilliseconds - idle;
                 if (wait > 0 && !await _probeRequested.WaitAsync(TimeSpan.FromMilliseconds(wait), _closing.Token).ConfigureAwait(false))
                     continue; // Woken by the timer: frames may have arrived meanwhile, compute again.
+                _probeRequested.Wait(0); // This probe also serves a request made meanwhile; do not probe twice.
 
                 if (!await ProbeAsync().ConfigureAwait(false))
                 {
@@ -324,5 +329,6 @@ public sealed class ProtocolConnection : IAsyncDisposable
         await _keepAliveLoop.ConfigureAwait(false);
         Fail("Connection disposed.");
         _closing.Dispose();
+        _probeRequested.Dispose();
     }
 }

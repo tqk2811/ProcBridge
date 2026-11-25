@@ -121,6 +121,88 @@ public sealed class KeepAliveTests
         await Task.WhenAll(serving);
     }
 
+    /// <summary>
+    /// A connection that only receives (a change watch fed by a steady stream of notifications) still sends pings: the
+    /// Agent drops a client it hears nothing from, whatever the client hears from it.
+    /// </summary>
+    [TestMethod]
+    public async Task ConnectionThatOnlyReceivesNotifications_StillPings()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        using var stop = new CancellationTokenSource();
+        int pings = 0;
+        try
+        {
+            int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            Task server = Task.Run(async () =>
+            {
+                using TcpClient peer = await listener.AcceptTcpClientAsync();
+                await using var channel = new StreamFrameChannel(peer.GetStream(), ownsStream: false, FastKeepAlive.MaxFrameSize);
+                Frame hello = (await channel.ReceiveAsync(stop.Token))!.Value;
+                var response = new HelloResponse { ProtocolVersion = ProtocolInfo.Version, ServerName = "chatty", MaxFrameSize = FastKeepAlive.MaxFrameSize, MaxReadSize = 1024 };
+                await channel.SendAsync(new Frame { Kind = FrameKind.Response, MessageType = MessageType.Hello, RequestId = hello.RequestId, Header = ProtocolSerializer.Serialize(response) }, stop.Token);
+                Task reader = Task.Run(async () =>
+                {
+                    while (await channel.ReceiveAsync(stop.Token) is { } frame)
+                    {
+                        if (frame.MessageType == MessageType.Ping)
+                        {
+                            Interlocked.Increment(ref pings);
+                            await channel.SendAsync(new Frame { Kind = FrameKind.Response, MessageType = MessageType.Ping, RequestId = frame.RequestId }, stop.Token);
+                        }
+                    }
+                });
+                try
+                {
+                    // A notification every 50 ms: the client never goes a keepalive interval without receiving.
+                    while (true)
+                    {
+                        await channel.SendAsync(new Frame { Kind = FrameKind.Notification, MessageType = MessageType.Ping, RequestId = 0 }, stop.Token);
+                        await Task.Delay(50, stop.Token);
+                    }
+                }
+                catch (Exception e) when (e is OperationCanceledException or IOException or ProtocolStatusException)
+                {
+                }
+                try
+                {
+                    await reader;
+                }
+                catch (Exception e) when (e is OperationCanceledException or IOException or ProtocolStatusException)
+                {
+                }
+            });
+
+            await using (ProtocolConnection connection = await ProtocolConnection.OpenAsync(new TcpConnectionFactory("127.0.0.1", port, TolerantKeepAlive), Hello, TolerantKeepAlive, CancellationToken.None))
+            {
+                await Task.Delay(TimeSpan.FromSeconds(2));
+                Assert.IsTrue(connection.IsAlive);
+            }
+            stop.Cancel();
+            await server;
+            Assert.IsGreaterThanOrEqualTo(2, Volatile.Read(ref pings), "a connection that only receives sent no keepalive");
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
+    [TestMethod]
+    public async Task Agent_RejectsTheProtocolBeforePings()
+    {
+        // Version 2 Brokers neither ping nor expect the Agent to drop a quiet connection.
+        using var share = new TempFolder("agent");
+        await using var server = new AgentServer([new AgentShare("s", share.Path)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
+        server.Start();
+
+        var old = new HelloRequest { ProtocolVersion = 2, ClientName = "test", ShareName = "s" };
+        var e = await Assert.ThrowsExactlyAsync<ProtocolStatusException>(
+            () => ProtocolConnection.OpenAsync(new TcpConnectionFactory("127.0.0.1", server.Port, TolerantKeepAlive), old, TolerantKeepAlive, CancellationToken.None));
+        Assert.AreEqual(NtStatus.RevisionMismatch, e.Status);
+    }
+
     [TestMethod]
     public async Task Agent_AnswersPings_SoAnIdleConnectionStaysAlive()
     {
