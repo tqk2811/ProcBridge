@@ -180,6 +180,17 @@ DLL cạnh exe mà loader tìm theo thư mục của image.
   lại (so nội dung) từ máy A có thể lỗi chia sẻ với share mode của handle giữ.
 - Chưa test với SQLite thật (thiếu gói `Microsoft.Data.Sqlite`).
 
+## [Thấp] Khoá chờ trên Agent dùng vòng poll và chiếm slot đồng thời
+
+`FsLock` có chờ (`AgentShare.Handles.cs`) thử lại mỗi 20 ms bằng `Task.Delay` và giữ một slot `_concurrency` của phiên tới
+`MaxLockWait`. Nhiều khoá cùng chờ trên một phiên làm đói các request khác. Hướng sửa: hàng đợi chờ theo vùng, đánh thức
+khi `FsUnlock`/đóng handle, và nhả slot trong lúc chờ. (Review M8, L3.)
+
+## [Thấp] Key của NtLockFile/NtUnlockFile bị bỏ qua trên máy B
+
+Hook gửi `Key` của `NtLockFile`/`NtUnlockFile` sang Broker và Agent, nhưng Agent khoá bằng `LockFileEx` (không có Key) nên bỏ qua nó:
+mở khoá với Key khác vẫn thành công, khác hành vi NTFS. Ít chương trình dùng Key khác 0. (Review M8, L4.)
+
 ## [Thấp] Test thực tế M8 chưa chạy
 
 `cdb`/`dotnet-dump` (máy test không cài), debug bằng Visual Studio và VS Code, mở DB SQLite trên Agent. Hiện thay bằng
