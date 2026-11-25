@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Remote Explorer core on machine B (Plan section 14). Transport is not wired yet. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>ProcBridge.Agent.Explorer</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="MessagePack" />
+    <PackageReference Include="System.ServiceProcess.ServiceController" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="ProcBridge.Tests" />
+  </ItemGroup>
+</Project>
