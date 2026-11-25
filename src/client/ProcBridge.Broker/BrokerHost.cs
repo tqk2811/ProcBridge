@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.Versioning;
 using ProcBridge.Broker.Models;
+using ProcBridge.Crypto.Identity;
 using ProcBridge.HookIpc;
 using ProcBridge.Protocol;
 using ProcBridge.Protocol.Interfaces;
@@ -98,7 +99,7 @@ public sealed class BrokerHost : IAsyncDisposable
         {
             // Through a relay each pool connection is one lane; the Noise handshake runs inside it (relay sees ciphertext).
             IStreamConnector connector = options.Relay is { } relay
-                ? new RelayStreamConnector(relay.Endpoint, relay.ShareId, relay.Sockets, relay.Http)
+                ? new RelayStreamConnector(relay.Endpoint, KeyFingerprint.Compute(security.AgentPublicKey), relay.Sockets, relay.Http)
                 : new TcpStreamConnector(options.AgentHost, options.AgentPort);
             return new SecureConnectionFactory(connector, security.Identity,
                 security.PairedMachines, security.AgentPublicKey, options.Transport);

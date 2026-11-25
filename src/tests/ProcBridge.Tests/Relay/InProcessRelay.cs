@@ -1,20 +1,20 @@
 using System.Net.WebSockets;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
 using ProcBridge.Relay.Integration.Api.Implements;
 using ProcBridge.Relay.Integration.Api.Interfaces;
-using ProcBridge.Relay.Testing.Infrastructure;
-using ProcBridge.Relay.ViewModels.Accounts;
-using ProcBridge.Relay.ViewModels.Devices;
+using ProcBridge.Relay.Services.Tunnel;
 using ProcBridge.Relay.Shared.Tunnel;
-using ProcBridge.Relay.ViewModels.Shares;
+using ProcBridge.Relay.Testing.Infrastructure;
 using ProcBridge.Transport.Relay.Interfaces;
 using ProcBridge.Transport.Relay.Models;
 
 namespace ProcBridge.Tests.Relay;
 
 /// <summary>
-/// The real relay host (REST + WebSocket tunnel) in this test process, on its in-memory store (the relay keeps no other
-/// storage). WebSockets go through <see cref="Sockets"/>, which also records every byte that crosses the relay on data lanes.
+/// The real relay host (REST + WebSocket tunnel) in this test process. It keeps no accounts and no storage: a host is
+/// online while its proven control channel is open. WebSockets go through <see cref="Sockets"/>, which also records
+/// every byte that crosses the relay on data lanes.
 /// </summary>
 internal sealed class InProcessRelay : IAsyncDisposable
 {
@@ -30,35 +30,16 @@ internal sealed class InProcessRelay : IAsyncDisposable
 
     public static InProcessRelay Start() => new();
 
-    public RelayEndpoint Endpoint(string deviceToken) => new(Factory.Server.BaseAddress, deviceToken);
+    public RelayEndpoint Endpoint => new(Factory.Server.BaseAddress);
 
-    public IRelayApi Api(string? token = null)
-    {
-        var api = new RelayApiImplement(Factory.CreateClient());
-        api.SetBearerToken(token);
-        return api;
-    }
+    public IRelayApi Api() => new RelayApiImplement(Factory.CreateClient());
 
-    /// <summary>One account owning a host device (machine B) and a client device (machine A) granted one share.</summary>
-    public async Task<RelayTopology> CreateTopologyAsync(string shareName)
+    /// <summary>Waits until a host with <paramref name="hostId"/> has a proven control channel.</summary>
+    public async Task WaitOnlineAsync(string hostId)
     {
-        string user = "u" + Guid.NewGuid().ToString("N")[..10];
-        IRelayApi anonymous = Api();
-        await anonymous.Accounts.RegisterAsync(new RegisterAccountRequestVM { UserName = user, Password = "matkhau-dai-du" });
-        string owner = (await anonymous.Accounts.LoginAsync(new LoginRequestVM { UserName = user, Password = "matkhau-dai-du" })).Token;
-        IRelayApi api = Api(owner);
-        DeviceRegisteredVM host = await api.Devices.RegisterAsync(new RegisterDeviceRequestVM { Name = "may-b" });
-        DeviceRegisteredVM client = await api.Devices.RegisterAsync(new RegisterDeviceRequestVM { Name = "may-a" });
-        ShareVM share = await api.Shares.CreateAsync(new CreateShareRequestVM { DeviceId = host.Device.Id, Name = shareName });
-        await api.Shares.GrantAsync(share.Id, new GrantShareRequestVM { DeviceId = client.Device.Id });
-        return new RelayTopology(owner, host, client, share.Id);
-    }
-
-    /// <summary>Waits until the relay lists <paramref name="device"/> online (its control channel is up).</summary>
-    public async Task WaitOnlineAsync(string ownerToken, Guid device)
-    {
+        TunnelHub hub = Factory.Services.GetRequiredService<TunnelHub>();
         DateTime deadline = DateTime.UtcNow.AddSeconds(15);
-        while (!(await Api(ownerToken).Devices.GetAllAsync()).Single(x => x.Id == device).IsOnline)
+        while (!hub.IsOnline(hostId))
         {
             if (DateTime.UtcNow > deadline)
                 Assert.Fail("The Agent did not come online on the relay.");
@@ -71,8 +52,6 @@ internal sealed class InProcessRelay : IAsyncDisposable
         await Factory.DisposeAsync();
     }
 }
-
-internal sealed record RelayTopology(string OwnerToken, DeviceRegisteredVM Host, DeviceRegisteredVM Client, Guid ShareId);
 
 /// <summary>
 /// WebSockets to the in-process test server. Data lanes (path /tunnel) are wrapped so every byte sent or received

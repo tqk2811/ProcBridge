@@ -13,21 +13,29 @@ internal sealed class TunnelSession
     private DateTime _acceptLanesUntil;
     private bool _aborted;
 
-    public TunnelSession(Guid id, Guid shareId, Guid clientDeviceId, Guid hostDeviceId, string clientTicket, string hostTicket, DateTime acceptLanesUntil)
+    public TunnelSession(Guid id, string hostId, string clientAddress, string clientTicket, string hostTicket, DateTime acceptLanesUntil)
     {
         Id = id;
-        ShareId = shareId;
-        ClientDeviceId = clientDeviceId;
-        HostDeviceId = hostDeviceId;
+        HostId = hostId;
+        ClientAddress = clientAddress;
         _clientTicket = clientTicket;
         _hostTicket = hostTicket;
         _acceptLanesUntil = acceptLanesUntil;
     }
 
     public Guid Id { get; }
-    public Guid ShareId { get; }
-    public Guid ClientDeviceId { get; }
-    public Guid HostDeviceId { get; }
+
+    /// <summary>Fingerprint of the host's identity key.</summary>
+    public string HostId { get; }
+
+    /// <summary>Address that opened the session (per-address limit).</summary>
+    public string ClientAddress { get; }
+
+    /// <summary>Ticket of the client lanes (returned to the opener).</summary>
+    public string ClientTicket => _clientTicket;
+
+    /// <summary>Ticket of the host lanes (sent to the host on its control channel).</summary>
+    public string HostTicket => _hostTicket;
 
     public TunnelSide? MatchTicket(string ticket)
     {
@@ -58,7 +66,7 @@ internal sealed class TunnelSession
         lock (_lock)
         {
             if (_aborted)
-                return null; // Revoked between the caller's lookup and now.
+                return null; // Torn down between the caller's lookup and now.
             if (!_lanes.TryGetValue(lane, out var pair))
             {
                 pair = new TunnelLanePair();
@@ -68,7 +76,7 @@ internal sealed class TunnelSession
         }
     }
 
-    /// <summary>Aborts every lane (revocation); the session then dies once the lanes are gone.</summary>
+    /// <summary>Aborts every lane; the session then dies once the lanes are gone.</summary>
     public void AbortAll()
     {
         lock (_lock)

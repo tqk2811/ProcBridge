@@ -3,14 +3,15 @@ using ProcBridge.Transport.Relay.Models;
 
 namespace ProcBridge.Broker.Models;
 
-/// <summary>Reach the Agent through a relay instead of TCP on the LAN (plan 8.2). Needs <see cref="BrokerSecurity"/>.</summary>
+/// <summary>
+/// Reach the Agent through a relay instead of TCP on the LAN (plan 8.2). Needs <see cref="BrokerSecurity"/>: the
+/// session goes to the HostId of <see cref="BrokerSecurity.AgentPublicKey"/> (the paired Agent), and the Noise IK
+/// handshake inside every lane is what authenticates both ends.
+/// </summary>
 public sealed record BrokerRelayOptions
 {
-    /// <summary>Relay URL and this machine's device token.</summary>
+    /// <summary>Relay URL.</summary>
     public required RelayEndpoint Endpoint { get; init; }
-
-    /// <summary>Relay share id (from <c>procbridge-relay device shares</c>) that the Agent serves.</summary>
-    public required Guid ShareId { get; init; }
 
     /// <summary>WebSocket factory; null for the real <c>ClientWebSocket</c> (tests plug in an in-process relay).</summary>
     public IRelaySocketFactory? Sockets { get; init; }

@@ -66,7 +66,7 @@ public sealed class LaunchSession
             WriteThrough = _options.WriteThrough,
             ConflictPolicy = _options.ConflictPolicy,
             Relay = _options.Relay is { } relay
-                ? new BrokerRelayOptions { Endpoint = new RelayEndpoint(relay.Url, relay.DeviceToken), ShareId = relay.ShareId }
+                ? new BrokerRelayOptions { Endpoint = new RelayEndpoint(relay.Url) }
                 : null,
         });
         try

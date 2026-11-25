@@ -61,8 +61,9 @@ public sealed class AgentServer : IAsyncDisposable
             security.ExplorerPolicies.Changed += AbortPeer;
             _secure.PairingRequested += OnPairingRequested;
         }
+        // The relay knows this Agent only by the HostId its identity key proves on the control channel.
         if (options.Relay is { } relay)
-            _relay = new RelayHostLink(relay.Endpoint, AcceptRelayLaneAsync, relay.Sockets);
+            _relay = new RelayHostLink(relay.Endpoint, security!.Identity, AcceptRelayLaneAsync, relay.Sockets);
     }
 
     /// <summary>Link to the relay (control channel state); null when <see cref="AgentOptions.Relay"/> is not set.</summary>

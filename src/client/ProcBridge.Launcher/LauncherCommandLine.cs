@@ -12,7 +12,7 @@ public static class LauncherCommandLine
         @"                           [--cache <dir>] [--arch x64|x86] [--spawn <ProcBridge.Spawn.exe>]" + "\n" +
         @"                           [--no-build-servers] [--cwd <dir>] [--agent-fingerprint <fp>] [--data <dir>]" + "\n" +
         @"                           [--plaintext] [--write-through] [--conflict keep|overwrite]" + "\n" +
-        @"                           [--relay <url> --relay-share <shareId> [--relay-token <device token>]]" + "\n" +
+        @"                           [--relay <url>]" + "\n" +
         @"                           -- <program> [arguments]" + "\n" +
         @"       ProcBridge.Launcher --pair --agent <host>[:port] [--data <dir>]" + "\n" +
         @"       ProcBridge.Launcher --list-paired [--data <dir>] | --revoke <fingerprint> [--data <dir>]" + "\n" +
@@ -22,10 +22,7 @@ public static class LauncherCommandLine
         @"  --write-through sends every write to machine B at once (default: on close or flush)." + "\n" +
         @"  --conflict: when machine B changed a file meanwhile, keep both (default) or let this machine win." + "\n" +
         @"  --relay reaches the Agent through a relay instead of --agent (which is then not needed); --agent-fingerprint" + "\n" +
-        @"  picks the paired Agent. The device token comes from --relay-token or PROCBRIDGE_RELAY_TOKEN.";
-
-    /// <summary>Device token of the relay when <c>--relay-token</c> is not given (keeps it off the command line).</summary>
-    public const string RelayTokenVariable = "PROCBRIDGE_RELAY_TOKEN";
+        @"  picks the paired Agent, whose fingerprint is also its HostId on the relay (no relay account).";
 
     /// <summary>Throws <see cref="ArgumentException"/> with a message for the user when the line is wrong.</summary>
     public static LauncherOptions Parse(IReadOnlyList<string> args)
@@ -43,8 +40,6 @@ public static class LauncherCommandLine
         bool writeThrough = false;
         ConflictPolicy conflictPolicy = ConflictPolicy.KeepBoth;
         Uri? relayUrl = null;
-        string? relayToken = null;
-        Guid? relayShare = null;
         string architecture = Environment.Is64BitOperatingSystem ? "x64" : "x86";
         var mappings = new List<VirtualMapping>();
         int index = 0;
@@ -99,12 +94,6 @@ public static class LauncherCommandLine
                         ? url
                         : throw new ArgumentException("--relay expects an http(s) URL.");
                     break;
-                case "--relay-token":
-                    relayToken = Next(option);
-                    break;
-                case "--relay-share":
-                    relayShare = Guid.TryParse(Next(option), out Guid shareId) ? shareId : throw new ArgumentException("--relay-share expects the relay share id (a GUID).");
-                    break;
                 case "--conflict":
                     conflictPolicy = Next(option) switch
                     {
@@ -122,19 +111,10 @@ public static class LauncherCommandLine
         {
             if (plaintext)
                 throw new ArgumentException("--relay needs the encrypted transport (drop --plaintext).");
-            if (relayShare is null)
-                throw new ArgumentException("--relay needs --relay-share <shareId>.");
             if (agentFingerprint is null)
-                throw new ArgumentException("--relay needs --agent-fingerprint (which paired Agent serves the share).");
-            relayToken ??= Environment.GetEnvironmentVariable(RelayTokenVariable);
-            if (string.IsNullOrWhiteSpace(relayToken))
-                throw new ArgumentException($"--relay needs a device token: --relay-token or {RelayTokenVariable}.");
-            relay = new LauncherRelay(relayUrl, relayToken, relayShare.Value);
+                throw new ArgumentException("--relay needs --agent-fingerprint (the paired Agent, its HostId on the relay).");
+            relay = new LauncherRelay(relayUrl);
             host ??= relayUrl.Host;
-        }
-        else if (relayToken is not null || relayShare is not null)
-        {
-            throw new ArgumentException("--relay-token and --relay-share go with --relay <url>.");
         }
         if (host is null || share is null || mappings.Count == 0)
             throw new ArgumentException("--agent (or --relay), --share and at least one --map are required.");

@@ -96,7 +96,7 @@ Vai trò từng thành phần:
 | `Hook.dll` (x64, x86) | Trong mọi process của cây | Chặn các hàm `Nt*` ở `ntdll`, nhận diện đường dẫn thuộc thư mục ảo, hỏi Broker; còn lại gọi hàm gốc |
 | `Broker` | Máy A, một process mỗi phiên | Giữ kết nối tới máy B, mã hoá, quản lý cache, trả lời Hook qua named pipe |
 | `Agent` | Máy B | Phục vụ thư mục thật theo danh sách chia sẻ, kiểm quyền, báo thay đổi |
-| `Relay` | Server internet | Xác thực tài khoản/máy, ghép cặp A ↔ B, chuyển tiếp khung đã mã hoá |
+| `Relay` | Server internet (tuỳ chọn) | Điểm vượt NAT: máy B chứng minh HostId bằng khoá định danh, relay ghép lane A ↔ B và chuyển tiếp khung đã mã hoá; không tài khoản, không lưu gì |
 
 Lý do tách `Broker` khỏi `Hook.dll`: giữ phần code chạy trong process đích nhỏ, không có mạng, không có
 crypto, không có .NET. Lỗi mạng hay crash Broker không kéo sập process đích; Hook chỉ trả mã lỗi
@@ -107,10 +107,11 @@ crypto, không có .NET. Lỗi mạng hay crash Broker không kéo sập process
 ## 3. Cấu trúc thư mục src
 
 Theo quy tắc thư mục `src/`: gốc repo chỉ giữ `docs/`, `README.md`, file cấu hình repo và CI.
-Phần Relay theo kiến trúc ASP chuẩn nhưng KHÔNG có tầng database: dữ liệu chỉ nằm trong bộ nhớ nên không có
-`Database.Entities` / `Database.<Provider>` (không cần entity vì không còn bảng, không migration, không EF/Npgsql);
-còn `Repositories.Abstractions` (giao diện) và `Repositories` (cài đặt trong bộ nhớ, thread-safe, quanh `RelayStore`).
-Sau này muốn lưu bền thì thêm lại `Database.*` và cài đặt repository mới cho cùng giao diện.
+Phần Relay theo kiến trúc ASP chuẩn nhưng chỉ còn các tầng có nội dung. Relay không có tài khoản, máy, chia sẻ hay
+quyền (bỏ ngày 2026-11-26, xem 8.2), nên không có `Database.*` và cũng không còn `Repositories.Abstractions` /
+`Repositories`: không còn dữ liệu nào để lưu, kể cả trong bộ nhớ, ngoài sổ đăng ký kênh điều khiển và phiên đang sống
+của `TunnelHub`. Các feature `Services.Accounts/Devices/Shares` và CLI quản lý `ProcBridge.Relay.Cli` cũng bị xoá vì hết
+việc; chạy relay bằng chính `ProcBridge.Relay.Api`, xem trạng thái bằng `/health/live` và log.
 
 ```text
 src/
@@ -136,14 +137,11 @@ src/
 ├── relay/
 │   ├── ProcBridge.Relay.Shared/
 │   ├── ProcBridge.Relay.ViewModels/
-│   ├── ProcBridge.Relay.Repositories.Abstractions/
-│   ├── ProcBridge.Relay.Repositories/    # cài đặt trong bộ nhớ (RelayStore), không có database
-│   ├── ProcBridge.Relay.Services.Common/ # lỗi, băm token/mật khẩu, luật quyền (Rules), IDevicePresence
-│   ├── ProcBridge.Relay.Services.*/      # Accounts, Devices, Shares, Tunnel
+│   ├── ProcBridge.Relay.Services.Common/ # mã lỗi, vé lane ngẫu nhiên (helper tĩnh, không đăng ký service)
+│   ├── ProcBridge.Relay.Services.Tunnel/ # TunnelHub: bắt tay chứng minh HostId, ghép lane, giới hạn
 │   ├── ProcBridge.Relay.Services/        # facade đăng ký mọi feature
 │   ├── ProcBridge.Relay.Integration.Api/ # client typed (interface dùng chung với controller)
-│   ├── ProcBridge.Relay.Api/             # REST quản lý + endpoint WebSocket /tunnel
-│   ├── ProcBridge.Relay.Cli/             # CLI quản lý (procbridge-relay)
+│   ├── ProcBridge.Relay.Api/             # POST api/tunnel/sessions + endpoint WebSocket /tunnel, /tunnel/control
 │   └── tests/
 └── tests/
     ├── ProcBridge.Tests/                 # test C# (protocol, crypto, broker, agent, end-to-end)
@@ -310,44 +308,44 @@ Broker kết nối TCP thẳng tới Agent (cổng cấu hình được). Tìm A
 
 ### 8.2 Internet qua Relay ASP.NET
 
-- Cả Broker và Agent đều **chủ động kết nối ra** Relay bằng WebSocket (TLS). Không cần mở port, không
-  cần xuyên NAT ở hai máy.
-- Relay: đăng nhập tài khoản, đăng ký máy (device), khai chia sẻ, cấp quyền máy A dùng chia sẻ nào
-  của máy B, cấp token ngắn hạn cho kết nối tunnel, ghép cặp hai đầu và chuyển tiếp khung.
-- Relay chỉ nhìn thấy phần đầu định tuyến (id phiên, id đích); payload đã mã hoá đầu cuối.
+- Relay là điểm vượt NAT **tuỳ chọn**: LAN hoặc máy B có port public vẫn nối TCP thẳng (8.1). Cả Broker và Agent
+  đều **chủ động kết nối ra** Relay bằng WebSocket (TLS), không cần mở port ở hai máy.
+- Relay **không có tài khoản** và không lưu gì (quyết định 2026-11-26): không tài khoản, máy, chia sẻ, quyền, token
+  máy/phiên, REST quản lý hay CLI quản lý. Ai được nói chuyện với ai do bắt tay Noise IK đầu cuối quyết định (mục 9):
+  máy B chỉ nhận máy A đã ghép cặp, relay chỉ thấy byte đã mã hoá.
 - Giao thức tunnel (M6):
-  - Máy B giữ kênh điều khiển `GET /tunnel/control` (WebSocket, token máy B).
-  - Máy A gọi `POST api/tunnel/sessions {shareId}` bằng token máy A. Relay kiểm quyền A dùng chia sẻ,
-    tạo phiên với hai vé ngắn hạn (một cho mỗi phía), trả vé của A và đẩy vé của B qua kênh điều khiển
-    (kèm khoá công khai hai bên để đối chiếu vân tay).
+  - **HostId** của máy B = vân tay khoá định danh Noise của nó (`KeyFingerprint`). Máy B giữ kênh điều khiển
+    `GET /tunnel/control` (WebSocket, không token) và **phải chứng minh sở hữu khoá**: chạy bắt tay Noise XX
+    (initiator) với relay, prologue `ProcBridge relay control v1`. Relay sinh khoá tĩnh riêng mỗi lần khởi động; tin
+    nhắn 3 chỉ giải mã được khi B có khoá bí mật, khoá tạm của relay làm bản phát lại vô dụng. Relay đăng ký kênh theo
+    vân tay khoá vừa được chứng minh và gửi `hostRegistered {hostId}`; B kiểm hostId đúng vân tay của mình. Không ai
+    đăng ký được HostId của máy khác; kênh mới của cùng khoá thay kênh cũ. Bắt tay quá `ControlHandshakeTimeout`
+    (10 giây) hoặc sai thì relay đóng kênh.
+  - Máy A gọi `POST api/tunnel/sessions {hostId}` (ẩn danh), hostId lấy từ máy đã ghép cặp trong
+    `PairedMachineStore` (Broker tính từ `AgentPublicKey`). Relay tạo phiên với hai vé ngắn hạn (một cho mỗi phía), trả
+    vé của A và đẩy `sessionOpened {sessionId, ticket, expiresAt}` cho B qua kênh điều khiển. HostId không online thì 409
+    `HOST_OFFLINE`.
   - Hai phía mở các lane dữ liệu `GET /tunnel?sessionId=..&lane=N` (WebSocket) kèm vé trong header
     `Authorization: Bearer pbt_...` (vé không nằm trong URL để khỏi lọt vào log proxy; `?ticket=` chỉ nhận khi
-    bật `Relay:Tunnel:AllowTicketInQuery`, mặc định tắt). Lane cùng số
-    của hai phía được ghép cặp; relay chép nguyên khung nhị phân giữa chúng, không đọc payload. Một phiên
-    có tối đa 16 lane song song (quyết định 1 ở mục 15). Đóng một đầu thì đóng đầu kia của cùng lane.
+    bật `Relay:Tunnel:AllowTicketInQuery`, mặc định tắt). Lane cùng số của hai phía được ghép cặp; relay chép nguyên
+    khung nhị phân giữa chúng, không đọc payload. Một phiên có tối đa 16 lane song song (quyết định 1 ở mục 15). Đóng
+    một đầu thì đóng đầu kia của cùng lane.
   - Máy A mở lane theo nhu cầu (mỗi kết nối của pool là một lane, lấy số nhỏ nhất còn trống). Khi đầu
     của A tới trước, relay đẩy `laneRequested {sessionId, lane}` qua kênh điều khiển và máy B mở đúng lane
     đó bằng vé của mình; máy B không phải mở sẵn lane chờ.
   - Bắt tay Noise IK và mã hoá khung (mục 9) chạy BÊN TRONG mỗi lane, y như trên một kết nối TCP ở LAN:
     relay chỉ thấy byte đã mã hoá. Phía A là `RelayStreamConnector` dưới `SecureConnectionFactory`, phía B
     là `RelayHostLink` chuyển từng lane cho `SecureServer` của Agent (project `ProcBridge.Transport.Relay`).
-  - Cấu hình: Agent console `--relay <url>` + `--relay-token` (hoặc `PROCBRIDGE_RELAY_TOKEN`), app WPF của
-    Agent có ô relay và token máy (lưu DPAPI). Launcher console `--relay <url> --relay-share <shareId>
-    --agent-fingerprint <fp>` (+ token như trên), Launcher WPF có mục "Kết nối qua relay" trong hồ sơ.
-  - Thu hồi máy, thu hồi quyền hay xoá chia sẻ cắt luôn kênh điều khiển và các lane đang mở liên quan.
-  - Tài khoản: mặc định tắt tự đăng ký (`Relay:Accounts:AllowRegistration=false`); người vận hành tạo
-    tài khoản bằng cấu hình `Relay:Accounts:Seed` (danh sách `UserName` + `PasswordHash`, hoặc biến môi trường
-    `Relay__Accounts__Seed__0__UserName` / `__PasswordHash`); lấy hash bằng `ProcBridge.Relay.Api account hash`
-    (đọc mật khẩu từ `PROCBRIDGE_RELAY_PASSWORD` hoặc gõ ở console, in hash ra, không lưu gì). `login`/`register` giới hạn
-    tần suất theo địa chỉ máy khách và theo tên đăng nhập (`Relay:RateLimit`, mặc định 10 lần/phút, quá thì
-    429); `POST api/tunnel/sessions` giới hạn theo máy (mặc định 60 phiên/phút). Relay chỉ tin
-    `X-Forwarded-For` từ proxy khai trong `Relay:ForwardedHeaders:KnownProxies`/`KnownNetworks` (mặc định rỗng:
-    không tin header nào).
-  - Trạng thái phiên chỉ nằm trong bộ nhớ một tiến trình relay.
-- Lưu trữ: CHỈ TRONG BỘ NHỚ tiến trình relay (tài khoản, phiên đăng nhập, máy, khoá công khai của máy, chia sẻ,
-  quyền). **Khởi động lại relay là mất hết dữ liệu** (quyết định của người dùng dự án, 2026-11-25): máy phải đăng
-  ký lại, chia sẻ và quyền phải tạo lại, token máy và token phiên cũ vô hiệu. Chỉ tài khoản khai ở
-  `Relay:Accounts:Seed` được tạo lại mỗi lần khởi động. Không lưu nội dung file, không có log phiên bền.
+  - Cấu hình chỉ còn URL relay: Agent console `--relay <url>`, app WPF của Agent có ô relay; Launcher console
+    `--relay <url> --agent-fingerprint <fp>` (HostId chính là vân tay đó), Launcher WPF có mục "Kết nối qua relay"
+    trong hồ sơ, HostId lấy từ máy đã ghép cặp của hồ sơ.
+  - Chống lạm dụng: giới hạn tần suất theo địa chỉ cho mở phiên, kênh điều khiển và lane (`Relay:RateLimit`,
+    mặc định 60/20/600 mỗi phút, quá thì 429); trần số phiên sống mỗi HostId và mỗi địa chỉ (`MaxSessionsPerHost`,
+    `MaxSessionsPerAddress`, mặc định 64), số kênh điều khiển mỗi địa chỉ (16), số lane mỗi địa chỉ (256); trần kích
+    thước message điều khiển; vé lane ngẫu nhiên 256 bit qua header. Relay chỉ tin `X-Forwarded-For` từ proxy khai
+    trong `Relay:ForwardedHeaders:KnownProxies`/`KnownNetworks` (mặc định rỗng: không tin header nào).
+- Lưu trữ: không có. Relay chỉ giữ kênh điều khiển và phiên đang sống trong bộ nhớ một tiến trình; khởi động lại thì
+  mọi kênh và phiên rơi, máy B tự nối lại và chứng minh lại khoá. Không lưu nội dung file, không có log phiên bền.
 - Về sau có thể thử kết nối thẳng P2P (UDP hole punching) và chỉ dùng relay khi thất bại; không nằm
   trong các mốc đầu.
 
@@ -412,10 +410,10 @@ sequenceDiagram
     participant BR as Broker (A)
     participant RL as Relay
     participant AG as Agent (B)
-    AG->>RL: WebSocket + token máy B
-    BR->>RL: WebSocket + token máy A, xin mở phiên tới chia sẻ X
-    Note over RL: kiểm quyền A dùng X
-    RL->>AG: có phiên mới từ A
+    AG->>RL: WebSocket /tunnel/control + bắt tay Noise XX (chứng minh khoá)
+    RL-->>AG: hostRegistered (HostId = vân tay khoá B)
+    BR->>RL: POST api/tunnel/sessions {hostId}
+    RL->>AG: sessionOpened (vé của B)
     BR->>AG: bắt tay Noise, khung đi qua Relay
     AG-->>BR: bắt tay xong, có khoá phiên
     BR->>AG: Fs.* đã mã hoá
@@ -480,7 +478,7 @@ Mỗi mốc là một nhánh riêng, xong mốc nào build, test và commit mố
 | **M3** Ghi | Tạo, ghi, đổi tên, xoá, đặt thuộc tính, ghi ngược, phát hiện xung đột | Test so sánh xanh với bộ API ghi; sửa và lưu file trong VS Code |
 | **M4** Cây process | Hook `NtCreateUserProcess`, inject con, x86/x64, Job Object, chuyển bảng handle | `dotnet build` chạy trên solution ở máy B (nhiều process con) |
 | **M5** Mã hoá đầu cuối | Khoá định danh, ghép cặp, bắt tay Noise, mã hoá khung (áp cả LAN) | Bắt gói trên dây không thấy nội dung; ghép cặp sai khoá bị từ chối |
-| **M6** Relay ASP | Relay theo kiến trúc ASP chuẩn, lưu trong bộ nhớ (mất dữ liệu khi khởi động lại): tài khoản, máy, chia sẻ, quyền, tunnel WebSocket | Máy A và máy B ở hai mạng khác nhau làm được M4 qua Relay |
+| **M6** Relay ASP | Relay theo kiến trúc ASP chuẩn, không tài khoản, không lưu gì: máy B chứng minh HostId bằng bắt tay Noise, máy A mở phiên theo HostId, tunnel WebSocket | Máy A và máy B ở hai mạng khác nhau làm được M4 qua Relay; không chiếm được HostId của máy khác |
 | **M7** Theo dõi thay đổi và hiệu năng | `ReadDirectoryChangesW` phía B, `NtNotifyChangeDirectoryFile` phía A, lấy cây metadata một lần, đọc trước | IDE thấy file đổi trên máy B; đo thời gian build so với chạy cục bộ |
 | **M8** Hoàn thiện theo mục đích | Tải theo vùng cho file lớn, khoá file chuyển sang máy B, test app/game/debug | Danh sách test thực tế ở mục 12 chạy được |
 | **M9** Remote Explorer mở rộng | Danh sách process, registry, service, thông tin hệ thống (mục 14); thao tác ghi (kill process, sửa registry) sau cùng | Duyệt được cả bốn loại qua LAN và qua Relay; quyền bị tắt thì Agent từ chối |

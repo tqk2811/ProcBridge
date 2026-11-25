@@ -24,17 +24,11 @@
   <Folder Name="/relay/">
     <Project Path="relay/ProcBridge.Relay.Shared/ProcBridge.Relay.Shared.csproj" />
     <Project Path="relay/ProcBridge.Relay.ViewModels/ProcBridge.Relay.ViewModels.csproj" />
-    <Project Path="relay/ProcBridge.Relay.Repositories.Abstractions/ProcBridge.Relay.Repositories.Abstractions.csproj" />
-    <Project Path="relay/ProcBridge.Relay.Repositories/ProcBridge.Relay.Repositories.csproj" />
     <Project Path="relay/ProcBridge.Relay.Services.Common/ProcBridge.Relay.Services.Common.csproj" />
-    <Project Path="relay/ProcBridge.Relay.Services.Accounts/ProcBridge.Relay.Services.Accounts.csproj" />
-    <Project Path="relay/ProcBridge.Relay.Services.Devices/ProcBridge.Relay.Services.Devices.csproj" />
-    <Project Path="relay/ProcBridge.Relay.Services.Shares/ProcBridge.Relay.Services.Shares.csproj" />
     <Project Path="relay/ProcBridge.Relay.Services.Tunnel/ProcBridge.Relay.Services.Tunnel.csproj" />
     <Project Path="relay/ProcBridge.Relay.Services/ProcBridge.Relay.Services.csproj" />
     <Project Path="relay/ProcBridge.Relay.Integration.Api/ProcBridge.Relay.Integration.Api.csproj" />
     <Project Path="relay/ProcBridge.Relay.Api/ProcBridge.Relay.Api.csproj" />
-    <Project Path="relay/ProcBridge.Relay.Cli/ProcBridge.Relay.Cli.csproj" />
     <Project Path="relay/tests/ProcBridge.Relay.Testing/ProcBridge.Relay.Testing.csproj" />
     <Project Path="relay/tests/ProcBridge.Relay.Tests/ProcBridge.Relay.Tests.csproj" />
   </Folder>

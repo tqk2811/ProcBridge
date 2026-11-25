@@ -1,3 +1,4 @@
+using ProcBridge.Crypto.Identity;
 using ProcBridge.Launcher;
 using ProcBridge.Launcher.Models;
 using ProcBridge.Transport.Relay;
@@ -17,23 +18,22 @@ public sealed class RelayTransportTests
     [TestMethod]
     public void Endpoint_BuildsWebSocketUrls()
     {
-        var https = new RelayEndpoint(new Uri("https://relay.example/base/"), "pbd_x");
-        var http = new RelayEndpoint(new Uri("http://localhost:5290"), "pbd_x");
+        var https = new RelayEndpoint(new Uri("https://relay.example/base/"));
+        var http = new RelayEndpoint(new Uri("http://localhost:5290"));
 
         Assert.AreEqual("wss://relay.example/base/tunnel?sessionId=1&lane=0", https.WebSocketUri("/tunnel?sessionId=1&lane=0").ToString());
         Assert.AreEqual("ws://localhost:5290/tunnel/control", http.WebSocketUri("/tunnel/control").ToString());
-        Assert.DoesNotContain("pbd_x", https.ToString());
     }
 
     [TestMethod]
     public async Task Lanes_ShareOneSession_UntilItIsFull()
     {
         await using var relay = InProcessRelay.Start();
-        RelayTopology topology = await relay.CreateTopologyAsync("echo");
-        await using var host = new RelayHostLink(relay.Endpoint(topology.Host.Token), EchoAsync, relay.Sockets);
+        using var agentKey = IdentityKey.Generate();
+        await using var host = new RelayHostLink(relay.Endpoint, agentKey, EchoAsync, relay.Sockets);
         host.Start();
-        await relay.WaitOnlineAsync(topology.OwnerToken, topology.Host.Device.Id);
-        using var connector = new RelayStreamConnector(relay.Endpoint(topology.Client.Token), topology.ShareId, relay.Sockets, relay.Factory.CreateClient());
+        await relay.WaitOnlineAsync(agentKey.Fingerprint);
+        using var connector = new RelayStreamConnector(relay.Endpoint, agentKey.Fingerprint, relay.Sockets, relay.Factory.CreateClient());
 
         // Three lanes in parallel, each its own echo.
         Stream[] lanes = await Task.WhenAll(Enumerable.Range(0, 3).Select(_ => connector.ConnectAsync(CancellationToken.None).AsTask()));
@@ -59,71 +59,46 @@ public sealed class RelayTransportTests
     }
 
     [TestMethod]
-    public async Task ShareNotGranted_IsAccessDenied_AgentOffline_IsConnectionFailure()
+    public async Task HostOfflineOrUnknown_IsConnectionFailure()
     {
         await using var relay = InProcessRelay.Start();
-        RelayTopology topology = await relay.CreateTopologyAsync("echo");
-        using var offline = new RelayStreamConnector(relay.Endpoint(topology.Client.Token), topology.ShareId, relay.Sockets, relay.Factory.CreateClient());
+        using var agentKey = IdentityKey.Generate();
+        using var offline = new RelayStreamConnector(relay.Endpoint, agentKey.Fingerprint, relay.Sockets, relay.Factory.CreateClient());
         await Assert.ThrowsExactlyAsync<IOException>(() => offline.ConnectAsync(CancellationToken.None).AsTask());
 
-        await using var host = new RelayHostLink(relay.Endpoint(topology.Host.Token), EchoAsync, relay.Sockets);
-        host.Start();
-        await relay.WaitOnlineAsync(topology.OwnerToken, topology.Host.Device.Id);
-        using var stranger = new RelayStreamConnector(relay.Endpoint(topology.Client.Token), Guid.NewGuid(), relay.Sockets, relay.Factory.CreateClient());
-        var denied = await Assert.ThrowsExactlyAsync<ProcBridge.Protocol.ProtocolStatusException>(() => stranger.ConnectAsync(CancellationToken.None).AsTask());
-        Assert.AreEqual(ProcBridge.Protocol.Enums.NtStatus.AccessDenied, denied.Status);
-    }
-
-    [TestMethod]
-    public async Task RevokingTheGrant_CutsOpenLanes()
-    {
-        await using var relay = InProcessRelay.Start();
-        RelayTopology topology = await relay.CreateTopologyAsync("echo");
-        await using var host = new RelayHostLink(relay.Endpoint(topology.Host.Token), EchoAsync, relay.Sockets);
-        host.Start();
-        await relay.WaitOnlineAsync(topology.OwnerToken, topology.Host.Device.Id);
-        using var connector = new RelayStreamConnector(relay.Endpoint(topology.Client.Token), topology.ShareId, relay.Sockets, relay.Factory.CreateClient());
-        await using Stream lane = await connector.ConnectAsync(CancellationToken.None);
-        await AssertEchoAsync(lane, 1);
-
-        await relay.Api(topology.OwnerToken).Shares.RevokeGrantAsync(topology.ShareId, topology.Client.Device.Id);
-
-        using var timeout = new CancellationTokenSource(Timeout);
-        try
-        {
-            Assert.AreEqual(0, await lane.ReadAsync(new byte[16], timeout.Token));
-        }
-        catch (IOException)
-        {
-            // Aborted rather than closed: also cut.
-        }
+        // Another host online does not answer for this HostId.
+        using var otherKey = IdentityKey.Generate();
+        await using var other = new RelayHostLink(relay.Endpoint, otherKey, EchoAsync, relay.Sockets);
+        other.Start();
+        await relay.WaitOnlineAsync(otherKey.Fingerprint);
+        await Assert.ThrowsExactlyAsync<IOException>(() => offline.ConnectAsync(CancellationToken.None).AsTask());
     }
 
     [TestMethod]
     public void CommandLine_Relay_IsParsed()
     {
-        Guid share = Guid.NewGuid();
         LauncherOptions options = LauncherCommandLine.Parse(
-            ["--relay", "https://relay.example/", "--relay-token", "pbd_x", "--relay-share", share.ToString(), "--agent-fingerprint", "AAAA",
+            ["--relay", "https://relay.example/", "--agent-fingerprint", "AAAA",
              "--share", "src", "--map", @"V:\a", "", "--", "cmd.exe"]);
 
         Assert.IsNotNull(options.Relay);
-        Assert.AreEqual(share, options.Relay.ShareId);
-        Assert.AreEqual("pbd_x", options.Relay.DeviceToken);
+        Assert.AreEqual(new Uri("https://relay.example/"), options.Relay.Url);
         Assert.AreEqual("relay.example", options.AgentHost);
         Assert.AreEqual("AAAA", options.AgentFingerprint);
     }
 
     [TestMethod]
-    [DataRow("--relay-share")]
     [DataRow("--agent-fingerprint")]
     [DataRow("--plaintext")]
-    public void CommandLine_Relay_RefusesIncompleteOrPlaintext(string change)
+    [DataRow("--relay-token")]
+    public void CommandLine_Relay_RefusesIncompletePlaintextOrOldOptions(string change)
     {
-        var args = new List<string> { "--relay", "https://relay.example/", "--relay-token", "pbd_x", "--relay-share", Guid.NewGuid().ToString(), "--agent-fingerprint", "AAAA" };
+        var args = new List<string> { "--relay", "https://relay.example/", "--agent-fingerprint", "AAAA" };
         int at = args.IndexOf(change);
         if (at >= 0)
             args.RemoveRange(at, 2);
+        else if (change == "--relay-token")
+            args.AddRange([change, "pbd_x"]);
         else
             args.Add(change);
         args.AddRange(["--share", "src", "--map", @"V:\a", "", "--", "cmd.exe"]);

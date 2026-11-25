@@ -1,17 +1,19 @@
 using System.Net.WebSockets;
+using System.Text;
 
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
 
 using Newtonsoft.Json;
 
+using ProcBridge.Crypto.Identity;
+using ProcBridge.Crypto.Noise;
 using ProcBridge.Relay.Integration.Api.Implements;
 using ProcBridge.Relay.Integration.Api.Interfaces;
+using ProcBridge.Relay.Services.Tunnel;
 using ProcBridge.Relay.Shared.Json;
-using ProcBridge.Relay.Testing.Infrastructure;
 using ProcBridge.Relay.Shared.Tunnel;
-using ProcBridge.Relay.ViewModels.Accounts;
-using ProcBridge.Relay.ViewModels.Devices;
-using ProcBridge.Relay.ViewModels.Shares;
+using ProcBridge.Relay.Testing.Infrastructure;
 using ProcBridge.Relay.ViewModels.Tunnel;
 
 namespace ProcBridge.Relay.Tests.Infrastructure;
@@ -24,41 +26,41 @@ public sealed class RelayTestClient
 
     public RelayTestClient(RelayApiFactory factory) => _factory = factory;
 
-    public IRelayApi NewApi(string? token = null)
+    /// <param name="remoteIp">Address the relay sees for this caller (test header), null for the test server's default.</param>
+    public IRelayApi NewApi(string? remoteIp = null)
     {
-        var api = new RelayApiImplement(_factory.CreateClient());
-        api.SetBearerToken(token);
-        return api;
+        var http = _factory.CreateClient();
+        if (remoteIp is not null)
+            http.DefaultRequestHeaders.Add(TestRemoteAddressStartupFilter.HeaderName, remoteIp);
+        return new RelayApiImplement(http);
     }
 
-    /// <summary>Registers and signs in a fresh account; returns its session token.</summary>
-    public async Task<string> NewAccountAsync(string prefix)
+    public bool IsOnline(string hostId) => _factory.Services.GetRequiredService<TunnelHub>().IsOnline(hostId);
+
+    /// <summary>
+    /// Host side: opens the control channel, proves <paramref name="identity"/> with the Noise XX handshake and returns
+    /// the socket with the HostId the relay registered (its <c>hostRegistered</c> message).
+    /// </summary>
+    public async Task<(WebSocket Control, string HostId)> ConnectControlAsync(IdentityKey identity, string? remoteIp = null)
     {
-        var userName = prefix + Guid.NewGuid().ToString("N")[..8];
-        var api = NewApi();
-        await api.Accounts.RegisterAsync(new RegisterAccountRequestVM { UserName = userName, Password = "matkhau-dai-du" });
-        return (await api.Accounts.LoginAsync(new LoginRequestVM { UserName = userName, Password = "matkhau-dai-du" })).Token;
+        var socket = await OpenControlSocketAsync(remoteIp);
+        using var handshake = NoiseHandshake.CreatePairing(isInitiator: true, identity, Encoding.ASCII.GetBytes(TunnelProtocol.ControlPrologue));
+        using var cts = new CancellationTokenSource(Timeout);
+        await socket.SendAsync(handshake.WriteMessage([]), WebSocketMessageType.Binary, true, cts.Token);
+        handshake.ReadMessage(await ReceiveAsync(socket));
+        await socket.SendAsync(handshake.WriteMessage([]), WebSocketMessageType.Binary, true, cts.Token);
+        var registered = JsonConvert.DeserializeObject<TunnelHostRegisteredMessageVM>(
+            await ReceiveControlMessageAsync(socket, TunnelProtocol.HostRegisteredMessage), RelayJsonSettings.Create())!;
+        return (socket, registered.HostId);
     }
 
-    public Task<DeviceRegisteredVM> NewDeviceAsync(string accountToken, string name)
-        => NewApi(accountToken).Devices.RegisterAsync(new RegisterDeviceRequestVM { Name = name, PublicKey = Convert.ToBase64String(Guid.NewGuid().ToByteArray()) });
-
-    /// <summary>Host side: opens the control channel and waits until the relay reports the device online.</summary>
-    public async Task<WebSocket> ConnectControlAsync(string accountToken, DeviceRegisteredVM host)
+    /// <summary>A control WebSocket without any handshake (tests of refusals).</summary>
+    public async Task<WebSocket> OpenControlSocketAsync(string? remoteIp = null)
     {
         var client = _factory.Server.CreateWebSocketClient();
-        client.ConfigureRequest = r => r.Headers.Authorization = "Bearer " + host.Token;
-        var socket = await client.ConnectAsync(new Uri("ws://localhost" + TunnelProtocol.ControlPath), CancellationToken.None);
-
-        var owner = NewApi(accountToken);
-        var deadline = DateTime.UtcNow + Timeout;
-        while (!(await owner.Devices.GetAllAsync()).Single(d => d.Id == host.Device.Id).IsOnline)
-        {
-            if (DateTime.UtcNow > deadline)
-                Assert.Fail("Máy chủ chia sẻ không lên trạng thái online.");
-            await Task.Delay(20);
-        }
-        return socket;
+        if (remoteIp is not null)
+            client.ConfigureRequest = r => r.Headers[TestRemoteAddressStartupFilter.HeaderName] = remoteIp;
+        return await client.ConnectAsync(new Uri("ws://localhost" + TunnelProtocol.ControlPath), CancellationToken.None);
     }
 
     /// <summary>Reads control messages until one of type <paramref name="type"/> arrives; returns its JSON.</summary>
@@ -70,28 +72,26 @@ public sealed class RelayTestClient
         {
             var result = await control.ReceiveAsync(buffer, cts.Token);
             Assert.AreEqual(WebSocketMessageType.Text, result.MessageType);
-            var text = System.Text.Encoding.UTF8.GetString(buffer, 0, result.Count);
+            var text = Encoding.UTF8.GetString(buffer, 0, result.Count);
             if (Newtonsoft.Json.Linq.JObject.Parse(text).Value<string>("type") == type)
                 return text;
         }
     }
 
-    public async Task<TunnelSessionOpenedMessageVM> ReceiveControlMessageAsync(WebSocket control)
-    {
-        var buffer = new byte[8192];
-        using var cts = new CancellationTokenSource(Timeout);
-        var result = await control.ReceiveAsync(buffer, cts.Token);
-        Assert.AreEqual(WebSocketMessageType.Text, result.MessageType);
-        Assert.IsTrue(result.EndOfMessage);
-        var text = System.Text.Encoding.UTF8.GetString(buffer, 0, result.Count);
-        return JsonConvert.DeserializeObject<TunnelSessionOpenedMessageVM>(text, RelayJsonSettings.Create())!;
-    }
+    public static async Task<TunnelSessionOpenedMessageVM> ReceiveSessionOpenedAsync(WebSocket control)
+        => JsonConvert.DeserializeObject<TunnelSessionOpenedMessageVM>(
+            await ReceiveControlMessageAsync(control, TunnelProtocol.SessionOpenedMessage), RelayJsonSettings.Create())!;
 
     /// <summary>Opens a data lane with the ticket in the Authorization header (the way real peers do).</summary>
-    public Task<WebSocket> ConnectLaneAsync(Guid sessionId, string ticket, int lane)
+    public Task<WebSocket> ConnectLaneAsync(Guid sessionId, string ticket, int lane, string? remoteIp = null)
     {
         var client = _factory.Server.CreateWebSocketClient();
-        client.ConfigureRequest = r => r.Headers.Authorization = "Bearer " + ticket;
+        client.ConfigureRequest = r =>
+        {
+            r.Headers.Authorization = "Bearer " + ticket;
+            if (remoteIp is not null)
+                r.Headers[TestRemoteAddressStartupFilter.HeaderName] = remoteIp;
+        };
         return client.ConnectAsync(
             new Uri($"ws://localhost{TunnelProtocol.DataPath}?{TunnelProtocol.SessionIdQuery}={sessionId}&{TunnelProtocol.LaneQuery}={lane}"),
             CancellationToken.None);
@@ -122,6 +122,28 @@ public sealed class RelayTestClient
             stream.Write(buffer, 0, result.Count);
             if (result.EndOfMessage)
                 return stream.ToArray();
+        }
+    }
+
+    /// <summary>The next receive ends (close frame or broken socket) instead of waiting.</summary>
+    public static async Task AssertClosedAsync(WebSocket socket)
+    {
+        using var cts = new CancellationTokenSource(Timeout);
+        try
+        {
+            while (true)
+            {
+                var result = await socket.ReceiveAsync(new byte[1024], cts.Token);
+                if (result.MessageType == WebSocketMessageType.Close)
+                    return;
+            }
+        }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested)
+        {
+            Assert.Fail("Kết nối không bị đóng.");
+        }
+        catch (Exception ex) when (ex is WebSocketException or IOException or ObjectDisposedException or OperationCanceledException)
+        {
         }
     }
 }

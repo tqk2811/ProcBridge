@@ -3,6 +3,7 @@ using ProcBridge.Agent;
 using ProcBridge.Agent.Models;
 using ProcBridge.Broker;
 using ProcBridge.Broker.Models;
+using ProcBridge.Crypto.Identity;
 using ProcBridge.HookIpc;
 using ProcBridge.Tests.Native.Models;
 using ProcBridge.Tests.Relay;
@@ -12,8 +13,9 @@ namespace ProcBridge.Tests.Native;
 
 /// <summary>
 /// M6 set-up on one machine: like <see cref="RemoteSession"/>, but the Broker reaches the Agent ONLY through an
-/// in-process relay. The Agent keeps the relay control channel with its device token, the Broker opens tunnel
-/// sessions with its own; every pool connection is a relay lane with the Noise handshake inside it. The Agent's TCP
+/// in-process relay. The Agent keeps the relay control channel, proving its HostId with its identity key; the Broker
+/// opens tunnel sessions to that HostId (no account anywhere); every pool connection is a relay lane with the Noise
+/// handshake inside it. The Agent's TCP
 /// listener is bound to loopback but the Broker is never told its port.
 /// </summary>
 internal sealed class RelaySession : IAsyncDisposable
@@ -42,16 +44,15 @@ internal sealed class RelaySession : IAsyncDisposable
     public static async Task<RelaySession> StartAsync(HookSandbox sandbox)
     {
         InProcessRelay relay = InProcessRelay.Start();
-        RelayTopology topology = await relay.CreateTopologyAsync("share");
         var peers = new SecurePeers();
         var agent = new AgentServer([new AgentShare("share", sandbox.RealRoot)], new AgentOptions
         {
             BindAddress = IPAddress.Loopback,
             Port = 0,
-            Relay = new AgentRelayOptions { Endpoint = relay.Endpoint(topology.Host.Token), Sockets = relay.Sockets },
+            Relay = new AgentRelayOptions { Endpoint = relay.Endpoint, Sockets = relay.Sockets },
         }, peers.Agent());
         agent.Start();
-        await relay.WaitOnlineAsync(topology.OwnerToken, topology.Host.Device.Id);
+        await relay.WaitOnlineAsync(KeyFingerprint.Compute(peers.Broker.AgentPublicKey));
 
         string sessionId = HookIpcProtocol.NewSessionId();
         BrokerHost broker = BrokerHost.Start(new BrokerOptions
@@ -66,8 +67,7 @@ internal sealed class RelaySession : IAsyncDisposable
             WriteQueueRoot = Path.Combine(sandbox.BaseDirectory, "queue"),
             Relay = new BrokerRelayOptions
             {
-                Endpoint = relay.Endpoint(topology.Client.Token),
-                ShareId = topology.ShareId,
+                Endpoint = relay.Endpoint,
                 Sockets = relay.Sockets,
                 Http = relay.Factory.CreateClient(),
             },

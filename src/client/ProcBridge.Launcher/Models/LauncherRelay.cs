@@ -1,8 +1,10 @@
 namespace ProcBridge.Launcher.Models;
 
-/// <summary>Relay connection of a Launcher run (plan 8.2): relay URL, this machine's device token and the relay share id.</summary>
-public sealed record LauncherRelay(Uri Url, string DeviceToken, Guid ShareId)
+/// <summary>
+/// Relay connection of a Launcher run (plan 8.2): only the relay URL. The session goes to the HostId of the paired Agent
+/// (its key fingerprint); the relay has no accounts.
+/// </summary>
+public sealed record LauncherRelay(Uri Url)
 {
-    /// <summary>Does not print the token.</summary>
-    public override string ToString() => $"{Url} share {ShareId}";
+    public override string ToString() => Url.ToString();
 }

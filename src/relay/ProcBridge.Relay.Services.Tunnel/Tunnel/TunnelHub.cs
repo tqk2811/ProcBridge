@@ -6,8 +6,8 @@ using Microsoft.Extensions.Options;
 
 using Newtonsoft.Json;
 
+using ProcBridge.Crypto.Identity;
 using ProcBridge.Relay.Services.Common.Common.Errors;
-using ProcBridge.Relay.Services.Common.Presence.Interfaces;
 using ProcBridge.Relay.Services.Common.Security;
 using ProcBridge.Relay.Services.Tunnel.Enums;
 using ProcBridge.Relay.Services.Tunnel.Interfaces;
@@ -20,20 +20,25 @@ using ProcBridge.Relay.ViewModels.Tunnel;
 namespace ProcBridge.Relay.Services.Tunnel;
 
 /// <summary>
-/// In-memory tunnel registry (singleton). State lives only in this process: a relay restart drops every session and
-/// control channel, and peers reconnect. Running several relay instances needs a shared registry (backlog).
+/// In-memory tunnel registry (singleton). The relay keeps no accounts and stores nothing: a host is known only while
+/// its control channel is open, under the HostId it proved with a Noise handshake. A relay restart drops every session
+/// and control channel, and peers reconnect. Owns its relay identity key (fresh per process).
 /// </summary>
-public sealed class TunnelHub : ITunnelHub, IDevicePresence, ITunnelTerminator
+public sealed class TunnelHub : ITunnelHub, IDisposable
 {
     private const string TicketPrefix = RelayAuth.TicketPrefix;
 
-    private readonly ConcurrentDictionary<Guid, TunnelControlChannel> _controls = new();
+    private readonly ConcurrentDictionary<string, TunnelControlChannel> _controls = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<Guid, TunnelSession> _sessions = new();
+    private readonly object _countLock = new();
+    private readonly Dictionary<string, int> _controlsPerAddress = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, int> _lanesPerAddress = new(StringComparer.Ordinal);
     private readonly JsonSerializerSettings _json = RelayJsonSettings.Create();
     private readonly TunnelOptions _options;
     private readonly TimeProvider _time;
     private readonly ILogger<TunnelHub> _logger;
-    private long _revocationEpoch;
+    // Only gives hosts a key to run the handshake against; nobody pins it, so a new one per process is fine.
+    private readonly IdentityKey _relayKey = IdentityKey.Generate();
 
     public TunnelHub(IOptions<TunnelOptions> options, TimeProvider time, ILogger<TunnelHub> logger)
     {
@@ -44,31 +49,63 @@ public sealed class TunnelHub : ITunnelHub, IDevicePresence, ITunnelTerminator
 
     private DateTime Now => _time.GetUtcNow().UtcDateTime;
 
-    public long RevocationEpoch => Interlocked.Read(ref _revocationEpoch);
+    /// <summary>True while a host with this HostId has a proven control channel (tests, diagnostics).</summary>
+    public bool IsOnline(string hostId) => _controls.ContainsKey(hostId);
 
-    public bool IsOnline(Guid deviceId) => _controls.ContainsKey(deviceId);
-
-    public async Task RunControlChannelAsync(Guid deviceId, WebSocket socket, CancellationToken cancellationToken, TunnelAccessCheck? access = null)
+    public bool CanOpenControlChannel(string clientAddress)
     {
-        var channel = new TunnelControlChannel(socket);
+        lock (_countLock)
+            return _controlsPerAddress.GetValueOrDefault(clientAddress) < _options.MaxControlChannelsPerAddress;
+    }
+
+    public async Task RunControlChannelAsync(WebSocket socket, string clientAddress, CancellationToken cancellationToken)
+    {
+        if (!TryAcquire(_controlsPerAddress, clientAddress, _options.MaxControlChannelsPerAddress))
+        {
+            await CloseQuietlyAsync(socket, WebSocketCloseStatus.PolicyViolation, "too many control channels");
+            return;
+        }
+        try
+        {
+            var channel = new TunnelControlChannel(socket);
+            string hostId;
+            try
+            {
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeout.CancelAfter(_options.ControlHandshakeTimeout);
+                byte[] hostKey = await channel.ProveHostKeyAsync(_relayKey, timeout.Token);
+                hostId = KeyFingerprint.Compute(hostKey);
+            }
+            catch (Exception ex) when (ex is InvalidDataException or WebSocketException or OperationCanceledException)
+            {
+                _logger.LogInformation("Kênh điều khiển từ {Address} không chứng minh được khoá: {Reason}", clientAddress, ex.Message);
+                await CloseQuietlyAsync(socket, WebSocketCloseStatus.PolicyViolation, "handshake failed");
+                return;
+            }
+
+            await RunProvenChannelAsync(hostId, channel, cancellationToken);
+        }
+        finally
+        {
+            Release(_controlsPerAddress, clientAddress);
+        }
+    }
+
+    private async Task RunProvenChannelAsync(string hostId, TunnelControlChannel channel, CancellationToken cancellationToken)
+    {
         TunnelControlChannel? replaced = null;
-        _controls.AddOrUpdate(deviceId, channel, (_, old) =>
+        _controls.AddOrUpdate(hostId, channel, (_, old) =>
         {
             replaced = old;
             return channel;
         });
+        // Only the owner of the key can get here, so the newer channel is the same host reconnecting.
         replaced?.Abort();
-        _logger.LogInformation("Máy {DeviceId} đã mở kênh điều khiển tunnel.", deviceId);
+        _logger.LogInformation("Máy {HostId} đã mở kênh điều khiển tunnel.", hostId);
         try
         {
-            // A revocation may have run between the caller's check and the registration above (it cut the old
-            // entries, not this one): ask again and drop the channel when the device lost access meanwhile.
-            if (!await StillAllowedAsync(access, cancellationToken))
-            {
-                _logger.LogInformation("Máy {DeviceId} bị thu hồi khi đang mở kênh điều khiển: đóng kênh.", deviceId);
-                channel.Abort();
-                return;
-            }
+            var registered = new TunnelHostRegisteredMessageVM(TunnelProtocol.HostRegisteredMessage, hostId);
+            await channel.SendTextAsync(JsonConvert.SerializeObject(registered, _json), cancellationToken);
             await channel.RunAsync(cancellationToken);
         }
         catch (Exception ex) when (ex is WebSocketException or OperationCanceledException)
@@ -77,60 +114,47 @@ public sealed class TunnelHub : ITunnelHub, IDevicePresence, ITunnelTerminator
         }
         finally
         {
-            _controls.TryRemove(new KeyValuePair<Guid, TunnelControlChannel>(deviceId, channel));
-            _logger.LogInformation("Máy {DeviceId} đã đóng kênh điều khiển tunnel.", deviceId);
+            _controls.TryRemove(new KeyValuePair<string, TunnelControlChannel>(hostId, channel));
+            _logger.LogInformation("Máy {HostId} đã đóng kênh điều khiển tunnel.", hostId);
         }
     }
 
-    public async Task<TunnelSessionVM> OpenSessionAsync(
-        Guid clientDeviceId,
-        string? clientPublicKey,
-        Guid shareId,
-        Guid hostDeviceId,
-        string? hostPublicKey,
-        CancellationToken cancellationToken,
-        TunnelAccessCheck? access = null)
+    public async Task<TunnelSessionVM> OpenSessionAsync(string hostId, string clientAddress, CancellationToken cancellationToken)
     {
         PurgeDeadSessions();
-        if (!_controls.TryGetValue(hostDeviceId, out var control))
-            throw ServiceException.Conflict(RelayErrors.DeviceOffline, "Máy chia sẻ đang không kết nối relay.");
+        if (!_controls.TryGetValue(hostId, out var control))
+            throw ServiceException.Conflict(RelayErrors.HostOffline, "Máy chia sẻ đang không kết nối relay.");
 
         var expiresAt = Now + _options.SessionLifetime;
-        var clientTicket = SecretTokens.Create(TicketPrefix);
-        var hostTicket = SecretTokens.Create(TicketPrefix);
-        var session = new TunnelSession(Guid.NewGuid(), shareId, clientDeviceId, hostDeviceId, clientTicket, hostTicket, expiresAt);
-        _sessions[session.Id] = session;
-        // Same race as on the control channel: a revocation between the caller's check and the line above missed
-        // this session, so ask again before telling the host about it.
-        if (!await StillAllowedAsync(access, cancellationToken))
+        var session = new TunnelSession(
+            Guid.NewGuid(), hostId, clientAddress, SecretTokens.Create(TicketPrefix), SecretTokens.Create(TicketPrefix), expiresAt);
+        lock (_countLock)
         {
-            AbortSession(session);
-            throw ServiceException.Forbidden(RelayErrors.ShareAccessDenied, "Máy này không được dùng chia sẻ đó.");
+            // Under the lock so two openers cannot both pass the check; dead sessions were purged above.
+            var now = Now;
+            if (_sessions.Values.Count(x => x.HostId == hostId && !x.IsDead(now)) >= _options.MaxSessionsPerHost)
+                throw ServiceException.Conflict(RelayErrors.TooManySessions, "Máy chia sẻ đang có quá nhiều phiên.");
+            if (_sessions.Values.Count(x => x.ClientAddress == clientAddress && !x.IsDead(now)) >= _options.MaxSessionsPerAddress)
+                throw ServiceException.Conflict(RelayErrors.TooManySessions, "Địa chỉ này đang mở quá nhiều phiên.");
+            _sessions[session.Id] = session;
         }
 
-        var message = new TunnelSessionOpenedMessageVM(
-            TunnelProtocol.SessionOpenedMessage, session.Id, hostTicket, expiresAt, shareId, clientDeviceId, clientPublicKey);
+        var message = new TunnelSessionOpenedMessageVM(TunnelProtocol.SessionOpenedMessage, session.Id, session.HostTicket, expiresAt);
         try
         {
             await control.SendTextAsync(JsonConvert.SerializeObject(message, _json), cancellationToken);
         }
         catch (Exception ex) when (ex is WebSocketException or ObjectDisposedException or InvalidOperationException)
         {
-            _sessions.TryRemove(session.Id, out _);
-            throw ServiceException.Conflict(RelayErrors.DeviceOffline, "Máy chia sẻ đang không kết nối relay.");
+            AbortSession(session);
+            throw ServiceException.Conflict(RelayErrors.HostOffline, "Máy chia sẻ đang không kết nối relay.");
         }
 
-        _logger.LogInformation(
-            "Mở phiên tunnel {SessionId}: máy {ClientDeviceId} -> chia sẻ {ShareId} trên máy {HostDeviceId}.",
-            session.Id, clientDeviceId, shareId, hostDeviceId);
-        return new TunnelSessionVM(session.Id, clientTicket, expiresAt, hostDeviceId, hostPublicKey);
+        _logger.LogInformation("Mở phiên tunnel {SessionId} từ {Address} tới máy {HostId}.", session.Id, clientAddress, hostId);
+        return new TunnelSessionVM(session.Id, session.ClientTicket, expiresAt);
     }
 
-    /// <summary>True when nothing was revoked since <paramref name="access"/> was captured, or the permission still holds.</summary>
-    private async Task<bool> StillAllowedAsync(TunnelAccessCheck? access, CancellationToken cancellationToken)
-        => access is null || access.Epoch == RevocationEpoch || await access.StillAllowed(cancellationToken);
-
-    public TunnelLaneReservation ReserveLane(Guid sessionId, string ticket, int lane)
+    public TunnelLaneReservation ReserveLane(Guid sessionId, string ticket, int lane, string clientAddress)
     {
         PurgeDeadSessions();
         if (!_sessions.TryGetValue(sessionId, out var session) || !session.AcceptsLanes(Now))
@@ -139,17 +163,23 @@ public sealed class TunnelHub : ITunnelHub, IDevicePresence, ITunnelTerminator
             ?? throw ServiceException.NotFound(RelayErrors.TunnelSessionNotFound, "Phiên tunnel không tồn tại hoặc đã hết hạn.");
         if (lane < 0 || lane >= TunnelProtocol.MaxLanes)
             throw ServiceException.BadRequest(RelayErrors.TunnelLaneInvalid, $"Lane phải trong khoảng 0-{TunnelProtocol.MaxLanes - 1}.");
-        var pair = session.TryReserve(lane, side)
-            ?? throw ServiceException.Conflict(RelayErrors.TunnelLaneBusy, "Lane này đã có kết nối ở phía đó.");
+        if (!TryAcquire(_lanesPerAddress, clientAddress, _options.MaxLanesPerAddress))
+            throw ServiceException.Conflict(RelayErrors.TooManyLanes, "Địa chỉ này đang mở quá nhiều lane.");
+        var pair = session.TryReserve(lane, side);
+        if (pair is null)
+        {
+            Release(_lanesPerAddress, clientAddress);
+            throw ServiceException.Conflict(RelayErrors.TunnelLaneBusy, "Lane này đã có kết nối ở phía đó.");
+        }
         // The host does not know which lanes the client will open: ask it for this one.
         if (side == TunnelSide.Client && !pair.IsReserved(TunnelSide.Host))
             _ = RequestHostLaneAsync(session, lane);
-        return new TunnelLaneReservation(session, pair, side, lane);
+        return new TunnelLaneReservation(session, pair, side, lane, clientAddress);
     }
 
     private async Task RequestHostLaneAsync(TunnelSession session, int lane)
     {
-        if (!_controls.TryGetValue(session.HostDeviceId, out var control))
+        if (!_controls.TryGetValue(session.HostId, out var control))
             return; // The client lane times out waiting for its partner.
         var message = new TunnelLaneRequestedMessageVM(TunnelProtocol.LaneRequestedMessage, session.Id, lane);
         try
@@ -163,31 +193,6 @@ public sealed class TunnelHub : ITunnelHub, IDevicePresence, ITunnelTerminator
         }
     }
 
-    public void DisconnectDevice(Guid deviceId)
-    {
-        // Bump first: an opener that registered after the sweeps below sees the epoch moved and re-checks.
-        Interlocked.Increment(ref _revocationEpoch);
-        if (_controls.TryRemove(deviceId, out var control))
-            control.Abort();
-        foreach (var session in _sessions.Values)
-        {
-            if (session.ClientDeviceId == deviceId || session.HostDeviceId == deviceId)
-                AbortSession(session);
-        }
-        _logger.LogInformation("Đã cắt kết nối tunnel của máy {DeviceId}.", deviceId);
-    }
-
-    public void DisconnectShare(Guid shareId, Guid? clientDeviceId = null)
-    {
-        Interlocked.Increment(ref _revocationEpoch);
-        foreach (var session in _sessions.Values)
-        {
-            if (session.ShareId == shareId && (clientDeviceId is null || session.ClientDeviceId == clientDeviceId))
-                AbortSession(session);
-        }
-        _logger.LogInformation("Đã cắt các phiên tunnel tới chia sẻ {ShareId}.", shareId);
-    }
-
     private void AbortSession(TunnelSession session)
     {
         session.AbortAll();
@@ -197,7 +202,14 @@ public sealed class TunnelHub : ITunnelHub, IDevicePresence, ITunnelTerminator
     public void ReleaseLane(TunnelLaneReservation reservation)
     {
         reservation.Pair.Abort();
+        FinishLane(reservation);
+    }
+
+    private void FinishLane(TunnelLaneReservation reservation)
+    {
         reservation.Session.RemoveLane(reservation.Lane, reservation.Pair, Now, _options.SessionLifetime);
+        if (reservation.TryFinish())
+            Release(_lanesPerAddress, reservation.ClientAddress);
     }
 
     public async Task RunLaneAsync(TunnelLaneReservation reservation, WebSocket socket, CancellationToken cancellationToken)
@@ -214,7 +226,7 @@ public sealed class TunnelHub : ITunnelHub, IDevicePresence, ITunnelTerminator
             }
             catch (OperationCanceledException) when (pair.AbortToken.IsCancellationRequested)
             {
-                // Revoked while waiting for the other end.
+                // Torn down while waiting for the other end.
                 socket.Abort();
                 return;
             }
@@ -254,7 +266,7 @@ public sealed class TunnelHub : ITunnelHub, IDevicePresence, ITunnelTerminator
         }
         finally
         {
-            reservation.Session.RemoveLane(reservation.Lane, pair, Now, _options.SessionLifetime);
+            FinishLane(reservation);
         }
     }
 
@@ -287,6 +299,31 @@ public sealed class TunnelHub : ITunnelHub, IDevicePresence, ITunnelTerminator
         }
     }
 
+    private bool TryAcquire(Dictionary<string, int> counts, string key, int max)
+    {
+        lock (_countLock)
+        {
+            int current = counts.GetValueOrDefault(key);
+            if (current >= max)
+                return false;
+            counts[key] = current + 1;
+            return true;
+        }
+    }
+
+    private void Release(Dictionary<string, int> counts, string key)
+    {
+        lock (_countLock)
+        {
+            if (!counts.TryGetValue(key, out int current))
+                return;
+            if (current <= 1)
+                counts.Remove(key);
+            else
+                counts[key] = current - 1;
+        }
+    }
+
     private void PurgeDeadSessions()
     {
         var now = Now;
@@ -296,4 +333,6 @@ public sealed class TunnelHub : ITunnelHub, IDevicePresence, ITunnelTerminator
                 _sessions.TryRemove(new KeyValuePair<Guid, TunnelSession>(id, session));
         }
     }
+
+    public void Dispose() => _relayKey.Dispose();
 }

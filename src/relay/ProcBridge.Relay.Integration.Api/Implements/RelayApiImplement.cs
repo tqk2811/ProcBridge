@@ -1,4 +1,3 @@
-using System.Net.Http.Headers;
 using System.Text;
 
 using Newtonsoft.Json;
@@ -11,31 +10,22 @@ using ProcBridge.Relay.Shared.Json;
 namespace ProcBridge.Relay.Integration.Api.Implements;
 
 /// <summary>
-/// <see cref="IRelayApi"/> over a plain <see cref="HttpClient"/>. The client is NOT owned (not disposed here). The bearer
-/// token is per instance, so do not share one instance between identities.
+/// <see cref="IRelayApi"/> over a plain <see cref="HttpClient"/>. The client is NOT owned (not disposed here). The relay
+/// has no accounts: every call is anonymous.
 /// </summary>
 public sealed partial class RelayApiImplement : IRelayApi
 {
     private readonly HttpClient _http;
     private readonly JsonSerializerSettings _json = RelayJsonSettings.Create();
-    private string? _bearerToken;
 
     public RelayApiImplement(HttpClient http)
     {
         _http = http;
-        Accounts = new AccountsControllerImplement(this);
-        Devices = new DevicesControllerImplement(this);
-        Shares = new SharesControllerImplement(this);
         Tunnel = new TunnelControllerImplement(this);
     }
 
     public Uri? BaseAddress => _http.BaseAddress;
-    public IRelayAccountsController Accounts { get; }
-    public IRelayDevicesController Devices { get; }
-    public IRelaySharesController Shares { get; }
     public IRelayTunnelController Tunnel { get; }
-
-    public void SetBearerToken(string? token) => _bearerToken = token;
 
     private async Task<T> SendAsync<T>(HttpMethod method, string url, object? body, CancellationToken cancellationToken)
     {
@@ -46,14 +36,9 @@ public sealed partial class RelayApiImplement : IRelayApi
         return envelope.Data;
     }
 
-    private async Task SendVoidAsync(HttpMethod method, string url, object? body, CancellationToken cancellationToken)
-        => await SendRawAsync(method, url, body, cancellationToken);
-
     private async Task<string> SendRawAsync(HttpMethod method, string url, object? body, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(method, url);
-        if (_bearerToken is not null)
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _bearerToken);
         if (body is not null)
             request.Content = new StringContent(JsonConvert.SerializeObject(body, _json), Encoding.UTF8, "application/json");
 

@@ -7,7 +7,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\ProcBridge.Relay.Services\ProcBridge.Relay.Services.csproj" />
-    <ProjectReference Include="..\ProcBridge.Relay.Repositories\ProcBridge.Relay.Repositories.csproj" />
     <ProjectReference Include="..\ProcBridge.Relay.Integration.Api\ProcBridge.Relay.Integration.Api.csproj" />
   </ItemGroup>
 </Project>

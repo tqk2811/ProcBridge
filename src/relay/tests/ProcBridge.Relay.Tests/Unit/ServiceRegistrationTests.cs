@@ -30,10 +30,11 @@ public sealed class ServiceRegistrationTests
             .ToArray();
         var services = new Microsoft.Extensions.DependencyInjection.ServiceCollection();
         services.AddApplicationServices();
-        // Each feature registers at least one service from its own assembly.
-        foreach (var assembly in AppServiceCollectionExtensions.FeatureAssemblies)
+        // Each feature registers at least one service from its own assembly; Common only holds static helpers.
+        var common = typeof(ProcBridge.Relay.Services.Common.CommonAssemblyMarker).Assembly;
+        foreach (var assembly in AppServiceCollectionExtensions.FeatureAssemblies.Where(a => a != common))
             Assert.IsTrue(services.Any(d => d.ImplementationType?.Assembly == assembly || d.ServiceType.Assembly == assembly),
                 $"{assembly.GetName().Name} chưa được facade đăng ký.");
-        Assert.HasCount(AppServiceCollectionExtensions.FeatureAssemblies.Length, addMethods);
+        Assert.HasCount(AppServiceCollectionExtensions.FeatureAssemblies.Length - 1, addMethods);
     }
 }

@@ -40,15 +40,11 @@ public sealed class LaunchOptionsFactory
         LauncherRelay? relay = null;
         if (profile.UseRelay)
         {
-            string token = RelayTokenProtection.Unprotect(profile.RelayTokenProtected);
-            if (!Uri.TryCreate(profile.RelayUrl.Trim(), UriKind.Absolute, out Uri? relayUrl) || relayUrl.Scheme is not ("https" or "http"))
+            // HostId comes from the paired machine (its fingerprint); only the relay URL is asked for.
+            if (Uri.TryCreate(profile.RelayUrl.Trim(), UriKind.Absolute, out Uri? relayUrl) && relayUrl.Scheme is "https" or "http")
+                relay = new LauncherRelay(relayUrl);
+            else
                 errors.Add("Địa chỉ relay phải là URL http(s), vd https://relay.example.com/.");
-            if (!Guid.TryParse(profile.RelayShareId.Trim(), out Guid relayShare))
-                errors.Add("Mã chia sẻ trên relay phải là GUID (procbridge-relay device shares).");
-            if (token.Length == 0)
-                errors.Add("Chưa nhập token máy của relay.");
-            if (relayUrl is not null && relayShare != Guid.Empty && token.Length > 0)
-                relay = new LauncherRelay(relayUrl, token, relayShare);
         }
 
         var mappings = new List<VirtualMapping>();

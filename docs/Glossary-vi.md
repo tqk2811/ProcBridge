@@ -36,8 +36,8 @@ Chương trình chạy trên máy B, phục vụ thư mục thật cho Broker.
 
 ## Relay
 
-Server ASP.NET trên internet. Máy A và máy B cùng kết nối ra Relay để khỏi phải mở port; Relay chỉ
-chuyển tiếp dữ liệu đã mã hoá.
+Server ASP.NET trên internet, tuỳ chọn (LAN hoặc port public thì nối thẳng). Máy A và máy B cùng kết nối ra Relay
+để khỏi phải mở port; Relay không có tài khoản, không lưu gì, chỉ ghép lane và chuyển tiếp dữ liệu đã mã hoá.
 
 ## Mã hoá đầu cuối (E2E)
 
@@ -62,3 +62,9 @@ Chạy cùng một kịch bản trên hai môi trường (thư mục thật và 
 
 Một kết nối WebSocket dữ liệu trong một phiên tunnel qua Relay. Mỗi phiên có nhiều lane song song; lane cùng
 số của máy A và máy B được Relay ghép cặp và chép nguyên khung giữa hai đầu.
+
+## HostId (relay)
+
+Tên máy B trên Relay: vân tay khoá định danh Noise của nó. Máy B chứng minh sở hữu khoá bằng một bắt tay Noise
+ngắn với Relay trên kênh điều khiển, nên không ai đăng ký được HostId của máy khác; máy A mở phiên theo HostId lấy
+từ máy đã ghép cặp.

@@ -25,4 +25,19 @@ public sealed class TunnelOptions
 
     /// <summary>Receive buffer per lane direction (bytes).</summary>
     public int BufferSize { get; set; } = 64 * 1024;
+
+    /// <summary>How long a host may take for the Noise handshake that proves its HostId on the control channel.</summary>
+    public TimeSpan ControlHandshakeTimeout { get; set; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>Open control channels (proven or still in the handshake) per client address.</summary>
+    public int MaxControlChannelsPerAddress { get; set; } = 16;
+
+    /// <summary>Live sessions per HostId: someone who knows a HostId cannot make that host keep unlimited tickets.</summary>
+    public int MaxSessionsPerHost { get; set; } = 64;
+
+    /// <summary>Live sessions opened from one client address.</summary>
+    public int MaxSessionsPerAddress { get; set; } = 64;
+
+    /// <summary>Open or reserved lanes per client address (both ends count).</summary>
+    public int MaxLanesPerAddress { get; set; } = 256;
 }

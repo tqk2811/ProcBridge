@@ -205,13 +205,7 @@
                                           ToolTip="Đi qua relay thay vì địa chỉ LAN của máy B; dữ liệu vẫn mã hoá đầu cuối." />
                                 <TextBlock Text="Relay" Margin="16,0,6,0" VerticalAlignment="Center" />
                                 <TextBox Text="{Binding RelayUrl, UpdateSourceTrigger=PropertyChanged}" Width="220" IsEnabled="{Binding UseRelay}"
-                                         ToolTip="Địa chỉ relay, vd https://relay.example.com/" />
-                                <TextBlock Text="Mã chia sẻ" Margin="12,0,6,0" VerticalAlignment="Center" />
-                                <TextBox Text="{Binding RelayShareId, UpdateSourceTrigger=PropertyChanged}" Width="270" IsEnabled="{Binding UseRelay}"
-                                         ToolTip="GUID chia sẻ trên relay (procbridge-relay device shares)" />
-                                <TextBlock Text="Token máy" Margin="12,0,6,0" VerticalAlignment="Center" />
-                                <TextBox Text="{Binding RelayToken, UpdateSourceTrigger=PropertyChanged}" Width="220" IsEnabled="{Binding UseRelay}"
-                                         ToolTip="Token máy (pbd_...) của máy này trên relay; lưu mã hoá DPAPI" />
+                                         ToolTip="Địa chỉ relay, vd https://relay.example.com/. Không cần tài khoản: máy B được tìm theo vân tay khoá đã ghép cặp." />
                             </WrapPanel>
                             </StackPanel>
                         </Grid>

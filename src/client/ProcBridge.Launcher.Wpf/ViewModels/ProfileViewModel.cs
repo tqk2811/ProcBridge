@@ -28,8 +28,6 @@ public sealed class ProfileViewModel : ObservableObject
     private string _architecture;
     private bool _useRelay;
     private string _relayUrl;
-    private string _relayShareId;
-    private string _relayToken;
     private FolderMappingViewModel? _selectedMapping;
 
     public ProfileViewModel(LaunchProfile profile, IUserDialogs dialogs, Func<string, PairedMachine?> findMachine)
@@ -49,8 +47,6 @@ public sealed class ProfileViewModel : ObservableObject
         _architecture = profile.Architecture;
         _useRelay = profile.UseRelay;
         _relayUrl = profile.RelayUrl;
-        _relayShareId = profile.RelayShareId;
-        _relayToken = RelayTokenProtection.Unprotect(profile.RelayTokenProtected);
         foreach (FolderMapping mapping in profile.Mappings)
             Mappings.Add(new FolderMappingViewModel(mapping));
 
@@ -157,19 +153,6 @@ public sealed class ProfileViewModel : ObservableObject
         set => SetProperty(ref _relayUrl, value);
     }
 
-    public string RelayShareId
-    {
-        get => _relayShareId;
-        set => SetProperty(ref _relayShareId, value);
-    }
-
-    /// <summary>Device token of this machine on the relay; saved DPAPI-protected.</summary>
-    public string RelayToken
-    {
-        get => _relayToken;
-        set => SetProperty(ref _relayToken, value);
-    }
-
     public FolderMappingViewModel? SelectedMapping
     {
         get => _selectedMapping;
@@ -194,8 +177,6 @@ public sealed class ProfileViewModel : ObservableObject
         Architecture = Architecture,
         UseRelay = UseRelay,
         RelayUrl = RelayUrl.Trim(),
-        RelayShareId = RelayShareId.Trim(),
-        RelayTokenProtected = RelayTokenProtection.Protect(RelayToken.Trim()),
     };
 
     private FolderMappingViewModel Add(FolderMappingViewModel mapping)

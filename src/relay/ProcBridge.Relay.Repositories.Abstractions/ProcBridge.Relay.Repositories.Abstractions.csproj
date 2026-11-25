@@ -1,9 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
-  </PropertyGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\ProcBridge.Relay.ViewModels\ProcBridge.Relay.ViewModels.csproj" />
-    <ProjectReference Include="..\ProcBridge.Relay.Shared\ProcBridge.Relay.Shared.csproj" />
-  </ItemGroup>
-</Project>

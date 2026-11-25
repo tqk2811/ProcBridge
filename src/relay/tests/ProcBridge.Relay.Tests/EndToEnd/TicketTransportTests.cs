@@ -1,6 +1,6 @@
+using ProcBridge.Crypto.Identity;
 using ProcBridge.Relay.Testing.Infrastructure;
 using ProcBridge.Relay.Tests.Infrastructure;
-using ProcBridge.Relay.ViewModels.Shares;
 using ProcBridge.Relay.ViewModels.Tunnel;
 
 namespace ProcBridge.Relay.Tests.EndToEnd;
@@ -26,13 +26,9 @@ public sealed class TicketTransportTests
     private static async Task<(RelayTestClient Relay, TunnelSessionVM Session)> OpenSessionAsync(RelayApiFactory factory)
     {
         var relay = new RelayTestClient(factory);
-        var owner = await relay.NewAccountAsync("chu");
-        var host = await relay.NewDeviceAsync(owner, "may-b");
-        var client = await relay.NewDeviceAsync(owner, "may-a");
-        var share = await relay.NewApi(owner).Shares.CreateAsync(new CreateShareRequestVM { DeviceId = host.Device.Id, Name = "src" });
-        await relay.NewApi(owner).Shares.GrantAsync(share.Id, new GrantShareRequestVM { DeviceId = client.Device.Id });
-        var control = await relay.ConnectControlAsync(owner, host);
-        var session = await relay.NewApi(client.Token).Tunnel.OpenSessionAsync(new OpenTunnelSessionRequestVM { ShareId = share.Id });
+        using var hostKey = IdentityKey.Generate();
+        var (control, hostId) = await relay.ConnectControlAsync(hostKey);
+        var session = await relay.NewApi().Tunnel.OpenSessionAsync(new OpenTunnelSessionRequestVM { HostId = hostId });
         control.Abort();
         return (relay, session);
     }

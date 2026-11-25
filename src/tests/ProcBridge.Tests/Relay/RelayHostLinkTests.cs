@@ -1,3 +1,4 @@
+using ProcBridge.Crypto.Identity;
 using ProcBridge.Relay.Shared.Tunnel;
 using ProcBridge.Transport.Relay;
 using ProcBridge.Transport.Relay.Models;
@@ -8,11 +9,12 @@ namespace ProcBridge.Tests.Relay;
 [TestClass]
 public sealed class RelayHostLinkTests
 {
-    private static readonly RelayEndpoint Endpoint = new(new Uri("http://relay.test/"), "pbd_device");
+    private static readonly RelayEndpoint Endpoint = new(new Uri("http://relay.test/"));
+    private static readonly IdentityKey Identity = IdentityKey.Generate();
     private static readonly DateTime Now = new(2030, 1, 1, 12, 0, 0, DateTimeKind.Utc);
 
     private static string Opened(Guid session, DateTime expiresAt, string ticket = "pbt_host")
-        => $$"""{"type":"{{TunnelProtocol.SessionOpenedMessage}}","sessionId":"{{session}}","ticket":"{{ticket}}","expiresAt":"{{expiresAt:O}}","shareId":"{{Guid.NewGuid()}}","clientDeviceId":"{{Guid.NewGuid()}}","clientPublicKey":null}""";
+        => $$"""{"type":"{{TunnelProtocol.SessionOpenedMessage}}","sessionId":"{{session}}","ticket":"{{ticket}}","expiresAt":"{{expiresAt:O}}"}""";
 
     private static string LaneRequested(Guid session, int lane)
         => $$"""{"type":"{{TunnelProtocol.LaneRequestedMessage}}","sessionId":"{{session}}","lane":{{lane}}}""";
@@ -33,7 +35,7 @@ public sealed class RelayHostLinkTests
     {
         DateTime now = Now;
         var sockets = new ScriptedRelaySockets();
-        await using var link = new RelayHostLink(Endpoint, (_, _) => Task.CompletedTask, sockets) { UtcNow = () => now, SessionSweepInterval = TimeSpan.FromHours(1) };
+        await using var link = new RelayHostLink(Endpoint, Identity, (_, _) => Task.CompletedTask, sockets) { UtcNow = () => now, SessionSweepInterval = TimeSpan.FromHours(1) };
         link.Start();
         var control = await sockets.ControlAsync();
 
@@ -51,7 +53,7 @@ public sealed class RelayHostLinkTests
     {
         DateTime now = Now;
         var sockets = new ScriptedRelaySockets();
-        await using var link = new RelayHostLink(Endpoint, (_, _) => Task.CompletedTask, sockets) { UtcNow = () => now, SessionSweepInterval = TimeSpan.FromMilliseconds(20) };
+        await using var link = new RelayHostLink(Endpoint, Identity, (_, _) => Task.CompletedTask, sockets) { UtcNow = () => now, SessionSweepInterval = TimeSpan.FromMilliseconds(20) };
         link.Start();
         var control = await sockets.ControlAsync();
         control.PushText(Opened(Guid.NewGuid(), Now.AddSeconds(30)));
@@ -65,7 +67,7 @@ public sealed class RelayHostLinkTests
     public async Task SessionCount_IsCapped_OldestFirst()
     {
         var sockets = new ScriptedRelaySockets();
-        await using var link = new RelayHostLink(Endpoint, (_, _) => Task.CompletedTask, sockets)
+        await using var link = new RelayHostLink(Endpoint, Identity, (_, _) => Task.CompletedTask, sockets)
         {
             UtcNow = () => Now,
             SessionSweepInterval = TimeSpan.FromHours(1),
@@ -93,7 +95,7 @@ public sealed class RelayHostLinkTests
         var laneRunning = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseLane = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var sockets = new ScriptedRelaySockets();
-        await using var link = new RelayHostLink(Endpoint, async (_, _) =>
+        await using var link = new RelayHostLink(Endpoint, Identity, async (_, _) =>
         {
             laneRunning.TrySetResult();
             await releaseLane.Task;
@@ -130,7 +132,7 @@ public sealed class RelayHostLinkTests
     public async Task OversizedControlMessage_ClosesTheChannel_AndTheHostReconnects()
     {
         var sockets = new ScriptedRelaySockets();
-        await using var link = new RelayHostLink(Endpoint, (_, _) => Task.CompletedTask, sockets)
+        await using var link = new RelayHostLink(Endpoint, Identity, (_, _) => Task.CompletedTask, sockets)
         {
             MaxControlMessageBytes = 64 * 1024,
             // Long enough to read LastError before the reconnect clears it.
@@ -151,10 +153,24 @@ public sealed class RelayHostLinkTests
     }
 
     [TestMethod]
+    public async Task ControlChannel_ProvesTheIdentityKey_WithoutAnyToken()
+    {
+        var sockets = new ScriptedRelaySockets();
+        await using var link = new RelayHostLink(Endpoint, Identity, (_, _) => Task.CompletedTask, sockets);
+        link.Start();
+        var control = await sockets.ControlAsync();
+
+        Assert.IsNull(sockets.Connects[0].Bearer, "The relay has no accounts: no token on the control channel.");
+        Assert.AreEqual(Identity.Fingerprint, control.HostId);
+        Assert.AreEqual(Identity.Fingerprint, link.HostId);
+        await WaitAsync(() => link.IsConnected, "link connected after the handshake");
+    }
+
+    [TestMethod]
     public async Task Lane_CarriesTheTicketInTheAuthorizationHeader_NotTheUrl()
     {
         var sockets = new ScriptedRelaySockets();
-        await using var link = new RelayHostLink(Endpoint, async (_, _) => await Task.Delay(50), sockets);
+        await using var link = new RelayHostLink(Endpoint, Identity, async (_, _) => await Task.Delay(50), sockets);
         link.Start();
         var control = await sockets.ControlAsync();
         var session = Guid.NewGuid();

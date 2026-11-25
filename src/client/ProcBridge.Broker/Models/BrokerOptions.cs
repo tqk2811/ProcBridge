@@ -1,3 +1,4 @@
+using ProcBridge.Crypto.Identity;
 using ProcBridge.Protocol;
 using ProcBridge.Protocol.Enums;
 using ProcBridge.Protocol.Models;
@@ -96,7 +97,7 @@ public sealed record BrokerOptions
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ProcBridge", "queue");
 
     /// <summary>Key of the Agent and share in write queue entries.</summary>
-    public string GetWriteTarget() => Relay is { } relay ? $"relay:{relay.ShareId}/{ShareName}" : $"{AgentHost}:{AgentPort}/{ShareName}";
+    public string GetWriteTarget() => Relay is { } relay ? $"relay:{(Security is { } security ? KeyFingerprint.Compute(security.AgentPublicKey) : relay.Endpoint.BaseUrl.Host)}/{ShareName}" : $"{AgentHost}:{AgentPort}/{ShareName}";
 
     public string GetCacheRoot() => CacheRoot ?? Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ProcBridge", "cache", SessionId);

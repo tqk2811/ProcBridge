@@ -1,5 +1,4 @@
 using ProcBridge.Launcher.Models;
-using ProcBridge.Launcher.Wpf.Helpers;
 using ProcBridge.Launcher.Wpf.Models;
 using ProcBridge.Launcher.Wpf.Services;
 using ProcBridge.Launcher.Wpf.Tests.Fakes;
@@ -8,12 +7,11 @@ using ProcBridge.Transport.Secure.Models;
 
 namespace ProcBridge.Launcher.Wpf.Tests;
 
-/// <summary>Relay part of a profile: turned into <c>--relay</c> options, token kept DPAPI-protected.</summary>
+/// <summary>Relay part of a profile: only the relay URL; the HostId is the fingerprint of the paired machine.</summary>
 [TestClass]
 public sealed class RelayProfileTests
 {
     private static readonly PairedMachine MachineB = FakeRegistry.Machine("B", "FING-ERPR-INTB", "10.0.0.2:5000");
-    private static readonly Guid ShareId = Guid.Parse("0b6f6d2e-1111-4c4c-9a9a-123456789abc");
 
     private static LaunchProfile Sample() => new()
     {
@@ -25,8 +23,6 @@ public sealed class RelayProfileTests
         Program = "cmd.exe",
         UseRelay = true,
         RelayUrl = "https://relay.example/",
-        RelayShareId = ShareId.ToString(),
-        RelayTokenProtected = RelayTokenProtection.Protect("pbd_bimat"),
     };
 
     [TestMethod]
@@ -36,8 +32,6 @@ public sealed class RelayProfileTests
 
         Assert.IsNotNull(options.Relay);
         Assert.AreEqual(new Uri("https://relay.example/"), options.Relay.Url);
-        Assert.AreEqual("pbd_bimat", options.Relay.DeviceToken);
-        Assert.AreEqual(ShareId, options.Relay.ShareId);
         Assert.AreEqual(MachineB.Fingerprint, options.AgentFingerprint);
         Assert.AreEqual("relay.example", options.AgentHost);
     }
@@ -52,28 +46,24 @@ public sealed class RelayProfileTests
     }
 
     [TestMethod]
-    public void OptionsFactory_RelayWithBadFields_ListsEveryProblem()
+    public void OptionsFactory_RelayWithBadUrl_IsRefused()
     {
-        LaunchProfile profile = Sample() with { RelayUrl = "relay", RelayShareId = "abc", RelayTokenProtected = null };
+        LaunchProfile profile = Sample() with { RelayUrl = "relay" };
 
         var e = Assert.ThrowsExactly<ProfileValidationException>(() => new LaunchOptionsFactory(@"C:\pb").Create(profile, MachineB));
 
-        Assert.HasCount(3, e.Errors);
+        Assert.HasCount(1, e.Errors);
     }
 
     [TestMethod]
-    public void ProfileViewModel_RoundTripsRelayFields_TokenNeverInClear()
+    public void ProfileViewModel_RoundTripsRelayFields()
     {
         var viewModel = new ProfileViewModel(Sample(), new FakeDialogs(), _ => MachineB);
-        Assert.AreEqual("pbd_bimat", viewModel.RelayToken);
+        viewModel.RelayUrl = " https://other.example/ ";
 
-        viewModel.RelayToken = "pbd_moi";
         LaunchProfile saved = viewModel.ToModel();
 
         Assert.IsTrue(saved.UseRelay);
-        Assert.AreEqual(ShareId.ToString(), saved.RelayShareId);
-        Assert.IsNotNull(saved.RelayTokenProtected);
-        Assert.DoesNotContain("pbd_moi", saved.RelayTokenProtected);
-        Assert.AreEqual("pbd_moi", RelayTokenProtection.Unprotect(saved.RelayTokenProtected));
+        Assert.AreEqual("https://other.example/", saved.RelayUrl);
     }
 }

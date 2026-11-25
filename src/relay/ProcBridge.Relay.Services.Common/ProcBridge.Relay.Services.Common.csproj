@@ -3,10 +3,6 @@
     <TargetFramework>net10.0</TargetFramework>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
-  </ItemGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\ProcBridge.Relay.Repositories.Abstractions\ProcBridge.Relay.Repositories.Abstractions.csproj" />
     <ProjectReference Include="..\ProcBridge.Relay.ViewModels\ProcBridge.Relay.ViewModels.csproj" />
     <ProjectReference Include="..\ProcBridge.Relay.Shared\ProcBridge.Relay.Shared.csproj" />
   </ItemGroup>

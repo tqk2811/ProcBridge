@@ -3,6 +3,7 @@ using System.Net.WebSockets;
 using System.Text;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using ProcBridge.Crypto.Identity;
 using ProcBridge.Relay.Shared.Json;
 using ProcBridge.Relay.Shared.Tunnel;
 using ProcBridge.Relay.ViewModels.Tunnel;
@@ -12,14 +13,16 @@ using ProcBridge.Transport.Relay.Models;
 namespace ProcBridge.Transport.Relay;
 
 /// <summary>
-/// Machine B side of the relay tunnel (plan 8.2): keeps the control channel <c>/tunnel/control</c> open with the device
-/// token (reconnecting after a loss), remembers the host ticket of every <c>sessionOpened</c>, and on each
+/// Machine B side of the relay tunnel (plan 8.2): keeps the control channel <c>/tunnel/control</c> open (reconnecting
+/// after a loss), proving its identity key with a Noise handshake each time so the relay routes sessions for its HostId
+/// here and nowhere else; remembers the host ticket of every <c>sessionOpened</c>, and on each
 /// <c>laneRequested</c> opens that lane and hands it to <c>acceptLane</c> as a plain stream. The Agent passes the
 /// stream to its <c>SecureServer</c>, exactly like an accepted TCP connection: the relay never sees plaintext.
 /// </summary>
 public sealed class RelayHostLink : IAsyncDisposable
 {
     private readonly RelayEndpoint _relay;
+    private readonly IdentityKey _identity;
     private readonly Func<Stream, string, Task> _acceptLane;
     private readonly IRelaySocketFactory _sockets;
     private readonly JsonSerializerSettings _json = RelayJsonSettings.Create();
@@ -32,11 +35,13 @@ public sealed class RelayHostLink : IAsyncDisposable
     private volatile bool _isConnected;
     private int _disposed;
 
+    /// <param name="identity">This machine's identity key (borrowed): proves the HostId on the control channel.</param>
     /// <param name="acceptLane">Serves one lane (stream owned by the callee) with a description of the peer for logs.</param>
     /// <param name="sockets">Null for <see cref="ClientWebSocketFactory"/>.</param>
-    public RelayHostLink(RelayEndpoint relay, Func<Stream, string, Task> acceptLane, IRelaySocketFactory? sockets = null)
+    public RelayHostLink(RelayEndpoint relay, IdentityKey identity, Func<Stream, string, Task> acceptLane, IRelaySocketFactory? sockets = null)
     {
         _relay = relay;
+        _identity = identity;
         _acceptLane = acceptLane;
         _sockets = sockets ?? new ClientWebSocketFactory();
     }
@@ -45,6 +50,9 @@ public sealed class RelayHostLink : IAsyncDisposable
     public TimeSpan ReconnectDelay { get; init; } = TimeSpan.FromSeconds(1);
 
     public TimeSpan MaxReconnectDelay { get; init; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>How long the relay may take to finish the control handshake before the link retries.</summary>
+    public TimeSpan ControlHandshakeTimeout { get; init; } = TimeSpan.FromSeconds(15);
 
     /// <summary>A control message bigger than this closes the channel: the relay's messages are tiny JSON lines.</summary>
     public int MaxControlMessageBytes { get; init; } = 64 * 1024;
@@ -83,10 +91,13 @@ public sealed class RelayHostLink : IAsyncDisposable
             _sessions.TryRemove(new KeyValuePair<Guid, HostSession>(oldest.Opened.SessionId, oldest));
     }
 
-    /// <summary>The control channel is open: the relay shows this machine online and can route sessions to it.</summary>
+    /// <summary>HostId machines A use to reach this machine through the relay (fingerprint of the identity key).</summary>
+    public string HostId => _identity.Fingerprint;
+
+    /// <summary>The control channel is open and proven: the relay can route sessions for <see cref="HostId"/> to it.</summary>
     public bool IsConnected => _isConnected;
 
-    /// <summary>Last error of the control channel (connect refused, token revoked...), null while connected.</summary>
+    /// <summary>Last error of the control channel (connect refused, handshake failed...), null while connected.</summary>
     public string? LastError { get; private set; }
 
     /// <summary>Raised on a background thread when <see cref="IsConnected"/> changes.</summary>
@@ -118,8 +129,13 @@ public sealed class RelayHostLink : IAsyncDisposable
         {
             try
             {
-                using WebSocket control = await _sockets.ConnectAsync(_relay.WebSocketUri(TunnelProtocol.ControlPath), _relay.DeviceToken, _stopping.Token).ConfigureAwait(false);
+                using WebSocket control = await _sockets.ConnectAsync(_relay.WebSocketUri(TunnelProtocol.ControlPath), null, _stopping.Token).ConfigureAwait(false);
                 _control = control;
+                using (var handshake = CancellationTokenSource.CreateLinkedTokenSource(_stopping.Token))
+                {
+                    handshake.CancelAfter(ControlHandshakeTimeout);
+                    await RelayControlHandshake.RunAsync(control, _identity, MaxControlMessageBytes, handshake.Token).ConfigureAwait(false);
+                }
                 LastError = null;
                 SetConnected(true);
                 delay = ReconnectDelay;
@@ -129,7 +145,7 @@ public sealed class RelayHostLink : IAsyncDisposable
             {
                 break;
             }
-            catch (Exception e) when (e is WebSocketException or HttpRequestException or IOException or InvalidOperationException or JsonException or OperationCanceledException)
+            catch (Exception e) when (e is WebSocketException or HttpRequestException or IOException or InvalidOperationException or JsonException or OperationCanceledException or InvalidDataException)
             {
                 LastError = e.Message;
             }
@@ -246,7 +262,7 @@ public sealed class RelayHostLink : IAsyncDisposable
         }
         try
         {
-            await _acceptLane(new WebSocketLaneStream(socket), $"relay:{session.ClientDeviceId}").ConfigureAwait(false);
+            await _acceptLane(new WebSocketLaneStream(socket), $"relay:{session.SessionId}").ConfigureAwait(false);
         }
         catch (Exception e) when (e is not OutOfMemoryException)
         {

@@ -14,15 +14,16 @@ namespace ProcBridge.Transport.Relay;
 
 /// <summary>
 /// Machine A side of the relay tunnel (plan 8.2): every <see cref="ConnectAsync"/> is one lane of a tunnel session to
-/// the share, so each connection of a pool is its own lane. Sessions are opened through <c>POST api/tunnel/sessions</c>
-/// with the device token and reused while they have a free lane (0..15); a full or dead session makes a new one.
+/// the host, so each connection of a pool is its own lane. Sessions are opened through <c>POST api/tunnel/sessions</c>
+/// with the HostId of the paired Agent (anonymous: the relay has no accounts) and reused while they have a free lane
+/// (0..15); a full or dead session makes a new one.
 /// Put it under <c>SecureConnectionFactory</c>: the Noise handshake then runs inside the lane and the relay only sees
 /// ciphertext. Thread-safe.
 /// </summary>
 public sealed class RelayStreamConnector : IStreamConnector, IDisposable
 {
     private readonly RelayEndpoint _relay;
-    private readonly Guid _shareId;
+    private readonly string _hostId;
     private readonly IRelaySocketFactory _sockets;
     private readonly IRelayApi _api;
     private readonly HttpClient? _ownedHttp;
@@ -33,23 +34,22 @@ public sealed class RelayStreamConnector : IStreamConnector, IDisposable
 
     /// <param name="sockets">Null for <see cref="ClientWebSocketFactory"/>.</param>
     /// <param name="http">HTTP client for the REST call, not owned; null creates one on <see cref="RelayEndpoint.BaseUrl"/>.</param>
-    public RelayStreamConnector(RelayEndpoint relay, Guid shareId, IRelaySocketFactory? sockets = null, HttpClient? http = null, Func<DateTime>? utcNow = null)
+    /// <param name="hostId">Fingerprint of the Agent's identity key (from pairing): the relay routes the session to it.</param>
+    public RelayStreamConnector(RelayEndpoint relay, string hostId, IRelaySocketFactory? sockets = null, HttpClient? http = null, Func<DateTime>? utcNow = null)
     {
         _relay = relay;
-        _shareId = shareId;
+        _hostId = hostId;
         _sockets = sockets ?? new ClientWebSocketFactory();
         if (http is null)
         {
             _ownedHttp = new HttpClient { BaseAddress = relay.BaseUrl, Timeout = TimeSpan.FromSeconds(30) };
             http = _ownedHttp;
         }
-        var api = new RelayApiImplement(http);
-        api.SetBearerToken(relay.DeviceToken);
-        _api = api;
+        _api = new RelayApiImplement(http);
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
     }
 
-    public string Description => $"relay {_relay.BaseUrl.Host} share {_shareId}";
+    public string Description => $"relay {_relay.BaseUrl.Host} host {_hostId}";
 
     /// <summary>Tunnel sessions opened so far (tests: lanes of one pool share a session).</summary>
     public int SessionCount { get; private set; }
@@ -109,15 +109,12 @@ public sealed class RelayStreamConnector : IStreamConnector, IDisposable
     {
         try
         {
-            return await _api.Tunnel.OpenSessionAsync(new OpenTunnelSessionRequestVM { ShareId = _shareId }, cancellationToken).ConfigureAwait(false);
-        }
-        catch (RelayApiException e) when (e.StatusCode is 401 or 403)
-        {
-            throw new ProtocolStatusException(NtStatus.AccessDenied, $"Relay refused the session: {e.Code} {e.Message}", inner: e);
+            return await _api.Tunnel.OpenSessionAsync(new OpenTunnelSessionRequestVM { HostId = _hostId }, cancellationToken).ConfigureAwait(false);
         }
         catch (RelayApiException e)
         {
-            // 409 DEVICE_OFFLINE and friends: the Agent may come back, so this is a connection failure.
+            // 409 HOST_OFFLINE, 429 and friends: the Agent may come back, so this is a connection failure. Who may talk
+            // to the Agent is decided by the Noise handshake inside the lane, not by the relay.
             throw new IOException($"Relay could not open a session: {e.Code} {e.Message}", e);
         }
         catch (HttpRequestException e)

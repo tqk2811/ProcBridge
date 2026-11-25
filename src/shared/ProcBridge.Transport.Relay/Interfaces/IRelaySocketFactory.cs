@@ -8,6 +8,6 @@ namespace ProcBridge.Transport.Relay.Interfaces;
 /// </summary>
 public interface IRelaySocketFactory
 {
-    /// <param name="bearerToken">Sent as <c>Authorization: Bearer</c>: the device token on the control channel, the session ticket on a data lane.</param>
+    /// <param name="bearerToken">Sent as <c>Authorization: Bearer</c>: the session ticket on a data lane; null on the control channel.</param>
     Task<WebSocket> ConnectAsync(Uri uri, string? bearerToken, CancellationToken cancellationToken);
 }

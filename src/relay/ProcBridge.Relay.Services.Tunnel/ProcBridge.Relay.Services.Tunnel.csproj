@@ -10,8 +10,9 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\ProcBridge.Relay.Services.Common\ProcBridge.Relay.Services.Common.csproj" />
-    <ProjectReference Include="..\ProcBridge.Relay.Repositories.Abstractions\ProcBridge.Relay.Repositories.Abstractions.csproj" />
     <ProjectReference Include="..\ProcBridge.Relay.ViewModels\ProcBridge.Relay.ViewModels.csproj" />
     <ProjectReference Include="..\ProcBridge.Relay.Shared\ProcBridge.Relay.Shared.csproj" />
+    <!-- Noise handshake and key fingerprint: the host proves its identity key on the control channel. -->
+    <ProjectReference Include="..\..\shared\ProcBridge.Crypto\ProcBridge.Crypto.csproj" />
   </ItemGroup>
 </Project>

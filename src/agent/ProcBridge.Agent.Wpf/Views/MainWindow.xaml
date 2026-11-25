@@ -43,10 +43,7 @@
                             <StackPanel Grid.Row="3" Grid.Column="1" Margin="0,0,0,4">
                                 <StackPanel Orientation="Horizontal" IsEnabled="{Binding IsRunning, Converter={StaticResource InverseBool}}">
                                     <TextBox Text="{Binding RelayUrl, UpdateSourceTrigger=PropertyChanged}" Width="260"
-                                             ToolTip="Địa chỉ relay, vd https://relay.example.com/. Để trống thì chỉ phục vụ trong LAN." />
-                                    <TextBlock Text="Token máy:" Margin="12,0,6,0" VerticalAlignment="Center" />
-                                    <TextBox Text="{Binding RelayToken, UpdateSourceTrigger=PropertyChanged}" Width="220" Style="{StaticResource Mono}"
-                                             ToolTip="Token máy (pbd_...) từ procbridge-relay device register; lưu mã hoá DPAPI." />
+                                             ToolTip="Địa chỉ relay, vd https://relay.example.com/. Để trống thì chỉ phục vụ trong LAN. Không cần tài khoản: máy A tìm máy này theo vân tay khoá." />
                                 </StackPanel>
                                 <TextBlock Text="{Binding RelayState}" Margin="0,2,0,0" Foreground="Gray" />
                             </StackPanel>

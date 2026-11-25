@@ -418,24 +418,18 @@ thêm MAC theo khoá phiên vào yêu cầu join. Ghi 2026-11-25.
 ## [Vừa] Relay chỉ chạy được một instance
 
 `TunnelHub` giữ kênh điều khiển và phiên trong bộ nhớ tiến trình. Chạy nhiều instance sau load balancer thì
-hai đầu của một phiên có thể rơi vào hai tiến trình khác nhau và không ghép được. Cần sổ đăng ký dùng chung
-(vd Redis hoặc một kho dùng chung; dữ liệu relay hiện chỉ nằm trong bộ nhớ nên nhiều instance còn không có chung tài khoản/máy) và chuyển tiếp giữa instance, hoặc định tuyến dính theo phiên. Ghi
-2026-11-25 (M6).
+hai đầu của một phiên có thể rơi vào hai tiến trình khác nhau và không ghép được. Cần sổ đăng ký HostId dùng chung
+(vd Redis) và chuyển tiếp giữa instance, hoặc định tuyến dính theo HostId. Ghi 2026-11-25 (M6).
 
-## [Vừa] Chưa có log phiên tunnel
+## [Thấp] Chưa có log phiên tunnel
 
-Relay chỉ lưu trong bộ nhớ và chỉ ghi log ứng dụng. Nếu cần log phiên (ai mở, chia sẻ nào, lúc mở/đóng, số
-byte) thì phải có kho bền trước, rồi API/CLI xem. Ghi 2026-11-25 (M6).
+Relay không lưu gì và chỉ ghi log ứng dụng (HostId, địa chỉ mở phiên). Nếu cần log phiên bền (lúc mở/đóng, số byte)
+thì phải có kho bền trước. Ghi 2026-11-25 (M6).
 
 ## [Thấp] Giới hạn tài nguyên tunnel
 
-Chưa có quota băng thông, thời gian rảnh tối đa của lane, hay số phiên đồng thời mỗi máy (đã có giới hạn
-tần suất mở phiên theo máy). Một máy được cấp quyền có thể giữ nhiều lane mở mãi. Ghi 2026-11-25 (M6).
-
-## [Thấp] Dọn phiên đăng nhập hết hạn
-
-Bảng `AccountSessions` chỉ thêm, không có việc nền xoá hàng hết hạn/đã thu hồi. Cần `BackgroundService`
-(project `ProcBridge.Relay.BackgroundServices` theo kiến trúc ASP). Ghi 2026-11-25 (M6).
+Đã có giới hạn tần suất và trần số phiên/lane theo HostId và địa chỉ. Chưa có quota băng thông hay thời gian rảnh
+tối đa của lane: một máy A đã ghép cặp có thể giữ lane mở mãi. Ghi 2026-11-25 (M6).
 
 ## [Thấp] Phần lệch khỏi khuôn ASP chuẩn ở relay M6
 
@@ -443,37 +437,21 @@ Cố ý làm gọn ở M6, nên bù khi relay lớn lên:
 
 - Client typed `ProcBridge.Relay.Integration.Api` dùng `HttpClient` trần + Newtonsoft, chưa dùng
   `TqkLibrary.Asp.ToolKit.Integration`/`TqkLibrary.Http`.
-- Không có `Services.Abstractions`: `IDevicePresence` (dùng xuyên feature) đặt tạm ở `Services.Common/Presence`.
 - Kiểm dữ liệu vào viết tay trong service, chưa có Command + FluentValidation.
 - Chưa có Serilog, OpenAPI/Scalar, `/health/ready`; `ApiErrorException`/filter vỏ JSON nằm trong host thay
   vì project `Api.Core`.
-- CLI lưu token phiên dạng chữ trong `%APPDATA%\ProcBridge\relay-cli.json`; nên bọc DPAPI.
 
 Ghi 2026-11-25 (M6).
 
-## [Vừa] Relay: ghép cặp và chọn chia sẻ vẫn phải làm tay
+## [Vừa] Relay: ghép cặp vẫn phải làm trong LAN
 
-Agent và Launcher đã đi qua relay (M6), nhưng ghép cặp vẫn chỉ chạy trong LAN (`--pair --agent host`), và
-người dùng phải tự chép token máy (`procbridge-relay device register`) và mã chia sẻ (`device shares`) vào Agent
-và Launcher. Nên có: ghép cặp qua relay (relay chuyển khoá công khai, người dùng so vân tay), Launcher WPF đăng
-nhập relay rồi chọn chia sẻ từ danh sách, Agent tự đăng ký máy và khai chia sẻ. Relay cũng chưa đối chiếu khoá
-công khai đã khai trên relay với khoá đã ghép cặp (`TunnelSessionVM.HostPublicKey`). Ghi 2026-11-25.
+Agent và Launcher đi qua relay chỉ cần URL relay và máy đã ghép cặp (HostId = vân tay), nhưng ghép cặp vẫn chỉ chạy
+trong LAN (`--pair --agent host`). Nên có ghép cặp qua relay: relay chuyển bắt tay XX của ghép cặp theo HostId, người
+dùng so mã SAS như ở LAN. Ghi 2026-11-25, sửa 2026-11-26 (bỏ tài khoản relay).
 
-## [Thấp] Token relay trên dòng lệnh
+## [Thấp] Relay: HostId lộ máy B đang online
 
-`--relay-token` của Agent và Launcher console hiện trong danh sách tiến trình; đã có biến môi trường
-`PROCBRIDGE_RELAY_TOKEN` thay thế. Nên lưu token vào kho DPAPI trong thư mục dữ liệu (như app WPF) và bỏ
-dần tham số. Ghi 2026-11-25.
-
-## [Thấp] Test CrossArchitectureInjection_DoesNotLeakHandlesToSiblings đỏ trên một máy dev
-
-`ChildCreationTests.CrossArchitectureInjection_DoesNotLeakHandlesToSiblings` (x64/Win32 cả hai chiều) báo
-`leaked: 9..28` trên máy dev, kể cả ở commit chưa có thay đổi relay; CI (windows-latest) xanh. Chưa rõ do môi
-trường (phần mềm bảo vệ, tiến trình khác giữ handle) hay lỗi đua trong hook. Ghi 2026-11-25.
-
-## [Thấp] Relay mất dữ liệu khi khởi động lại
-
-Quyết định của người dùng dự án: relay chỉ lưu trong bộ nhớ (xem Plan 8.2). Mỗi lần relay khởi động lại, máy đã
-đăng ký, chia sẻ, quyền và token phiên mất hết; chỉ tài khoản trong `Relay:Accounts:Seed` được tạo lại. Nếu về sau
-cần bền: thêm lại tầng `Database.*` (entity, provider, migration) và cài đặt repository mới cho các giao diện trong
-`ProcBridge.Relay.Repositories.Abstractions`. Ghi 2026-11-25.
+Ai biết vân tay của máy B (vd đọc được trong log hay ảnh chụp màn hình) có thể hỏi relay máy đó có online không (409
+`HOST_OFFLINE` hay không) và mở phiên rác tới nó (bị chặn bởi trần phiên mỗi HostId; bắt tay Noise IK trong lane vẫn
+từ chối vì không ghép cặp). Nếu cần giấu: dùng HostId dẫn xuất từ vân tay cộng một bí mật chia sẻ lúc ghép cặp.
+Ghi 2026-11-26.

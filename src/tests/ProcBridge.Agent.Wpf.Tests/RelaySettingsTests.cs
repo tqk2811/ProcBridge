@@ -5,7 +5,7 @@ using ProcBridge.Transport.Secure;
 
 namespace ProcBridge.Agent.Wpf.Tests;
 
-/// <summary>Relay section of the Agent app: passed to the host on start, token saved only DPAPI-protected.</summary>
+/// <summary>Relay section of the Agent app: only the URL, passed to the host on start and saved (the relay has no accounts).</summary>
 [TestClass]
 public sealed class RelaySettingsTests
 {
@@ -22,7 +22,7 @@ public sealed class RelaySettingsTests
     }
 
     [TestMethod]
-    public void Start_WithRelay_PassesItToTheHost_AndSavesTheTokenProtected()
+    public void Start_WithRelay_PassesTheUrlToTheHost_AndSavesIt()
     {
         string folder = NewShareFolder();
         try
@@ -30,21 +30,15 @@ public sealed class RelaySettingsTests
             _settings.Settings = new AgentUiSettings { Shares = [new ShareSettings { Name = "src", Path = folder }] };
             MainViewModel viewModel = Create();
             viewModel.RelayUrl = " https://relay.example/ ";
-            viewModel.RelayToken = "pbd_bimat";
 
             viewModel.Start();
 
             Assert.IsNull(viewModel.ErrorText);
             Assert.IsNotNull(_host.StartedRelay);
             Assert.AreEqual(new Uri("https://relay.example/"), _host.StartedRelay.BaseUrl);
-            Assert.AreEqual("pbd_bimat", _host.StartedRelay.DeviceToken);
             Assert.AreEqual("https://relay.example/", _settings.Settings.RelayUrl);
-            Assert.IsNotNull(_settings.Settings.RelayTokenProtected);
-            Assert.DoesNotContain("pbd_bimat", _settings.Settings.RelayTokenProtected);
             Assert.AreEqual("relay: đã kết nối", viewModel.RelayState);
-
-            // Read back by a new window.
-            Assert.AreEqual("pbd_bimat", Create().RelayToken);
+            Assert.AreEqual("https://relay.example/", Create().RelayUrl);
         }
         finally
         {
@@ -65,7 +59,6 @@ public sealed class RelaySettingsTests
 
             Assert.IsTrue(viewModel.IsRunning);
             Assert.IsNull(_host.StartedRelay);
-            Assert.IsNull(_settings.Settings.RelayTokenProtected);
         }
         finally
         {
@@ -74,23 +67,19 @@ public sealed class RelaySettingsTests
     }
 
     [TestMethod]
-    public void Start_WithRelayButNoTokenOrBadUrl_DoesNotStart()
+    public void Start_WithBadRelayUrl_DoesNotStart()
     {
         string folder = NewShareFolder();
         try
         {
             _settings.Settings = new AgentUiSettings { Shares = [new ShareSettings { Name = "src", Path = folder }] };
             MainViewModel viewModel = Create();
-            viewModel.RelayUrl = "https://relay.example/";
+            viewModel.RelayUrl = "ftp://relay.example/";
 
             viewModel.Start();
+
             Assert.IsFalse(viewModel.IsRunning);
             Assert.IsNotNull(viewModel.ErrorText);
-
-            viewModel.RelayUrl = "ftp://relay.example/";
-            viewModel.RelayToken = "pbd_x";
-            viewModel.Start();
-            Assert.IsFalse(viewModel.IsRunning);
             Assert.AreEqual(0, _host.StartCalls);
         }
         finally

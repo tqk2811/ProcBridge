@@ -1,20 +1,15 @@
 using System.Net;
 using System.Threading.RateLimiting;
 
-using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.HttpOverrides;
-using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 using ProcBridge.Relay.Api.Filters;
 using ProcBridge.Relay.Api.Infrastructure;
-using ProcBridge.Relay.Repositories;
-using ProcBridge.Relay.Repositories.Abstractions.Interfaces;
 using ProcBridge.Relay.Services;
-using ProcBridge.Relay.Services.Accounts.Models;
 using ProcBridge.Relay.Services.Common.Common.Errors;
 using ProcBridge.Relay.Services.Tunnel.Models;
-using ProcBridge.Relay.Shared.Auth;
 using ProcBridge.Relay.Shared.Common;
 using ProcBridge.Relay.Shared.Json;
 
@@ -22,30 +17,18 @@ namespace ProcBridge.Relay.Api.Extensions;
 
 public static class RelayHostServiceCollectionExtensions
 {
-    /// <summary>Everything the relay host needs: in-memory store, repositories, services, auth, MVC.</summary>
+    /// <summary>
+    /// Everything the relay host needs: the tunnel services, rate limits, forwarded headers, MVC. No accounts, no
+    /// authentication and no storage: the relay only pairs lanes in memory (plan 8.2).
+    /// </summary>
     public static IServiceCollection AddRelayHost(this IServiceCollection services, IConfiguration configuration)
     {
-        // All data lives in this process (see RelayStore): one store for the host, repositories are views of it.
-        services.AddSingleton<RelayStore>();
-        services.AddScoped<IAccountRepository, AccountRepository>();
-        services.AddScoped<IAccountSessionRepository, AccountSessionRepository>();
-        services.AddScoped<IDeviceRepository, DeviceRepository>();
-        services.AddScoped<IShareRepository, ShareRepository>();
-
         services.AddSingleton(TimeProvider.System);
-        services.Configure<AccountsOptions>(configuration.GetSection(AccountsOptions.SectionName));
         services.Configure<TunnelOptions>(configuration.GetSection(TunnelOptions.SectionName));
         services.AddApplicationServices();
-        services.AddHostedService<AccountSeedHostedService>();
 
-        AddAuthRateLimiter(services, configuration);
+        AddRateLimiter(services, configuration);
         AddForwardedHeaders(services, configuration);
-
-        services.AddAuthentication(RelayAuth.Scheme)
-            .AddScheme<AuthenticationSchemeOptions, RelayBearerAuthenticationHandler>(RelayAuth.Scheme, null);
-        services.AddAuthorizationBuilder()
-            .AddPolicy(RelayAuth.AccountPolicy, p => p.RequireClaim(RelayAuth.AccountIdClaim))
-            .AddPolicy(RelayAuth.DevicePolicy, p => p.RequireClaim(RelayAuth.DeviceIdClaim));
 
         services.AddControllers(o => o.Filters.Add<ApiEnvelopeResultFilter>())
             .AddNewtonsoftJson(o => RelayJsonSettings.Apply(o.SerializerSettings))
@@ -63,33 +46,16 @@ public static class RelayHostServiceCollectionExtensions
         return services;
     }
 
-    /// <summary>
-    /// Fixed window per client address on login and register, and per device on opening tunnel sessions
-    /// (<see cref="AuthRateLimitOptions"/>); plus a per user name limit on login (<see cref="LoginUserNameLimiter"/>).
-    /// </summary>
-    private static void AddAuthRateLimiter(IServiceCollection services, IConfiguration configuration)
+    /// <summary>Fixed windows per client address on sessions, control channels and lanes (<see cref="RelayRateLimitOptions"/>).</summary>
+    private static void AddRateLimiter(IServiceCollection services, IConfiguration configuration)
     {
-        var limits = configuration.GetSection(AuthRateLimitOptions.SectionName).Get<AuthRateLimitOptions>() ?? new AuthRateLimitOptions();
-        services.AddSingleton(new LoginUserNameLimiter(limits));
+        var limits = configuration.GetSection(RelayRateLimitOptions.SectionName).Get<RelayRateLimitOptions>() ?? new RelayRateLimitOptions();
         services.AddRateLimiter(o =>
         {
             o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
-            o.AddPolicy(AuthRateLimitOptions.TunnelSessionPolicyName, context => RateLimitPartition.GetFixedWindowLimiter(
-                context.User.FindFirst(RelayAuth.DeviceIdClaim)?.Value ?? context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
-                _ => new FixedWindowRateLimiterOptions
-                {
-                    PermitLimit = limits.TunnelSessionPermitLimit,
-                    Window = limits.TunnelSessionWindow,
-                    QueueLimit = 0,
-                }));
-            o.AddPolicy(AuthRateLimitOptions.PolicyName, context => RateLimitPartition.GetFixedWindowLimiter(
-                context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
-                _ => new FixedWindowRateLimiterOptions
-                {
-                    PermitLimit = limits.AuthPermitLimit,
-                    Window = limits.AuthWindow,
-                    QueueLimit = 0,
-                }));
+            AddPerAddressPolicy(o, RelayRateLimitOptions.TunnelSessionPolicyName, limits.TunnelSessionPermitLimit, limits.Window);
+            AddPerAddressPolicy(o, RelayRateLimitOptions.ControlPolicyName, limits.ControlPermitLimit, limits.Window);
+            AddPerAddressPolicy(o, RelayRateLimitOptions.LanePolicyName, limits.LanePermitLimit, limits.Window);
             o.OnRejected = async (context, cancellationToken) =>
             {
                 var response = context.HttpContext.Response;
@@ -105,6 +71,11 @@ public static class RelayHostServiceCollectionExtensions
             };
         });
     }
+
+    private static void AddPerAddressPolicy(RateLimiterOptions options, string name, int permits, TimeSpan window)
+        => options.AddPolicy(name, context => RateLimitPartition.GetFixedWindowLimiter(
+            context.ClientAddress(),
+            _ => new FixedWindowRateLimiterOptions { PermitLimit = permits, Window = window, QueueLimit = 0 }));
 
     /// <summary>Trusts <c>X-Forwarded-*</c> only from the proxies listed in <c>Relay:ForwardedHeaders</c>; none listed means none trusted.</summary>
     private static void AddForwardedHeaders(IServiceCollection services, IConfiguration configuration)
@@ -126,7 +97,7 @@ public static class RelayHostServiceCollectionExtensions
 
     /// <summary>
     /// Applies <c>X-Forwarded-For/Proto</c> from the configured proxies. Put it before everything that reads the client
-    /// address (rate limiter). Without configured proxies it adds nothing: the headers are ignored.
+    /// address (rate limiter, tunnel limits). Without configured proxies it adds nothing: the headers are ignored.
     /// </summary>
     public static WebApplication UseRelayForwardedHeaders(this WebApplication app)
     {

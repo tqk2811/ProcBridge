@@ -11,7 +11,7 @@ namespace ProcBridge.Agent;
 
 /// <summary>
 /// Console host. Serve: <c>ProcBridge.Agent --share name=D:\folder [--share ...] [--write-share name=D:\folder] [--port 47800] [--bind 0.0.0.0]
-/// [--allow-pairing] [--data dir] [--plaintext] [--relay url [--relay-token token]]</c>. Manage paired machines: <c>--list-paired</c>, <c>--revoke &lt;fingerprint&gt;</c>.
+/// [--allow-pairing] [--data dir] [--plaintext] [--relay url]</c>. Manage paired machines: <c>--list-paired</c>, <c>--revoke &lt;fingerprint&gt;</c>.
 /// Remote Explorer profile of a paired machine: <c>--explorer &lt;fingerprint&gt; [--file-root dir]... [--registry-root key]...
 /// [--permissions FileRead,ProcessRead|None]</c> replaces it, <c>--show-explorer</c> prints it.
 /// The identity key, the paired machine list and the Explorer profiles live in <c>%LOCALAPPDATA%\ProcBridge\agent</c> (DPAPI) unless --data says otherwise.
@@ -20,18 +20,15 @@ internal static class Program
 {
     private const string Usage =
         @"Usage: ProcBridge.Agent --share name=D:\folder [--share ...] [--write-share name=D:\folder] [--port 47800] [--bind 0.0.0.0] [--allow-pairing] [--data <dir>] [--plaintext]" + "\n" +
-        @"                        [--relay <url> [--relay-token <device token>]]" + "\n" +
+        @"                        [--relay <url>]" + "\n" +
         @"       ProcBridge.Agent --list-paired [--data <dir>]" + "\n" +
         @"       ProcBridge.Agent --revoke <fingerprint> [--data <dir>]" + "\n" +
         @"       ProcBridge.Agent --explorer <fingerprint> [--file-root <dir>]... [--registry-root <key>]... [--permissions <flag,flag|None>] [--data <dir>]" + "\n" +
         @"       ProcBridge.Agent --show-explorer <fingerprint> [--data <dir>]" + "\n" +
         @"  --explorer replaces the whole profile; flags: " + "FileRead, FileWrite, ProcessRead, ProcessKill, RegistryRead, RegistryWrite, ServiceRead, ServiceControl, SystemInfo." + "\n" +
         @"  --plaintext serves unencrypted frames to anyone on the network (development only)." + "\n" +
-        @"  --relay also serves machines A through a relay (internet); the device token comes from --relay-token or" + "\n" +
-        @"  the PROCBRIDGE_RELAY_TOKEN environment variable (procbridge-relay device register).";
-
-    /// <summary>Device token of the relay when <c>--relay-token</c> is not given (keeps it off the command line).</summary>
-    private const string RelayTokenVariable = "PROCBRIDGE_RELAY_TOKEN";
+        @"  --relay also serves machines A through a relay (internet, no account): machines A reach this Agent by its" + "\n" +
+        @"  fingerprint (HostId), which the relay checks against the identity key.";
 
     private static async Task<int> Main(string[] args)
     {
@@ -47,7 +44,6 @@ internal static class Program
         ExplorerPermissions permissions = ExplorerPermissions.None;
         string dataDirectory = AgentDataFiles.DefaultDirectory;
         Uri? relayUrl = null;
-        string? relayToken = null;
         try
         {
             for (int i = 0; i < args.Length; i++)
@@ -82,9 +78,6 @@ internal static class Program
                         relayUrl = Uri.TryCreate(Next(), UriKind.Absolute, out Uri? url) && url.Scheme is "https" or "http"
                             ? url
                             : throw new ArgumentException("--relay expects an http(s) URL.");
-                        break;
-                    case "--relay-token":
-                        relayToken = Next();
                         break;
                     case "--list-paired":
                         listPaired = true;
@@ -121,14 +114,7 @@ internal static class Program
             {
                 if (options.AllowPlaintextTransport)
                     throw new ArgumentException("--relay needs the encrypted transport (drop --plaintext).");
-                relayToken ??= Environment.GetEnvironmentVariable(RelayTokenVariable);
-                if (string.IsNullOrWhiteSpace(relayToken))
-                    throw new ArgumentException($"--relay needs a device token: --relay-token or {RelayTokenVariable}.");
-                options = options with { Relay = new AgentRelayOptions { Endpoint = new RelayEndpoint(relayUrl, relayToken) } };
-            }
-            else if (relayToken is not null)
-            {
-                throw new ArgumentException("--relay-token goes with --relay <url>.");
+                options = options with { Relay = new AgentRelayOptions { Endpoint = new RelayEndpoint(relayUrl) } };
             }
         }
         catch (Exception e) when (e is ArgumentException or FormatException or DirectoryNotFoundException)

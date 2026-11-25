@@ -32,7 +32,6 @@ public sealed class MainViewModel : ObservableObject
     private string _port;
     private string _bindAddress;
     private string _relayUrl;
-    private string _relayToken;
     private string? _relayState;
     private bool _isRunning;
     private bool _sharesChangedWhileRunning;
@@ -61,7 +60,6 @@ public sealed class MainViewModel : ObservableObject
         _port = _settings.Port.ToString();
         _bindAddress = _settings.BindAddress;
         _relayUrl = _settings.RelayUrl;
-        _relayToken = UnprotectToken(_settings.RelayTokenProtected);
         foreach (ShareSettings share in _settings.Shares)
             AddShareItem(new ShareItemViewModel(share));
 
@@ -104,13 +102,6 @@ public sealed class MainViewModel : ObservableObject
     {
         get => _relayUrl;
         set => SetProperty(ref _relayUrl, value);
-    }
-
-    /// <summary>Device token of this machine on the relay; saved DPAPI-protected.</summary>
-    public string RelayToken
-    {
-        get => _relayToken;
-        set => SetProperty(ref _relayToken, value);
     }
 
     /// <summary>Relay link state while running (null without relay).</summary>
@@ -279,7 +270,6 @@ public sealed class MainViewModel : ObservableObject
         _settings.BindAddress = BindAddress.Trim();
         _settings.Shares = Shares.Select(x => x.ToSettings()).ToList();
         _settings.RelayUrl = RelayUrl.Trim();
-        _settings.RelayTokenProtected = ProtectToken(RelayToken.Trim());
         try
         {
             _settingsStore.Save(_settings);
@@ -479,7 +469,7 @@ public sealed class MainViewModel : ObservableObject
         return true;
     }
 
-    /// <summary>Relay from the form: none when the URL is empty; an URL needs a token.</summary>
+    /// <summary>Relay from the form: none when the URL is empty. No token: the Agent proves its HostId with its key.</summary>
     private bool TryReadRelay(out RelayEndpoint? relay)
     {
         relay = null;
@@ -491,31 +481,8 @@ public sealed class MainViewModel : ObservableObject
             ErrorText = $"'{url}' không phải địa chỉ relay (vd https://relay.example.com/).";
             return false;
         }
-        if (RelayToken.Trim().Length == 0)
-        {
-            ErrorText = "Cần token máy của relay (lấy bằng procbridge-relay device register).";
-            return false;
-        }
-        relay = new RelayEndpoint(parsed, RelayToken.Trim());
+        relay = new RelayEndpoint(parsed);
         return true;
-    }
-
-    private static string? ProtectToken(string token)
-        => token.Length == 0 ? null : Convert.ToBase64String(new DpapiKeyProtector().Protect(System.Text.Encoding.UTF8.GetBytes(token)));
-
-    /// <summary>The saved token, or empty when there is none or it cannot be read (other user, other machine).</summary>
-    private static string UnprotectToken(string? protectedToken)
-    {
-        if (string.IsNullOrEmpty(protectedToken))
-            return string.Empty;
-        try
-        {
-            return System.Text.Encoding.UTF8.GetString(new DpapiKeyProtector().Unprotect(Convert.FromBase64String(protectedToken)));
-        }
-        catch (Exception e) when (e is FormatException or System.Security.Cryptography.CryptographicException)
-        {
-            return string.Empty;
-        }
     }
 
     private bool TryReadShares(out List<ShareSettings> shares)
