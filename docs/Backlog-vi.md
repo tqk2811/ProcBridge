@@ -18,12 +18,13 @@ thư mục cha đã lỗi); gốc ảo nằm trong gốc ảo khác; mục
 chèn ở cuối chứ không theo thứ tự tên; `SL_INDEX_SPECIFIED`; quá 64 lượt quét thư mục cha cùng lúc; handle overlapped hay lời gọi có event/APC (cố ý không chèn); ở chế độ cục bộ
 (`PROCBRIDGE_MAP`) mục không có file ID. Ghi 2026-11-26.
 
-## [Vừa] Ký tự ổ giả (V:\) làm thư mục ảo
+## [Thấp] Ký tự ổ giả (V:\) làm thư mục ảo
 
 Plan 4.3 cho phép thư mục ảo nằm trên ổ không tồn tại. M1 chưa thử: `QueryDosDeviceW` của ổ ảo thất bại nên
 `NtQueryObject` trả tên theo volume của thư mục thật (`GetFinalPathNameByHandle` ra sai ổ), và
 `GetVolumeInformation("V:\")`, `GetDriveType` chưa được giả lập. Thiết kế volume giả (thiết bị riêng, symbolic link, mount
 manager, thông tin volume, device map) ở Plan mục 13 ("Hook: đường dẫn và handle ngoài thư mục ảo"); chưa làm. Gốc ảo trên ổ giả không được chèn vào liệt kê thư mục cha.
+User chọn chỉ để backlog (2026-11-26).
 
 ## [Thấp] Đường dẫn dạng khác: phần còn thiếu
 
@@ -54,6 +55,20 @@ kéo (bên nhận tự `DuplicateHandle` từ process khác về) và handle k�
 được theo dõi. Vì sao: handle ảo đi qua process khác là bình thường với công cụ build (stdout/stderr vào file, pipeline).
 Hướng thay thế: bỏ hộp thư shared memory, khi gặp handle lạ thì kiểm lười bằng `IsBackedByMapping` kèm cache âm (handle đã
 kiểm là không thuộc thư mục ảo), phủ được cả chiều kéo lẫn kế thừa. Cần user chọn hướng. Ghi 2026-11-26.
+
+## [Thấp] Hộp thư handle: các ghi chú review còn lại
+
+Các điểm review của [HandleInbox.h](../src/native/ProcBridge.Hook/src/HandleInbox.h) /
+[HandleInbox.cpp](../src/native/ProcBridge.Hook/src/HandleInbox.cpp) chưa xử lý:
+- `Drain` (HandleInbox.h ~42-50) có thể trả về trước khi một thread khác nhận xong mục nó đã lấy: lượt tra handle ngay sau
+  đó chưa thấy bản sao. Chấp nhận trễ một lượt tra, hoặc thêm bộ đếm mục đang nhận dở để `Drain` chờ.
+- `volatile ULONGLONG Claimed` (HandleInbox.cpp ~118, đọc ~187, ghi ~191/205/250) có thể bị đọc rách trên x86 (64-bit không
+  nguyên tử); dùng `ReadNoFence64`/`WriteNoFence64`.
+- Bên gửi chết giữa lúc CAS sang `SlotWriting` và lúc ghi `Claimed` (~244-250) thì slot kẹt mãi: `Claimed == 0` nên nhánh
+  thu hồi slot kẹt ở `Take` (~187-192) không bao giờ chạy.
+- Comment ở ~256-257 gọi việc bên gửi cũ ghi đè các trường là "harmless" chỉ đúng một nửa: bên nhận kiểm từng mục nên
+  không nhận sai handle, nhưng mục của bên gửi khác có thể bị trộn trường và bị loại, làm mất theo dõi handle của bên đó.
+- Ghi 2026-11-26.
 
 ## [Vừa] Inject con: các đường chưa phủ
 
