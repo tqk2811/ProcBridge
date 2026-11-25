@@ -269,6 +269,11 @@ theo đường dẫn trên Agent cho commit, set-info, rename, delete.
   20 lần xanh, chạy 4 tiến trình song song 40 lần xanh. Probe mặc định chỉ đọc gốc thật (lượt ghi duy nhất ra file tạm
   ngoài gốc), nên nghi phần preload/cache thư mục của Broker chụp mtime trước khi NTFS cập nhật xong sau `CreateTree`.
   Lần đỏ sau: giữ nguyên dòng khác nhau và thời điểm tạo cây để so.
+- `ConnectionPoolTests.BusyConnection_IsNotBlockedByAnotherRequestOpeningASlot`: đỏ một lần khi chạy cả bộ test
+  local (2026-11-26, nhánh `feature/relay-pairing`, không đụng tới pool): 9/10 request xong đúng mốc 2000 ms thay vì
+  dưới 2000 ms, tức các request xếp hàng trên một kết nối 300 ms/lượt chạm sát ngưỡng khi máy đang tải nặng. Chạy riêng
+  3 lần đều xanh. Ngưỡng 2000 ms quá sát (10 request × 300 ms chia trên một kết nối sống); nên đo theo số request phải
+  chờ kết nối chậm thay vì theo thời gian tuyệt đối.
 
 ## [Thấp] Review độc lập cho M2
 
