@@ -852,6 +852,53 @@ namespace
         return 0;
     }
 
+    struct ThreadCheck
+    {
+        const wchar_t* VirtualFile;
+        const wchar_t* RealFile;
+        std::wstring ExpectedVirtual;
+        std::wstring ExpectedReal;
+        volatile LONG Mismatches;
+    };
+
+    DWORD WINAPI ThreadCheckWorker(LPVOID parameter)
+    {
+        auto* check = static_cast<ThreadCheck*>(parameter);
+        for (int i = 0; i < 300; ++i)
+        {
+            const bool useVirtual = (i + GetCurrentThreadId()) % 2 == 0;
+            const HANDLE handle = OpenRead(useVirtual ? check->VirtualFile : check->RealFile);
+            if (handle == INVALID_HANDLE_VALUE || FinalPath(handle) != (useVirtual ? check->ExpectedVirtual : check->ExpectedReal))
+            {
+                InterlockedIncrement(&check->Mismatches);
+            }
+            if (handle != INVALID_HANDLE_VALUE)
+            {
+                CloseHandle(handle);
+            }
+        }
+        return 0;
+    }
+
+    /// --threads <virtual file> <real file>: 8 threads open and close both files concurrently (handle
+    /// values are reused all the time) and check every final path; prints the number of mismatches.
+    int ThreadedHandles(const wchar_t* virtualFile, const wchar_t* realFile)
+    {
+        ThreadCheck check{ virtualFile, realFile, std::wstring(L"\\\\?\\") + virtualFile, std::wstring(L"\\\\?\\") + realFile, 0 };
+        HANDLE threads[8];
+        for (HANDLE& thread : threads)
+        {
+            thread = CreateThread(nullptr, 0, ThreadCheckWorker, &check, 0, nullptr);
+        }
+        WaitForMultipleObjects(static_cast<DWORD>(std::size(threads)), threads, TRUE, INFINITE);
+        for (HANDLE thread : threads)
+        {
+            CloseHandle(thread);
+        }
+        WriteLine(L"mismatches: " + Num(check.Mismatches));
+        return 0;
+    }
+
     /// --delete <file>: NtDeleteFile on the DOS path, prints the status.
     int DeleteByName(const wchar_t* file)
     {
@@ -879,6 +926,10 @@ namespace
         if (command == L"--delete" && argc == 3)
         {
             return DeleteByName(argv[2]);
+        }
+        if (command == L"--threads" && argc == 4)
+        {
+            return ThreadedHandles(argv[2], argv[3]);
         }
         std::fputs("ProcBridge.NativeProbe: unknown command\n", stderr);
         return 2;

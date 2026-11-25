@@ -28,6 +28,20 @@ public sealed class HookProbeCommandTests
     [TestMethod]
     [DataRow("x64")]
     [DataRow("Win32")]
+    public void ConcurrentOpenClose_KeepsNamesApart(string platform)
+    {
+        using HookSandbox sandbox = new(platform);
+
+        ProcessResult result = sandbox.RunHooked(
+            $"\"{sandbox.Binaries.Probe}\" --threads \"{sandbox.VirtualRoot}\\a.txt\" \"{sandbox.RealRoot}\\a.txt\"");
+
+        Assert.AreEqual(0, result.ExitCode, result.StandardOutput + result.StandardError);
+        Assert.AreEqual("mismatches: 0", result.StandardOutput.TrimEnd());
+    }
+
+    [TestMethod]
+    [DataRow("x64")]
+    [DataRow("Win32")]
     public void NtDeleteFile_DeletesBackingFile(string platform)
     {
         using HookSandbox sandbox = new(platform);
