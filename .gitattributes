@@ -1,0 +1,10 @@
+# Repo stores CRLF in the index for text files (no normalization).
+*.sh        text eol=lf
+*.bash      text eol=lf
+*.png       binary
+*.jpg       binary
+*.ico       binary
+*.dll       binary
+*.exe       binary
+# Vendored third-party sources: keep byte-for-byte as upstream.
+src/native/external/** -text

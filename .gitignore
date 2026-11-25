@@ -1,0 +1,13 @@
+bin/
+obj/
+.vs/
+*.user
+*.suo
+artifacts/
+TestResults/
+Directory.Build.rsp
+src/native/out/
+src/native/**/x64/
+src/native/**/Win32/
+*.VC.db
+*.ipch
