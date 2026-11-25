@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using MessagePack;
 using ProcBridge.Agent.Explorer.Models;
 using ProcBridge.Crypto.Identity.Interfaces;
+using ProcBridge.Crypto.Storage;
 using ProcBridge.Protocol;
 using ProcBridge.Transport.Secure;
 
@@ -22,8 +23,7 @@ public sealed class ExplorerPolicyStore
     private const byte FormatVersion = 1;
     private static readonly byte[] _magic = "PBEP"u8.ToArray();
 
-    private readonly SharedStoreFile? _file;
-    private readonly IKeyProtector? _protector;
+    private readonly ProtectedStoreFile? _file;
     private readonly Lock _lock = new();
     private Dictionary<string, ExplorerPolicy> _policies = new(StringComparer.Ordinal);
 
@@ -36,8 +36,7 @@ public sealed class ExplorerPolicyStore
     /// <exception cref="CryptographicException">The file cannot be unwrapped (other user, corrupted).</exception>
     public ExplorerPolicyStore(string path, IKeyProtector protector)
     {
-        _file = new SharedStoreFile(path, _magic, FormatVersion);
-        _protector = protector;
+        _file = new ProtectedStoreFile(path, _magic, FormatVersion, protector);
         _policies = ReadFile();
     }
 
@@ -179,10 +178,9 @@ public sealed class ExplorerPolicyStore
 
     private Dictionary<string, ExplorerPolicy> ReadFile()
     {
-        byte[]? body = _file!.ReadBody();
-        if (body is null)
+        byte[]? plain = _file!.Read();
+        if (plain is null)
             return new Dictionary<string, ExplorerPolicy>(StringComparer.Ordinal);
-        byte[] plain = _protector!.Unprotect(body);
         try
         {
             return new Dictionary<string, ExplorerPolicy>(
@@ -195,5 +193,5 @@ public sealed class ExplorerPolicyStore
     }
 
     private void WriteFile(Dictionary<string, ExplorerPolicy> policies)
-        => _file!.WriteBody(_protector!.Protect(MessagePackSerializer.Serialize(policies, ProtocolSerializer.Options)));
+        => _file!.Write(MessagePackSerializer.Serialize(policies, ProtocolSerializer.Options));
 }

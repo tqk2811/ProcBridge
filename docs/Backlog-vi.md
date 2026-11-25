@@ -371,12 +371,6 @@ Chưa có cách thay khoá định danh của một máy mà không ghép cặp 
 - Hồ sơ quyền đọc lúc mở kết nối: đổi quyền chỉ áp cho kết nối mới (test `ProfileChange_AppliesToNewConnections`).
 - Ghi ngày: 2026-11-25.
 
-## [Thấp] Ba kho file bọc DPAPI viết lặp
-
-`IdentityKeyStore`, `PairedMachineStore`, `ExplorerPolicyStore` cùng khuôn "magic + version + blob bọc
-`IKeyProtector`, ghi nguyên tử qua file tạm". Cần hỏi user có gom thành một thành phần dùng chung không (quy tắc gom
-phần giống nhau); chưa tự gom vì `IdentityKeyStore` thuộc nhánh m5 đã review. Ghi 2026-11-25.
-
 ## [Vừa] Explorer: tải file lên, xuất `.reg`, chạy chương trình trên máy B chưa làm
 
 - Vị trí: `src/agent/ProcBridge.Agent.Explorer/FileExplorerProvider.cs:89`, `RegistryExplorerProvider.cs:53`, `ProcessExplorerProvider.cs:19`.
