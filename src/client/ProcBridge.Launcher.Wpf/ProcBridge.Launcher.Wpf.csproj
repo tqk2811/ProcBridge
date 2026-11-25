@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- WPF Launcher on machine A (plan sections 14, 15.5): paired machines, run profiles with the Remote Explorer folder picker, runs and the Remote Explorer. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>ProcBridge.Launcher.Wpf</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- WPF implicit usings leave System.IO out (System.IO.Path vs System.Windows.Shapes.Path); nothing here uses Shapes. -->
+    <Using Include="System.IO" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ProcBridge.Launcher\ProcBridge.Launcher.csproj" />
+    <ProjectReference Include="..\ProcBridge.Explorer.Client\ProcBridge.Explorer.Client.csproj" />
+  </ItemGroup>
+</Project>

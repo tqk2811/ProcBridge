@@ -23,6 +23,16 @@ public sealed class LauncherTests
         Assert.AreEqual("proj", options.Mappings.Single().RemotePath);
         StringAssert.EndsWith(options.SpawnPath, "ProcBridge.Spawn.x86.exe");
         Assert.AreEqual("cmd.exe /c \"dir x\"", options.CommandLine);
+        Assert.IsNull(options.WorkingDirectory);
+    }
+
+    [TestMethod]
+    public void CommandLine_WorkingDirectory_IsParsed()
+    {
+        LauncherOptions options = LauncherCommandLine.Parse(
+            ["--agent", "host", "--share", "src", "--map", @"V:\a", "", "--cwd", @"C:\Work", "--", "cmd.exe"]);
+
+        Assert.AreEqual(@"C:\Work", options.WorkingDirectory);
     }
 
     [TestMethod]
@@ -65,5 +75,34 @@ public sealed class LauncherTests
         // The run's Broker is stopped: its pipe is gone.
         string pipeName = ProcBridge.HookIpc.HookIpcProtocol.GetPipeName(session.SessionId);
         Assert.IsFalse(Directory.GetFiles(@"\\.\pipe\").Any(x => x.EndsWith(pipeName, StringComparison.OrdinalIgnoreCase)));
+    }
+
+    /// <summary>The WPF Launcher path: output lines of the tree reach the sink, the target starts in the working directory.</summary>
+    [TestMethod]
+    public async Task Run_WithOutputSink_CollectsLinesOfTheTree_InTheWorkingDirectory()
+    {
+        using HookSandbox sandbox = new("x64");
+        await using var agent = new AgentServer([new ReadOnlyShare("share", sandbox.RealRoot)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
+        agent.Start();
+        string workingDirectory = Directory.CreateDirectory(Path.Combine(sandbox.BaseDirectory, "work")).FullName;
+        var options = new LauncherOptions
+        {
+            AllowPlaintextTransport = true,
+            AgentHost = "127.0.0.1",
+            AgentPort = agent.Port,
+            ShareName = "share",
+            Mappings = [new Broker.Models.VirtualMapping(sandbox.VirtualRoot, "")],
+            CacheRoot = Path.Combine(sandbox.BaseDirectory, "cache"),
+            SpawnPath = sandbox.Binaries.Spawn,
+            WorkingDirectory = workingDirectory,
+            // The child cmd proves the redirected streams reach the whole tree.
+            CommandLine = $"cmd.exe /d /c cd & cmd.exe /d /c type \"{sandbox.VirtualRoot}\\sub\\b.txt\"",
+        };
+        var lines = new System.Collections.Concurrent.ConcurrentQueue<string>();
+
+        int exitCode = await new LaunchSession(options, lines.Enqueue).RunAsync();
+
+        Assert.AreEqual(0, exitCode);
+        CollectionAssert.AreEqual(new[] { workingDirectory, "bee" }, lines.ToArray());
     }
 }

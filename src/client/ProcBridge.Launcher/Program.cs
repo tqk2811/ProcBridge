@@ -108,10 +108,7 @@ internal static class Program
             Console.Error.WriteLine("--pair needs --agent <host>[:port].");
             return 2;
         }
-        int colon = agent.LastIndexOf(':');
-        (string host, int port) = colon > 0 && int.TryParse(agent[(colon + 1)..], out int parsed)
-            ? (agent[..colon], parsed)
-            : (agent, Protocol.ProtocolInfo.DefaultPort);
+        (string host, int port) = LauncherCommandLine.ParseAgent(agent);
         using IdentityKey identity = OpenIdentity(dataDirectory);
         var client = new PairingClient(identity, store);
         Console.WriteLine($"This machine's fingerprint: {client.Fingerprint}");
@@ -133,12 +130,7 @@ internal static class Program
         }
     }
 
-    private static string DataDirectory(string? dataDirectory)
-        => dataDirectory ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ProcBridge", "launcher");
+    private static IdentityKey OpenIdentity(string? dataDirectory) => new LauncherDataStore(dataDirectory).OpenIdentity();
 
-    private static IdentityKey OpenIdentity(string? dataDirectory)
-        => new IdentityKeyStore(Path.Combine(DataDirectory(dataDirectory), "identity.key"), new DpapiKeyProtector()).LoadOrCreate();
-
-    private static PairedMachineStore OpenPairedMachines(string? dataDirectory)
-        => new(Path.Combine(DataDirectory(dataDirectory), "paired-machines.bin"), new DpapiKeyProtector());
+    private static PairedMachineStore OpenPairedMachines(string? dataDirectory) => new LauncherDataStore(dataDirectory).OpenPairedMachines();
 }

@@ -111,6 +111,25 @@ public sealed class ExplorerTransportTests
     }
 
     [TestMethod]
+    public async Task Policy_ReportsTheProfileOfThisMachine_AndNothingWithoutOne()
+    {
+        using var root = new TempFolder("exp");
+        await using var s = new Setup(root, new ExplorerPolicy { FileRoots = [root.Path], RegistryRoots = [@"HKCU\Software"], Permissions = ExplorerPermissions.FileRead | ExplorerPermissions.ProcessKill });
+
+        ExplorerPolicyResponse policy = await s.Client.GetPolicyAsync(CancellationToken.None);
+        Assert.AreEqual(ExplorerStatus.Ok, policy.Status, policy.Error);
+        Assert.AreEqual(ExplorerPermissions.FileRead | ExplorerPermissions.ProcessKill, policy.Permissions);
+        CollectionAssert.AreEqual(new[] { root.Path }, policy.FileRoots.ToArray());
+        CollectionAssert.AreEqual(new[] { @"HKCU\Software" }, policy.RegistryRoots.ToArray());
+
+        s.Policies.Set(s.Peers.BrokerKey.Fingerprint, new ExplorerPolicy());
+        await using var fresh = new ExplorerClient(new SecureConnectionFactory(new TcpStreamConnector("127.0.0.1", s.Server.Port), s.Peers.BrokerKey, s.Peers.BrokerTrust, s.Peers.AgentKey.PublicKey, Transport), Transport);
+        ExplorerPolicyResponse none = await fresh.GetPolicyAsync(CancellationToken.None);
+        Assert.AreEqual(ExplorerPermissions.None, none.Permissions);
+        Assert.IsEmpty(none.FileRoots);
+    }
+
+    [TestMethod]
     public async Task ProfileChange_AppliesToNewConnections()
     {
         using var root = new TempFolder("exp");

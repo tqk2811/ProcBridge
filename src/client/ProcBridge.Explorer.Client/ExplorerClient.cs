@@ -102,6 +102,10 @@ public sealed class ExplorerClient : IAsyncDisposable
     public Task<SystemInfoResponse> GetSystemInfoAsync(CancellationToken cancellationToken)
         => CallAsync<SystemInfoRequest, SystemInfoResponse>(MessageType.ExplorerSysInfo, new SystemInfoRequest(), true, cancellationToken);
 
+    /// <summary>The profile machine B granted this machine; lets the UI hide what would be refused (the Agent still checks).</summary>
+    public Task<ExplorerPolicyResponse> GetPolicyAsync(CancellationToken cancellationToken)
+        => CallAsync<ExplorerPolicyRequest, ExplorerPolicyResponse>(MessageType.ExplorerSysPolicy, new ExplorerPolicyRequest(), true, cancellationToken);
+
     /// <param name="idempotent">Reads may be resent after a broken connection; write operations never are.</param>
     private async Task<TResponse> CallAsync<TRequest, TResponse>(MessageType type, TRequest request, bool idempotent, CancellationToken cancellationToken)
     {

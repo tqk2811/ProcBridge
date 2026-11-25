@@ -43,4 +43,6 @@ public enum MessageType : ushort
     ExplorerSysServices = 0x1402,
     ExplorerSysServiceControl = 0x1403,
     ExplorerSysInfo = 0x1404,
+    /// <summary>The profile machine B keeps for the caller (ExplorerPolicyResponse); never refused.</summary>
+    ExplorerSysPolicy = 0x1405,
 }
