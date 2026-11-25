@@ -5,11 +5,16 @@ namespace ProcBridge::Hook
 {
     DirectoryNameCache::~DirectoryNameCache()
     {
-        const size_t count = _count.load(std::memory_order_relaxed);
+        // Runs at DLL detach, also when the process exits: the hooks stay installed then and a later open relative to
+        // a cached handle still calls Visit. Empty the cache first so it never hands out a freed name.
+        AcquireSRWLockExclusive(&_lock);
+        const size_t count = _count.exchange(0, std::memory_order_acq_rel);
         for (size_t i = 0; i < count; ++i)
         {
             FreeString(_entries[i].Name);
+            _entries[i].Name = {};
         }
+        ReleaseSRWLockExclusive(&_lock);
     }
 
     void DirectoryNameCache::Add(HANDLE handle, const wchar_t* name, size_t bytes) noexcept

@@ -5,9 +5,17 @@ namespace ProcBridge::Hook
 {
     HandleTable::~HandleTable()
     {
-        if (_entries != nullptr)
+        // Runs at DLL detach, also when the process exits: the hooks stay installed then and NtClose from later
+        // detach code still calls Find. Leave the table empty, not dangling (an access violation at exit otherwise).
+        AcquireSRWLockExclusive(&_lock);
+        _count.store(0, std::memory_order_release);
+        Entry* entries = _entries;
+        _entries = nullptr;
+        _capacity = 0;
+        ReleaseSRWLockExclusive(&_lock);
+        if (entries != nullptr)
         {
-            HeapFree(GetProcessHeap(), 0, _entries);
+            HeapFree(GetProcessHeap(), 0, entries);
         }
     }
 
