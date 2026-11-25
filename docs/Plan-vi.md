@@ -343,8 +343,10 @@ Broker kết nối TCP thẳng tới Agent (cổng cấu hình được). Tìm A
     "Ghép cặp qua relay". Relay chỉ giữ một **chỗ ghép cặp** mỗi máy B, tra theo khoá dẫn xuất từ mã mời 8 số; tra cứu
     `POST api/tunnel/pairing-sessions {lookupKey}` mở một phiên tunnel thường tới B và trả kèm HostId.
   - Chống lạm dụng: giới hạn tần suất theo địa chỉ cho mở phiên, kênh điều khiển và lane (`Relay:RateLimit`,
-    mặc định 60/20/600 mỗi phút, quá thì 429), tra cứu chỗ ghép cặp `PairingPermitLimit` (mặc định 10 mỗi phút, mỗi lần
-    là một lần đoán mã); trần số phiên sống mỗi HostId và mỗi địa chỉ (`MaxSessionsPerHost`,
+    mặc định 60/20/600 mỗi phút, quá thì 429), tra cứu chỗ ghép cặp `PairingPermitLimit` (mặc định 10 mỗi phút **theo dải
+    mạng** IPv4 /24 hoặc IPv6 /64, mỗi lần là một lần đoán mã) cộng trần số lần tra sai toàn relay
+    `Relay:Tunnel:MaxFailedPairingLookupsPerMinute` (mặc định 1000/phút) và số lần xin chỗ mỗi kênh điều khiển
+    `MaxPairingSlotRequestsPerMinute` (30/phút); trần số phiên sống mỗi HostId và mỗi địa chỉ (`MaxSessionsPerHost`,
     `MaxSessionsPerAddress`, mặc định 64), số kênh điều khiển mỗi địa chỉ (16), số lane mỗi địa chỉ (256); trần kích
     thước message điều khiển; vé lane ngẫu nhiên 256 bit qua header. Relay chỉ tin `X-Forwarded-For` từ proxy khai
     trong `Relay:ForwardedHeaders:KnownProxies`/`KnownNetworks` (mặc định rỗng: không tin header nào).
@@ -416,21 +418,36 @@ Ghép cặp qua relay (nhánh `feature/relay-pairing`, quyết định 2026-11-2
 - Máy B (Agent bật `AllowPairing` và có relay): `RelayHostLink` sinh mã mời ngẫu nhiên 8 chữ số (`RelayPairingCode`,
   hiện dạng `1234-5678`; cố ý khác độ dài mã 6 số để khỏi nhầm), gửi trên kênh điều khiển đã chứng minh khoá
   `pairingSlot {lookupKey}` với `lookupKey` = hex SHA-256(nhãn `ProcBridge relay pairing v1` | mã). Relay trả
-  `pairingSlotRegistered {lookupKey, expiresAt}`, lúc đó Agent mới hiện mã (console in ra, app WPF hiện cạnh trạng thái
-  relay). Mỗi máy B một chỗ; chỗ sống `Relay:Tunnel:PairingSlotLifetime` (mặc định 5 phút), dùng một lần, mất theo kênh
-  điều khiển; khoá trùng với chỗ của máy khác thì relay trả `pairingSlotRejected` và B chọn mã khác. B tự mở chỗ mới
-  với mã mới khi chỗ hết hạn, bị dùng (`pairingSlotClaimed`) hoặc kênh điều khiển nối lại; tắt ghép cặp thì gửi
-  `pairingSlotCancel`.
+  `pairingSlotRegistered {lookupKey, expiresAt, expiresInSeconds}`, lúc đó Agent mới hiện mã (console in ra, app WPF hiện
+  cạnh trạng thái relay). Mỗi máy B một chỗ; chỗ sống `Relay:Tunnel:PairingSlotLifetime` (mặc định 5 phút), dùng một lần,
+  mất theo kênh điều khiển; khoá trùng với chỗ của máy khác thì relay trả `pairingSlotRejected` và B chọn mã khác. B tự
+  mở chỗ mới với mã mới khi chỗ sắp hết hạn, bị dùng (`pairingSlotClaimed`, kể cả khi relay lấy chỗ ra mà không mở được
+  phiên, lúc đó `sessionId` rỗng) hoặc kênh điều khiển nối lại; tắt ghép cặp thì gửi `pairingSlotCancel`.
+- Thứ tự và đồng hồ ở máy B: chỉ một vòng gửi duy nhất trong `RelayHostLink`, mỗi lần được đánh thức nó gửi trạng thái
+  **mong muốn hiện tại** (chỗ với khoá đang chờ, hoặc huỷ) nếu khác lần gửi trước, nên thông điệp không thể tới sai thứ
+  tự. Relay báo đã giữ một khoá cũ (trả lời đến muộn) thì vòng gửi đặt lại chỗ đúng hoặc huỷ. Hạn của chỗ tính bằng
+  `expiresInSeconds` cộng giờ nhận trên đồng hồ của B (không so `expiresAt` của relay với đồng hồ B), xin mã mới sớm
+  `PairingRenewMargin` (5 giây, tối đa một phần tư thời gian sống). Relay từ chối quá `MaxPairingRejections` (5) mã liên
+  tiếp thì B hiện lỗi (`PairingError`, console in ra, app WPF ghép vào trạng thái relay) và thử lại với độ trễ tăng dần
+  (2 giây tới 60 giây).
 - Máy A (`RelayPairingConnector`): tính lại `lookupKey` từ mã người dùng nhập, gọi `POST api/tunnel/pairing-sessions`
   (ẩn danh, giới hạn tần suất). Relay lấy chỗ ra (dùng một lần, đoán sai không làm mất chỗ của B), mở phiên tunnel
   thường tới B và trả `{sessionId, ticket, expiresAt, hostId}`; không có chỗ thì 404 `PAIRING_SLOT_NOT_FOUND`. A mở lane
   0 và chạy `PairingClient` y như ở LAN (Noise XX, mã 6 số, B bấm chấp nhận sau khi so vân tay A). Trước khi hỏi mã,
-  `PairingClient` so vân tay khoá mà bắt tay chứng minh với HostId relay đã nêu (`IPeerHintConnector`), lệch thì dừng.
+  `PairingClient` so vân tay khoá tĩnh trong tin nhắn 2 của bắt tay với HostId relay đã nêu (`IPeerHintConnector`) ngay
+  sau khi đọc tin nhắn 2, trước khi gửi tin nhắn 3; lệch hoặc không có khoá thì dừng, không gửi gì thêm.
   Máy đã ghép cặp kiểu này lưu địa chỉ `relay <url>`; các lần sau đi qua relay theo HostId như mục 8.2.
 - Vì sao an toàn: relay chỉ thấy `lookupKey`. Mã mời 8 số **không phải bí mật đối với relay** (đoán ngược từ hash rất
   nhanh), nó chỉ để tìm máy B. Chống kẻ đứng giữa vẫn là mã 6 số dẫn xuất từ handshake hash cộng việc hai người dùng so
-  vân tay; relay tráo máy thì vân tay lệch HostId hoặc lệch màn hình. Người ngoài đoán mã: 10/phút mỗi địa chỉ, chỗ sống
-  5 phút, đoán trúng cũng chỉ tới được bước người dùng B so vân tay và bấm chấp nhận.
+  vân tay; relay tráo máy thì vân tay lệch HostId hoặc lệch màn hình.
+- **Rủi ro chấp nhận** (đoán mã mời): không gian mã là 10^8. Một người đoán bị chặn 10 lần/phút mỗi dải /24 hoặc /64 và
+  cả relay chỉ nhận tối đa 1000 lần tra sai mỗi phút; với N máy B đang mở chỗ, mỗi lần đoán trúng một chỗ nào đó với xác
+  suất N/10^8 (vd 1000 chỗ: 10^-5, tức tối đa khoảng 0,01 lần trúng mỗi phút khi đã chạm trần toàn relay). Trúng cũng
+  chỉ mở được một phiên ghép cặp: kẻ đoán không có mã 6 số mà máy B hiển thị (mã đó sinh từ handshake hash), và người
+  dùng B vẫn phải so vân tay của kẻ đó rồi bấm chấp nhận. Cái giá chấp nhận được: kẻ đoán trúng làm hỏng một mã của máy
+  B (máy B đổi mã) và có thể bật hộp thoại ghép cặp trên máy B; trần toàn relay cũng có nghĩa một đợt đoán ồ ạt làm người
+  dùng thật phải chờ tới phút sau mới tra được. Không dùng hàm băm chậm vì relay vẫn đoán ngược được 10^8 mã, và bảo
+  mật thật nằm ở mã 6 số với việc so vân tay.
 - Giao diện: Agent console `--relay <url> --allow-pairing` in mã; Launcher console
   `--pair --relay <url> [--code <mã>]`; app WPF của Launcher có ô "Máy B chỉ thấy qua relay" (URL relay + mã 8 số) và
   Remote Explorer đi qua relay cho máy ghép cặp kiểu này. Test: `PairingSlotTests` (relay e2e), `RelayPairingTests`
