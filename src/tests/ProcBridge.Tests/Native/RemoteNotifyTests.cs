@@ -60,6 +60,7 @@ public sealed class RemoteNotifyTests
         Assert.Contains("notify.iocp: ok=1 key=0x1234 overlapped=1 action=1 name=n-iocp.txt", real.StandardOutput);
         Assert.Contains("notify.close: ended=1 signalled=1 status=0x10B", real.StandardOutput);
         Assert.Contains("notify.eventClosed: signalled=1 status=0x0", real.StandardOutput);
+        Assert.Contains("notify.iocpSkip: signalled=1 packet=0", real.StandardOutput);
         HookComparisonTests.AssertSameLines(real.StandardOutput, remote.StandardOutput);
         // Every handle was closed: the hook removed its watches.
         await WaitForNoWatchesAsync(session);
@@ -92,6 +93,46 @@ public sealed class RemoteNotifyTests
         // One long poll serves every handle: far fewer pipe instances than watched handles.
         Assert.IsLessThan(16, session.Broker.Pipe.PeakClientCount, $"peak pipe connections {session.Broker.Pipe.PeakClientCount}");
         await WaitForNoWatchesAsync(session);
+    }
+
+    [TestMethod]
+    public async Task BrokerRestart_EndsWaitingRequest_AndTheHandleWatchesAgain()
+    {
+        using HookSandbox sandbox = new("x64");
+        await using RemoteSession session = RemoteSession.Start(sandbox);
+        await WaitForChangeWatcherAsync(session);
+
+        Task<ProcessResult> run = Task.Run(() => session.Run($"\"{sandbox.Binaries.Probe}\" --notify-restart \"{sandbox.VirtualRoot}\" \"{sandbox.RealRoot}\""));
+        DateTime deadline = DateTime.UtcNow.AddSeconds(30);
+        while (session.Broker.Pipe.Handler.Watches.Count == 0)
+        {
+            Assert.IsFalse(run.IsCompleted, "The probe ended before its watch was registered.");
+            Assert.IsLessThan(deadline, DateTime.UtcNow, "The watch was never registered.");
+            await Task.Delay(20);
+        }
+        // The new Broker counts watch ids from 1 again and knows nothing of the old watch.
+        await session.RestartBrokerAsync();
+        await WaitForChangeWatcherAsync(session);
+
+        ProcessResult result = await run.WaitAsync(TimeSpan.FromSeconds(120));
+        Assert.AreEqual(0, result.ExitCode, Lines(result));
+        Assert.Contains("notify.restart.first: ok=1 entries=0", result.StandardOutput, Lines(result));
+        Assert.Contains("notify.restart.second: ok=1 action=1 name=n-restart", result.StandardOutput, Lines(result));
+    }
+
+    [TestMethod]
+    public async Task ChangeDuringRegistration_ReachesTheFirstRequest()
+    {
+        using HookSandbox sandbox = new("x64");
+        await using RemoteSession session = RemoteSession.Start(sandbox);
+        await WaitForChangeWatcherAsync(session);
+        // The hook waits this long between the Broker's answer and recording the watch id; the file appears meanwhile.
+        var environment = new Dictionary<string, string> { ["PROCBRIDGE_TEST_WATCH_REGISTER_DELAY_MS"] = "2500" };
+
+        ProcessResult result = session.Run($"\"{sandbox.Binaries.Probe}\" --notify-gap \"{sandbox.VirtualRoot}\" \"{sandbox.RealRoot}\"", environment);
+
+        Assert.AreEqual(0, result.ExitCode, Lines(result));
+        Assert.Contains("notify.gap: ok=1 action=1 name=n-gap.txt", result.StandardOutput, Lines(result));
     }
 
     [TestMethod]

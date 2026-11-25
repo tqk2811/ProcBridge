@@ -20,11 +20,13 @@ internal sealed class RemoteSession : IAsyncDisposable
 {
     private readonly HookSandbox _sandbox;
     private readonly AgentServer _agent;
-    private readonly BrokerHost _broker;
     private readonly SecurePeers _peers;
+    private readonly BrokerOptions _options;
+    private BrokerHost _broker;
 
-    private RemoteSession(HookSandbox sandbox, AgentServer agent, BrokerHost broker, string sessionId, SecurePeers peers)
+    private RemoteSession(HookSandbox sandbox, AgentServer agent, BrokerHost broker, string sessionId, SecurePeers peers, BrokerOptions options)
     {
+        _options = options;
         _peers = peers;
         _sandbox = sandbox;
         _agent = agent;
@@ -60,8 +62,16 @@ internal sealed class RemoteSession : IAsyncDisposable
             WriteQueueRoot = Path.Combine(sandbox.BaseDirectory, "queue"),
             WriteThrough = writeThrough,
         };
-        BrokerHost broker = BrokerHost.Start(configure?.Invoke(options) ?? options);
-        return new RemoteSession(sandbox, agent, broker, sessionId, peers);
+        options = configure?.Invoke(options) ?? options;
+        BrokerHost broker = BrokerHost.Start(options);
+        return new RemoteSession(sandbox, agent, broker, sessionId, peers, options);
+    }
+
+    /// <summary>Stops the Broker and starts a new one on the same pipe name (a Broker crash and restart seen from the hook).</summary>
+    public async Task RestartBrokerAsync()
+    {
+        await _broker.DisposeAsync();
+        _broker = BrokerHost.Start(_options);
     }
 
     /// <summary>Runs a command line under ProcBridge.Spawn with this Broker session.</summary>

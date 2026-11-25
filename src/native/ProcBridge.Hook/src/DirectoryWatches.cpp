@@ -69,6 +69,7 @@ namespace ProcBridge::Hook
         DWORD ThreadId;
         HANDLE Thread;             // own copy, for the APC (nullptr without one)
         bool Synchronous;
+        bool SkipPort;             // low bit of the event handle set: no completion packet, like the I/O manager
         HANDLE Done;               // synchronous only: signalled once Status is set
         NTSTATUS CancelStatus;     // set while the request is claimed by Deliver: complete with it (under _lock)
         NTSTATUS Status;
@@ -81,7 +82,8 @@ namespace ProcBridge::Hook
         HANDLE Handle;
         ULONG64 Generation;
         SRWLOCK RegisterLock;      // serializes the registration with Unwatch
-        uint32_t WatchId;          // written under RegisterLock and _lock
+        uint32_t WatchId;          // written under RegisterLock and _lock; 0 again after ResetWatches
+        ULONG64 Epoch;             // _channelEpoch the watch was registered in (under RegisterLock)
         ULONG CompletionFilter;    // of the call that registered the watch
         bool Unwatched;            // retired: Unwatch was sent or is due (under RegisterLock)
         HANDLE Port;               // own copy (under _lock)
@@ -111,6 +113,12 @@ namespace ProcBridge::Hook
             return ERROR_PROC_NOT_FOUND;
         }
         _resolver = &resolver;
+        wchar_t delay[16];
+        const DWORD length = GetEnvironmentVariableW(L"PROCBRIDGE_TEST_WATCH_REGISTER_DELAY_MS", delay, 16);
+        if (length > 0 && length < 16)
+        {
+            _registerDelayMs = wcstoul(delay, nullptr, 10);
+        }
         return ERROR_SUCCESS;
     }
 
@@ -146,24 +154,36 @@ namespace ProcBridge::Hook
     DWORD WINAPI DirectoryWatches::PollerThunk(PVOID context) noexcept
     {
         static_cast<DirectoryWatches*>(context)->Poll();
+        return 0;
     }
 
     void DirectoryWatches::Poll() noexcept
     {
         // Everything this thread calls (pipe opens and closes) goes straight to the system.
         ReentryGuard guard;
+        DWORD backoff = 0;
         while (true)
         {
             ULONG bytes = 0;
             const NTSTATUS status = _resolver->WaitAnyChanges(_channel, _pollBuffer, bytes);
             if (NT_SUCCESS(status))
             {
+                backoff = 0;
                 Dispatch(_pollBuffer, bytes);
                 continue;
             }
-            // The Broker is gone or refuses the poll: what waits fails like a broken network redirector would.
-            FailAll(status);
-            Sleep(1000);
+            if (status == STATUS_NOT_IMPLEMENTED || status == STATUS_NOT_SUPPORTED)
+            {
+                // A Broker that does not know the poll never will: notify calls fail at once from now on.
+                _fatal.store(status);
+                ResetWatches();
+                return;
+            }
+            // The channel broke or the Broker failed the poll: a restarted Broker knows none of our watches (and
+            // counts its ids from 1 again). Forget them all; the processes list again and their next notify registers.
+            ResetWatches();
+            backoff = backoff == 0 ? 100 : (backoff >= 2500 ? 5000 : backoff * 2);
+            Sleep(backoff);
         }
     }
 
@@ -173,7 +193,7 @@ namespace ProcBridge::Hook
         HookIpc::WaitAnyChangesReply reply{};
         if (!reader.Read(&reply, sizeof(reply)))
         {
-            FailAll(STATUS_INVALID_NETWORK_RESPONSE);
+            ResetWatches();
             return;
         }
         for (USHORT group = 0; group < reply.GroupCount; ++group)
@@ -181,7 +201,7 @@ namespace ProcBridge::Hook
             HookIpc::WatchChangesHeader header{};
             if (!reader.Read(&header, sizeof(header)))
             {
-                FailAll(STATUS_INVALID_NETWORK_RESPONSE);
+                ResetWatches();
                 return;
             }
             const BYTE* start = reader.Position();
@@ -192,44 +212,116 @@ namespace ProcBridge::Hook
                 USHORT chars = 0;
                 if (!reader.Read(&change, sizeof(change)) || !reader.ReadString(text, chars))
                 {
-                    FailAll(STATUS_INVALID_NETWORK_RESPONSE);
+                    ResetWatches();
                     return;
                 }
             }
-            Entry* entry = FindWatch(header.WatchId);
+            const ULONG groupBytes = static_cast<ULONG>(reader.Position() - start);
+            const bool overflow = (header.Flags & HookIpc::ChangesFlagOverflow) != 0;
+            Entry* entry = nullptr;
+            AcquireSRWLockExclusive(&_lock);
+            const size_t count = _count.load(std::memory_order_relaxed);
+            for (size_t i = 0; i < count; ++i)
+            {
+                if (_entries[i]->WatchId == header.WatchId)
+                {
+                    entry = _entries[i];
+                    InterlockedIncrement(&entry->References);
+                    break;
+                }
+            }
+            if (entry == nullptr && _registering > 0)
+            {
+                // The Broker answered a registration whose id Notify has not recorded yet.
+                KeepOrphanLocked(header.WatchId, start, groupBytes, header.Count, overflow);
+            }
+            ReleaseSRWLockExclusive(&_lock);
             if (entry == nullptr)
             {
-                continue; // closed meanwhile
+                continue; // closed meanwhile, or kept as an orphan
             }
-            Append(entry, start, static_cast<ULONG>(reader.Position() - start), header.Count,
-                (header.Flags & HookIpc::ChangesFlagOverflow) != 0);
+            Append(entry, start, groupBytes, header.Count, overflow);
             Deliver(entry);
             Release(entry);
         }
     }
 
-    void DirectoryWatches::FailAll(NTSTATUS status) noexcept
+    void DirectoryWatches::KeepOrphanLocked(uint32_t watchId, const BYTE* changes, ULONG bytes, USHORT count, bool overflow) noexcept
     {
-        Request* failed = nullptr;
-        Request** tail = &failed;
-        AcquireSRWLockExclusive(&_lock);
-        const size_t count = _count.load(std::memory_order_relaxed);
-        for (size_t i = 0; i < count; ++i)
+        BYTE* copy = bytes == 0 ? nullptr : static_cast<BYTE*>(HeapAlloc(GetProcessHeap(), 0, bytes));
+        if (bytes != 0 && copy == nullptr)
         {
-            Entry* entry = _entries[i];
-            for (Request* request = entry->Head; request != nullptr; request = request->Next)
+            overflow = true; // out of memory: the changes are lost, say so
+            count = 0;
+            bytes = 0;
+        }
+        else if (bytes != 0)
+        {
+            memcpy(copy, changes, bytes);
+        }
+        if (_orphanCount == MaxOrphans)
+        {
+            // Oldest out: a registration that takes so long gets its first changes reported as lost anyway.
+            if (_orphans[0].Changes != nullptr)
+            {
+                HeapFree(GetProcessHeap(), 0, _orphans[0].Changes);
+            }
+            memmove(&_orphans[0], &_orphans[1], sizeof(Orphan) * (MaxOrphans - 1));
+            --_orphanCount;
+        }
+        _orphans[_orphanCount++] = Orphan{ watchId, copy, bytes, count, overflow };
+    }
+
+    void DirectoryWatches::ResetWatches() noexcept
+    {
+        AcquireSRWLockExclusive(&_lock);
+        ++_channelEpoch;
+        const size_t count = _count.load(std::memory_order_relaxed);
+        Entry** snapshot = count == 0 ? nullptr : static_cast<Entry**>(HeapAlloc(GetProcessHeap(), 0, count * sizeof(Entry*)));
+        const size_t taken = snapshot == nullptr ? 0 : count;
+        for (size_t i = 0; i < taken; ++i)
+        {
+            snapshot[i] = _entries[i];
+            InterlockedIncrement(&snapshot[i]->References);
+        }
+        ReleaseSRWLockExclusive(&_lock);
+
+        for (size_t i = 0; i < taken; ++i)
+        {
+            Entry* entry = snapshot[i];
+            // Same order as Notify: RegisterLock, then _lock.
+            AcquireSRWLockExclusive(&entry->RegisterLock);
+            AcquireSRWLockExclusive(&_lock);
+            entry->WatchId = 0;
+            Request* requests = entry->Head;
+            for (Request* request = requests; request != nullptr; request = request->Next)
             {
                 request->Queued = false;
             }
-            *tail = entry->Head;
-            while (*tail != nullptr)
-            {
-                tail = &(*tail)->Next;
-            }
             entry->Head = nullptr;
+            ReleaseSRWLockExclusive(&_lock);
+            ReleaseSRWLockExclusive(&entry->RegisterLock);
+
+            AcquireSRWLockExclusive(&entry->DeliverLock);
+            if (entry->Pending != nullptr)
+            {
+                HeapFree(GetProcessHeap(), 0, entry->Pending);
+            }
+            entry->Pending = nullptr;
+            entry->PendingCapacity = 0;
+            entry->PendingBytes = 0;
+            entry->PendingCount = 0;
+            entry->PendingOverflow = false;
+            ReleaseSRWLockExclusive(&entry->DeliverLock);
+
+            // Changes may have been missed: the process lists the directory again, like after a lost notify buffer.
+            FinishAll(requests, STATUS_NOTIFY_ENUM_DIR);
+            Release(entry);
         }
-        ReleaseSRWLockExclusive(&_lock);
-        FinishAll(failed, status);
+        if (snapshot != nullptr)
+        {
+            HeapFree(GetProcessHeap(), 0, snapshot);
+        }
     }
 
     DirectoryWatches::Entry* DirectoryWatches::Acquire(HANDLE handle, ULONG64 generation) noexcept
@@ -305,24 +397,6 @@ namespace ProcBridge::Hook
         return found;
     }
 
-    DirectoryWatches::Entry* DirectoryWatches::FindWatch(uint32_t watchId) noexcept
-    {
-        Entry* found = nullptr;
-        AcquireSRWLockShared(&_lock);
-        const size_t count = _count.load(std::memory_order_relaxed);
-        for (size_t i = 0; i < count; ++i)
-        {
-            if (_entries[i]->WatchId == watchId)
-            {
-                found = _entries[i];
-                InterlockedIncrement(&found->References);
-                break;
-            }
-        }
-        ReleaseSRWLockShared(&_lock);
-        return found;
-    }
-
     DirectoryWatches::Entry* DirectoryWatches::DetachLocked(HANDLE handle, Request** requests) noexcept
     {
         *requests = nullptr;
@@ -372,8 +446,14 @@ namespace ProcBridge::Hook
     void DirectoryWatches::RetireNow(Entry* entry) noexcept
     {
         AcquireSRWLockExclusive(&entry->RegisterLock);
-        const uint32_t watchId = entry->WatchId;
+        uint32_t watchId = entry->WatchId;
         entry->Unwatched = true;
+        AcquireSRWLockShared(&_lock);
+        if (entry->Epoch != _channelEpoch)
+        {
+            watchId = 0; // registered with a Broker that is gone: the id may now name another process's watch
+        }
+        ReleaseSRWLockShared(&_lock);
         ReleaseSRWLockExclusive(&entry->RegisterLock);
         _resolver->Unwatch(watchId);
         Release(entry);
@@ -415,6 +495,10 @@ namespace ProcBridge::Hook
         {
             return STATUS_INVALID_PARAMETER;
         }
+        if (const NTSTATUS fatal = _fatal.load(); fatal != 0)
+        {
+            return fatal;
+        }
         // The poll channel is open before any watch exists, so the Broker never drops a watch for lack of a pipe.
         NTSTATUS status = EnsurePoller();
         if (!NT_SUCCESS(status))
@@ -435,14 +519,52 @@ namespace ProcBridge::Hook
         }
         else if (entry->WatchId == 0)
         {
+            AcquireSRWLockExclusive(&_lock);
+            ++_registering;
+            ReleaseSRWLockExclusive(&_lock);
             uint32_t watchId = 0;
             status = _resolver->Watch(call.Mapping, *call.Path, call.WatchTree, call.CompletionFilter, watchId);
+            if (_registerDelayMs != 0)
+            {
+                Sleep(_registerDelayMs);
+            }
+            Orphan adopted[MaxOrphans]{};
+            int adoptedCount = 0;
+            AcquireSRWLockExclusive(&_lock);
+            --_registering;
             if (NT_SUCCESS(status))
             {
-                AcquireSRWLockExclusive(&_lock);
                 entry->WatchId = watchId;
+                entry->Epoch = _channelEpoch;
                 entry->CompletionFilter = call.CompletionFilter;
-                ReleaseSRWLockExclusive(&_lock);
+            }
+            // Groups that arrived before the id was recorded: this watch's become its first changes, the rest wait
+            // for their own registration (or go once none is in progress).
+            int kept = 0;
+            for (int i = 0; i < _orphanCount; ++i)
+            {
+                if (NT_SUCCESS(status) && _orphans[i].WatchId == watchId)
+                {
+                    adopted[adoptedCount++] = _orphans[i];
+                }
+                else if (_registering > 0)
+                {
+                    _orphans[kept++] = _orphans[i];
+                }
+                else if (_orphans[i].Changes != nullptr)
+                {
+                    HeapFree(GetProcessHeap(), 0, _orphans[i].Changes);
+                }
+            }
+            _orphanCount = kept;
+            ReleaseSRWLockExclusive(&_lock);
+            for (int i = 0; i < adoptedCount; ++i)
+            {
+                Append(entry, adopted[i].Changes, adopted[i].Bytes, adopted[i].Count, adopted[i].Overflow);
+                if (adopted[i].Changes != nullptr)
+                {
+                    HeapFree(GetProcessHeap(), 0, adopted[i].Changes);
+                }
             }
         }
         ReleaseSRWLockExclusive(&entry->RegisterLock);
@@ -493,13 +615,16 @@ namespace ProcBridge::Hook
             Release(entry);
             return STATUS_INSUFFICIENT_RESOURCES;
         }
+        // Low bit of the event handle (OVERLAPPED.hEvent | 1): signal the event but post no completion packet.
+        const HANDLE event = reinterpret_cast<HANDLE>(reinterpret_cast<ULONG_PTR>(call.Event) & ~static_cast<ULONG_PTR>(1));
+        request->SkipPort = (reinterpret_cast<ULONG_PTR>(call.Event) & 1) != 0;
         // Own copy of the event: the caller may close its handle while the request waits, the kernel keeps the object.
-        if (call.Event != nullptr)
+        if (event != nullptr)
         {
-            request->Event = DuplicateLocal(call.Event);
+            request->Event = DuplicateLocal(event);
         }
         // The I/O manager clears the event when the request starts.
-        if (call.Event != nullptr && (request->Event == nullptr || !ResetEvent(request->Event)))
+        if (event != nullptr && (request->Event == nullptr || !ResetEvent(request->Event)))
         {
             FreeRequest(request);
             Release(entry);
@@ -613,6 +738,8 @@ namespace ProcBridge::Hook
             }
             if (entry->Claimed != nullptr && matches(entry->Claimed))
             {
+                // Counted although Deliver may still answer it with changes: either way it completes now, which is
+                // all the callers (NtCancelIoFile[Ex], NtCancelSynchronousIoFile) need to know.
                 // Being answered right now: Deliver completes it with the cancel status unless it has an answer.
                 entry->Claimed->CancelStatus = STATUS_CANCELLED;
                 ++count;
@@ -663,13 +790,18 @@ namespace ProcBridge::Hook
             const bool fits = !overflow && needed <= MaxPendingBytes && entry->PendingCount + static_cast<ULONG>(count) <= 0xFFFF;
             if (fits && needed > entry->PendingCapacity)
             {
+                ULONG capacity = entry->PendingCapacity == 0 ? InitialPendingBytes : entry->PendingCapacity;
+                while (capacity < needed)
+                {
+                    capacity = capacity * 2 > MaxPendingBytes ? MaxPendingBytes : capacity * 2;
+                }
                 void* grown = entry->Pending == nullptr
-                    ? HeapAlloc(GetProcessHeap(), 0, MaxPendingBytes)
-                    : nullptr;
+                    ? HeapAlloc(GetProcessHeap(), 0, capacity)
+                    : HeapReAlloc(GetProcessHeap(), 0, entry->Pending, capacity);
                 if (grown != nullptr)
                 {
                     entry->Pending = static_cast<BYTE*>(grown);
-                    entry->PendingCapacity = MaxPendingBytes;
+                    entry->PendingCapacity = capacity;
                 }
             }
             if (fits && needed <= entry->PendingCapacity)
@@ -717,6 +849,13 @@ namespace ProcBridge::Hook
             entry->PendingBytes = 0;
             entry->PendingCount = 0;
             entry->PendingOverflow = false;
+            // Most handles see a few changes now and then: do not keep the buffer between them.
+            if (entry->Pending != nullptr)
+            {
+                HeapFree(GetProcessHeap(), 0, entry->Pending);
+                entry->Pending = nullptr;
+                entry->PendingCapacity = 0;
+            }
 
             AcquireSRWLockExclusive(&_lock);
             entry->Claimed = nullptr;
@@ -869,7 +1008,9 @@ namespace ProcBridge::Hook
         {
             SetEvent(request->Event);
         }
-        if (port != nullptr && request->ApcContext != nullptr)
+        // Like the I/O manager: no packet without an APC context (kernel32 passes none when OVERLAPPED.hEvent has its
+        // low bit set, which is how Win32 skips the port), nor for a direct NT caller that tags the event itself.
+        if (port != nullptr && request->ApcContext != nullptr && !request->SkipPort)
         {
             _setIoCompletion(port, key, request->ApcContext, status, information);
         }

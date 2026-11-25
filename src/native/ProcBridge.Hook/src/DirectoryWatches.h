@@ -70,23 +70,36 @@ namespace ProcBridge::Hook
         using NtQueueApcThreadFn = NTSTATUS(NTAPI*)(HANDLE, PVOID, PVOID, PVOID, PVOID);
 
         /// Changes kept per handle between two requests; beyond that the next request gets STATUS_NOTIFY_ENUM_DIR.
+        /// The buffer grows from a small size and is freed once its changes went to a request.
         static constexpr ULONG MaxPendingBytes = HookIpc::MaxMessageSize;
+        static constexpr ULONG InitialPendingBytes = 1024;
+        /// Groups of a watch id not known yet (the reply raced the registration), kept until Notify records the id.
+        static constexpr int MaxOrphans = 8;
+        struct Orphan
+        {
+            uint32_t WatchId;
+            BYTE* Changes;
+            ULONG Bytes;
+            USHORT Count;
+            bool Overflow;
+        };
 
         /// Opens the poll channel and starts the poller thread once per process.
         NTSTATUS EnsurePoller() noexcept;
         static DWORD WINAPI PollerThunk(PVOID context) noexcept;
-        /// Never returns: the poller lives as long as the process.
-        [[noreturn]] void Poll() noexcept;
+        /// Runs as long as the process, unless the Broker refuses the poll for good (Fatal).
+        void Poll() noexcept;
+        /// The poll channel broke (Broker restarted or gone): its watches are lost. Forgets every watch id (the next
+        /// notify call registers again) and completes waiting requests with STATUS_NOTIFY_ENUM_DIR.
+        void ResetWatches() noexcept;
+        /// Keeps a group whose watch id no entry has yet, when a registration is in progress (under _lock).
+        void KeepOrphanLocked(uint32_t watchId, const BYTE* changes, ULONG bytes, USHORT count, bool overflow) noexcept;
         /// Hands the groups of one WaitAnyChanges reply to their handles.
         void Dispatch(const BYTE* body, ULONG bytes) noexcept;
-        /// Completes every waiting request with status (the poll failed).
-        void FailAll(NTSTATUS status) noexcept;
 
         /// Entry of handle with a reference, created when missing (nullptr when out of memory). An entry of an older
         /// generation (the handle value was closed and reused) is detached first.
         Entry* Acquire(HANDLE handle, ULONG64 generation) noexcept;
-        /// Entry registered as watch watchId with a reference, nullptr when none.
-        Entry* FindWatch(uint32_t watchId) noexcept;
         /// Removes the entry of handle from the table and marks it closed; its requests move to *requests (under _lock).
         Entry* DetachLocked(HANDLE handle, Request** requests) noexcept;
         /// Ends a detached entry: completes the detached requests, then sends Unwatch and drops the table's
@@ -120,5 +133,11 @@ namespace ProcBridge::Hook
         bool _pollerStarted = false;    // under _pollerLock
         WatchChannel* _channel = nullptr; // the poller's once started
         BYTE* _pollBuffer = nullptr;
+        std::atomic<NTSTATUS> _fatal{ 0 };  // the Broker refuses the poll for good: notify calls fail with it
+        ULONG64 _channelEpoch = 0;          // bumped by ResetWatches (under _lock)
+        int _registering = 0;               // registrations in progress (under _lock)
+        Orphan _orphans[MaxOrphans]{};      // under _lock
+        int _orphanCount = 0;
+        DWORD _registerDelayMs = 0;         // test only (PROCBRIDGE_TEST_WATCH_REGISTER_DELAY_MS): widens the registration race
     };
 }
