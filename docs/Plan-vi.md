@@ -601,7 +601,9 @@ người dùng cần nó để chọn thư mục máy B trước khi mở phiên
   cuối của Broker chứ không từ lúc gửi request: request còn chạy (tải file lớn qua mạng chậm) được Broker gửi tin nhắn
   tiến độ (`Status = StatusInProgress`, không body, cùng `RequestId`) mỗi `IpcProgressInterval` (mặc định 5 s), hook
   đọc tiếp và chờ lại đủ thời hạn, nên file lớn không còn quá hạn khi Broker vẫn đang tải, còn Broker treo thật vẫn quá
-  hạn (giao thức IPC v5). Phần việc dưới request bị chặn bởi `RequestTimeout` và keepalive của tầng vận chuyển. Mỗi instance mới được
+  hạn (giao thức IPC v5). Phần việc dưới request bị chặn bởi `RequestTimeout` và keepalive của tầng vận chuyển; việc kẹt
+  ngay trong Broker (chờ khoá, chờ lượt tải khác, đĩa treo) thì sau `IpcMaxProgressDuration` (mặc định 30 phút) Broker
+  thôi gửi tiến độ để hook quá hạn như thường, không treo luồng mãi. Mỗi instance mới được
   kiểm `GetNamedPipeServerProcessId` khớp PID Broker (`PROCBRIDGE_BROKER_PID`), mở với
   `SECURITY_IDENTIFICATION`; sai PID thì khởi động hook thất bại. Mã `0xE000000x` còn sót cũng bị đổi sang mã chuẩn.
 - `BrokerResolver` (cùng giao diện `IPathResolver` với `PathMapper` của M1): lúc khởi động gửi `Hello`, rồi

@@ -100,6 +100,12 @@ public sealed record BrokerOptions
     /// </summary>
     public TimeSpan IpcProgressInterval { get; init; } = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// After this long a hook request gets no more progress messages, so one stuck inside the Broker fails in the hook
+    /// with its call timeout; see <see cref="HookIpcServer.DefaultMaxProgressDuration"/>.
+    /// </summary>
+    public TimeSpan IpcMaxProgressDuration { get; init; } = TimeSpan.FromMinutes(30);
+
     public string GetWriteQueueRoot() => WriteQueueRoot ?? Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ProcBridge", "queue");
 

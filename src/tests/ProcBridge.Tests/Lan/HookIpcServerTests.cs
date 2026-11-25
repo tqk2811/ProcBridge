@@ -84,6 +84,26 @@ public sealed class HookIpcServerTests
     [TestMethod]
     public async Task SlowRequest_SendsProgressMessagesBeforeTheReply()
     {
+        (int progress, uint status) = await RunSlowStatAsync(TimeSpan.FromMilliseconds(200), null);
+        Assert.AreEqual(0u, status);
+        Assert.IsGreaterThanOrEqualTo(3, progress);
+    }
+
+    /// <summary>
+    /// Progress stops after the configured cap even though the request still runs: a request stuck in the Broker must
+    /// end with the hook's call timeout instead of keeping the hooked thread waiting forever.
+    /// </summary>
+    [TestMethod]
+    public async Task SlowRequest_StopsSendingProgressAfterTheCap()
+    {
+        (int progress, uint status) = await RunSlowStatAsync(TimeSpan.FromMilliseconds(200), TimeSpan.FromMilliseconds(500));
+        Assert.AreEqual(0u, status);
+        Assert.IsLessThanOrEqualTo(3, progress);
+    }
+
+    /// <summary>Machine B answers a stat after 1.5 s; returns the progress messages seen before the reply and its status.</summary>
+    private static async Task<(int Progress, uint Status)> RunSlowStatAsync(TimeSpan progressInterval, TimeSpan? maxProgressDuration)
+    {
         using var cacheDir = new TempFolder("cache");
         var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
@@ -119,7 +139,9 @@ public sealed class HookIpcServerTests
         var client = new AgentClient(new TcpConnectionFactory("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port, transport), "src", transport);
         var handler = new HookRequestHandler(new FileCache(client, cacheDir.Path, TimeSpan.Zero), [new VirtualMapping(@"D:\virtual", "")]);
         string name = HookIpcProtocol.GetPipeName(HookIpcProtocol.NewSessionId());
-        await using (var server = new HookIpcServer(name, handler, progressInterval: TimeSpan.FromMilliseconds(200)))
+        int progress = 0;
+        HookIpcHeader reply;
+        await using (var server = new HookIpcServer(name, handler, progressInterval: progressInterval, maxProgressDuration: maxProgressDuration))
         {
             server.Start();
             await using var pipe = new NamedPipeClientStream(".", name, PipeDirection.InOut, PipeOptions.Asynchronous);
@@ -129,8 +151,6 @@ public sealed class HookIpcServerTests
             int size = HookIpcCodec.Encode(buffer, 7, new HookStatRequest { MappingIndex = 0, RelativePath = "a.txt" });
             await pipe.WriteAsync(buffer.AsMemory(0, size));
 
-            int progress = 0;
-            HookIpcHeader reply;
             while (true)
             {
                 int length = await pipe.ReadAsync(buffer).AsTask().WaitAsync(TimeSpan.FromSeconds(10));
@@ -141,12 +161,10 @@ public sealed class HookIpcServerTests
                 Assert.AreEqual(HookIpcMessageType.Stat, reply.MessageType);
                 progress++;
             }
-
-            Assert.AreEqual(0u, reply.Status);
-            Assert.IsGreaterThanOrEqualTo(3, progress);
         }
         stop.Cancel();
         listener.Stop();
         await agent;
+        return (progress, reply.Status);
     }
 }
