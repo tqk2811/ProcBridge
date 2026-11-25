@@ -1,0 +1,42 @@
+name: build
+
+on:
+  push:
+    branches: [ master, 'feature/**' ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: src/global.json
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Build C#
+        run: dotnet build ProcBridge.slnx -c Release
+
+      - name: Test C#
+        run: dotnet test ProcBridge.slnx -c Release --no-build --logger trx --results-directory TestResults
+
+      - name: Build native x64
+        run: msbuild ProcBridge.Native.sln -m -p:Configuration=Release -p:Platform=x64
+
+      - name: Build native x86
+        run: msbuild ProcBridge.Native.sln -m -p:Configuration=Release -p:Platform=x86
+
+      - name: Upload native binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-release
+          path: |
+            src/native/out/*/Release/*.dll
+            src/native/out/*/Release/*.exe
