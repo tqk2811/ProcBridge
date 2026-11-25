@@ -339,8 +339,12 @@ Broker kết nối TCP thẳng tới Agent (cổng cấu hình được). Tìm A
   - Cấu hình chỉ còn URL relay: Agent console `--relay <url>`, app WPF của Agent có ô relay; Launcher console
     `--relay <url> --agent-fingerprint <fp>` (HostId chính là vân tay đó), Launcher WPF có mục "Kết nối qua relay"
     trong hồ sơ, HostId lấy từ máy đã ghép cặp của hồ sơ.
+  - **Ghép cặp qua relay** (khi máy A chỉ thấy máy B qua relay, chưa biết khoá hay HostId của B): xem mục 9, phần
+    "Ghép cặp qua relay". Relay chỉ giữ một **chỗ ghép cặp** mỗi máy B, tra theo khoá dẫn xuất từ mã mời 8 số; tra cứu
+    `POST api/tunnel/pairing-sessions {lookupKey}` mở một phiên tunnel thường tới B và trả kèm HostId.
   - Chống lạm dụng: giới hạn tần suất theo địa chỉ cho mở phiên, kênh điều khiển và lane (`Relay:RateLimit`,
-    mặc định 60/20/600 mỗi phút, quá thì 429); trần số phiên sống mỗi HostId và mỗi địa chỉ (`MaxSessionsPerHost`,
+    mặc định 60/20/600 mỗi phút, quá thì 429), tra cứu chỗ ghép cặp `PairingPermitLimit` (mặc định 10 mỗi phút, mỗi lần
+    là một lần đoán mã); trần số phiên sống mỗi HostId và mỗi địa chỉ (`MaxSessionsPerHost`,
     `MaxSessionsPerAddress`, mặc định 64), số kênh điều khiển mỗi địa chỉ (16), số lane mỗi địa chỉ (256); trần kích
     thước message điều khiển; vé lane ngẫu nhiên 256 bit qua header. Relay chỉ tin `X-Forwarded-For` từ proxy khai
     trong `Relay:ForwardedHeaders:KnownProxies`/`KnownNetworks` (mặc định rỗng: không tin header nào).
@@ -355,9 +359,9 @@ Broker kết nối TCP thẳng tới Agent (cổng cấu hình được). Tìm A
 
 - Mỗi máy (Broker phía A, Agent phía B) có **cặp khoá định danh lâu dài** (Ed25519 hoặc X25519), sinh
   khi cài, lưu bằng DPAPI.
-- **Ghép cặp** lần đầu: máy B hiển thị mã ngắn hoặc QR, người dùng nhập ở máy A (LAN), hoặc duyệt
-  trên Relay (internet). Kết quả: mỗi bên lưu khoá công khai của bên kia. Relay chỉ chuyển khoá công
-  khai, nhưng người dùng xác nhận vân tay khoá để chống Relay tráo khoá.
+- **Ghép cặp** lần đầu: máy B hiển thị mã ngắn, người dùng nhập ở máy A, nối thẳng (LAN) hoặc qua Relay
+  (internet, tìm máy B bằng mã mời, xem "Ghép cặp qua relay" bên dưới). Kết quả: mỗi bên lưu khoá công khai của bên
+  kia. Relay chỉ chuyển byte đã mã hoá; người dùng so vân tay khoá để chống Relay tráo khoá.
 - **Mỗi phiên**: bắt tay theo mẫu Noise IK (hoặc XX) trên nền X25519, ra khoá phiên, mã hoá khung bằng
   ChaCha20-Poly1305 hoặc AES-GCM, có số thứ tự chống phát lại.
 - Lớp mã hoá này giống nhau ở LAN và internet, nên Relay chỉ là một đường ống. Ở LAN không cần TLS
@@ -404,6 +408,33 @@ Broker kết nối TCP thẳng tới Agent (cổng cấu hình được). Tìm A
   vượt thì đóng ngay; chỉ một phiên ghép cặp chờ người dùng tại một thời điểm; tắt `AllowPairing` huỷ phiên đang chờ.
   Phía A bắt tay và join bị chặn bởi `TransportOptions.HandshakeTimeout`.
 - Agent và Broker mặc định bắt buộc mã hoá; `AllowPlaintextTransport` (`--plaintext`) chỉ cho phát triển và test cũ.
+
+Ghép cặp qua relay (nhánh `feature/relay-pairing`, quyết định 2026-11-26):
+
+- Vấn đề: máy A chỉ tới được máy B qua relay mà chưa biết khoá hay HostId của B, nên chưa mở được phiên theo HostId.
+  Không thêm tài khoản: máy B mở một **chỗ ghép cặp** (pairing slot) tạm trên relay, máy A tìm nó bằng **mã mời**.
+- Máy B (Agent bật `AllowPairing` và có relay): `RelayHostLink` sinh mã mời ngẫu nhiên 8 chữ số (`RelayPairingCode`,
+  hiện dạng `1234-5678`; cố ý khác độ dài mã 6 số để khỏi nhầm), gửi trên kênh điều khiển đã chứng minh khoá
+  `pairingSlot {lookupKey}` với `lookupKey` = hex SHA-256(nhãn `ProcBridge relay pairing v1` | mã). Relay trả
+  `pairingSlotRegistered {lookupKey, expiresAt}`, lúc đó Agent mới hiện mã (console in ra, app WPF hiện cạnh trạng thái
+  relay). Mỗi máy B một chỗ; chỗ sống `Relay:Tunnel:PairingSlotLifetime` (mặc định 5 phút), dùng một lần, mất theo kênh
+  điều khiển; khoá trùng với chỗ của máy khác thì relay trả `pairingSlotRejected` và B chọn mã khác. B tự mở chỗ mới
+  với mã mới khi chỗ hết hạn, bị dùng (`pairingSlotClaimed`) hoặc kênh điều khiển nối lại; tắt ghép cặp thì gửi
+  `pairingSlotCancel`.
+- Máy A (`RelayPairingConnector`): tính lại `lookupKey` từ mã người dùng nhập, gọi `POST api/tunnel/pairing-sessions`
+  (ẩn danh, giới hạn tần suất). Relay lấy chỗ ra (dùng một lần, đoán sai không làm mất chỗ của B), mở phiên tunnel
+  thường tới B và trả `{sessionId, ticket, expiresAt, hostId}`; không có chỗ thì 404 `PAIRING_SLOT_NOT_FOUND`. A mở lane
+  0 và chạy `PairingClient` y như ở LAN (Noise XX, mã 6 số, B bấm chấp nhận sau khi so vân tay A). Trước khi hỏi mã,
+  `PairingClient` so vân tay khoá mà bắt tay chứng minh với HostId relay đã nêu (`IPeerHintConnector`), lệch thì dừng.
+  Máy đã ghép cặp kiểu này lưu địa chỉ `relay <url>`; các lần sau đi qua relay theo HostId như mục 8.2.
+- Vì sao an toàn: relay chỉ thấy `lookupKey`. Mã mời 8 số **không phải bí mật đối với relay** (đoán ngược từ hash rất
+  nhanh), nó chỉ để tìm máy B. Chống kẻ đứng giữa vẫn là mã 6 số dẫn xuất từ handshake hash cộng việc hai người dùng so
+  vân tay; relay tráo máy thì vân tay lệch HostId hoặc lệch màn hình. Người ngoài đoán mã: 10/phút mỗi địa chỉ, chỗ sống
+  5 phút, đoán trúng cũng chỉ tới được bước người dùng B so vân tay và bấm chấp nhận.
+- Giao diện: Agent console `--relay <url> --allow-pairing` in mã; Launcher console
+  `--pair --relay <url> [--code <mã>]`; app WPF của Launcher có ô "Máy B chỉ thấy qua relay" (URL relay + mã 8 số) và
+  Remote Explorer đi qua relay cho máy ghép cặp kiểu này. Test: `PairingSlotTests` (relay e2e), `RelayPairingTests`
+  (ghép cặp qua relay đầu cuối rồi mở phiên theo HostId).
 
 ```mermaid
 sequenceDiagram

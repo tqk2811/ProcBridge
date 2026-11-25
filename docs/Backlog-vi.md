@@ -443,11 +443,17 @@ Cố ý làm gọn ở M6, nên bù khi relay lớn lên:
 
 Ghi 2026-11-25 (M6).
 
-## [Vừa] Relay: ghép cặp vẫn phải làm trong LAN
+## [Thấp] Ghép cặp qua relay: phần còn thiếu
 
-Agent và Launcher đi qua relay chỉ cần URL relay và máy đã ghép cặp (HostId = vân tay), nhưng ghép cặp vẫn chỉ chạy
-trong LAN (`--pair --agent host`). Nên có ghép cặp qua relay: relay chuyển bắt tay XX của ghép cặp theo HostId, người
-dùng so mã SAS như ở LAN. Ghi 2026-11-25, sửa 2026-11-26 (bỏ tài khoản relay).
+Ghép cặp qua relay bằng mã mời đã chạy (Plan 9, "Ghép cặp qua relay"). Còn lại:
+
+- Hồ sơ chạy của app WPF Launcher không tự điền URL relay và bật "Kết nối qua relay" cho máy ghép cặp qua relay
+  (địa chỉ lưu dạng `relay <url>`); hiện chỉ báo lỗi để người dùng tự bật.
+- Chưa chạy thử giao diện thật (UIA) của ô mã mời ở hai app WPF, chỉ test tầng ViewModel; chưa thử với relay thật trên
+  internet.
+- Mã mời đổi sau mỗi lần dùng và mỗi 5 phút; app WPF của Agent chỉ thấy mã mới ở lượt làm mới định kỳ của cửa sổ.
+
+Ghi 2026-11-26.
 
 ## [Thấp] Relay: HostId lộ máy B đang online
 
