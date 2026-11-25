@@ -59,7 +59,7 @@ namespace ProcBridge::Hook
     {
         Request* Next;
         bool Queued;               // linked in its entry's queue (under _lock)
-        HANDLE Event;
+        HANDLE Event;              // own copy (nullptr without one): the caller may close its handle while the request waits
         PIO_APC_ROUTINE ApcRoutine;
         PVOID ApcContext;
         PIO_STATUS_BLOCK IoStatusBlock;
@@ -68,8 +68,6 @@ namespace ProcBridge::Hook
         ULONG InformationClass;
         DWORD ThreadId;
         HANDLE Thread;             // own copy, for the APC (nullptr without one)
-        HANDLE Port;               // own copy of the completion port of the handle (nullptr when none)
-        PVOID Key;
         bool Synchronous;
         HANDLE Done;               // synchronous only: signalled once Status is set
         NTSTATUS CancelStatus;     // non-zero: complete with it instead of waiting (under _lock)
@@ -89,6 +87,8 @@ namespace ProcBridge::Hook
         HANDLE Port;               // own copy (under _lock)
         PVOID Key;
         bool Closed;               // under _lock
+        bool Unwatched;            // Unwatch was sent for WatchId (under RegisterLock)
+        bool MaybeLost;            // a long poll was abandoned while its reply may have been in flight (under _lock)
         bool Running;              // a worker serves the queue (under _lock)
         HANDLE CancelEvent;        // abandons the worker's long poll
         Request* Head;             // under _lock
@@ -212,9 +212,30 @@ namespace ProcBridge::Hook
     {
         // Closed is already set: the worker completes what waits with STATUS_NOTIFY_CLEANUP once woken.
         SetEvent(entry->CancelEvent);
-        AcquireSRWLockShared(&entry->RegisterLock);
-        const uint32_t watchId = entry->WatchId;
-        ReleaseSRWLockShared(&entry->RegisterLock);
+        // The Unwatch exchange runs on the thread pool: closing the handle must not wait for the Broker.
+        if (!QueueUserWorkItem(&RetireThunk, entry, WT_EXECUTEDEFAULT))
+        {
+            RetireNow(entry);
+        }
+    }
+
+    DWORD WINAPI DirectoryWatches::RetireThunk(PVOID context) noexcept
+    {
+        auto* entry = static_cast<Entry*>(context);
+        ReentryGuard guard;
+        entry->Owner->RetireNow(entry);
+        return 0;
+    }
+
+    void DirectoryWatches::RetireNow(Entry* entry) noexcept
+    {
+        AcquireSRWLockExclusive(&entry->RegisterLock);
+        const uint32_t watchId = entry->Unwatched ? 0 : entry->WatchId;
+        if (watchId != 0)
+        {
+            entry->Unwatched = true;
+        }
+        ReleaseSRWLockExclusive(&entry->RegisterLock);
         if (watchId != 0)
         {
             // On a pooled instance: the channel may be busy with the long poll being abandoned.
@@ -231,7 +252,10 @@ namespace ProcBridge::Hook
         }
         if (entry->Channel != nullptr)
         {
-            entry->Owner->_resolver->Unwatch(entry->Channel, 0); // closes the channel only
+            // A watch registered after the entry was retired (a close racing the first notify) is removed here;
+            // otherwise only the channel is closed.
+            const uint32_t watchId = entry->Unwatched ? 0 : entry->WatchId;
+            entry->Owner->_resolver->Unwatch(entry->Channel, watchId);
         }
         CloseLocal(entry->Port);
         CloseLocal(entry->CancelEvent);
@@ -244,8 +268,8 @@ namespace ProcBridge::Hook
 
     void DirectoryWatches::FreeRequest(Request* request) noexcept
     {
+        CloseLocal(request->Event);
         CloseLocal(request->Thread);
-        CloseLocal(request->Port);
         CloseLocal(request->Done);
         HeapFree(GetProcessHeap(), 0, request);
     }
@@ -273,7 +297,18 @@ namespace ProcBridge::Hook
         // The first call registers the watch; later calls keep its filter, like the file system.
         NTSTATUS status = STATUS_SUCCESS;
         AcquireSRWLockExclusive(&entry->RegisterLock);
+        bool closedMeanwhile = false;
         if (entry->WatchId == 0)
+        {
+            AcquireSRWLockShared(&_lock);
+            closedMeanwhile = entry->Closed;
+            ReleaseSRWLockShared(&_lock);
+        }
+        if (closedMeanwhile)
+        {
+            status = STATUS_INVALID_HANDLE; // the handle was closed before the watch started: nothing to register
+        }
+        else if (entry->WatchId == 0)
         {
             WatchChannel* channel = nullptr;
             uint32_t watchId = 0;
@@ -298,7 +333,6 @@ namespace ProcBridge::Hook
             Release(entry);
             return STATUS_INSUFFICIENT_RESOURCES;
         }
-        request->Event = call.Event;
         request->ApcRoutine = call.ApcRoutine;
         request->ApcContext = call.ApcContext;
         request->IoStatusBlock = call.IoStatusBlock;
@@ -309,13 +343,10 @@ namespace ProcBridge::Hook
         request->Synchronous = call.Synchronous;
 
         AcquireSRWLockShared(&_lock);
-        const HANDLE port = entry->Port;
-        const PVOID key = entry->Key;
-        // Our own copy of the port: valid until this request completes even if the binding changes.
-        request->Port = port != nullptr ? DuplicateLocal(port) : nullptr;
+        const bool bound = entry->Port != nullptr;
         ReleaseSRWLockShared(&_lock);
-        request->Key = key;
-        if (port != nullptr && call.ApcRoutine != nullptr)
+        // The port itself is read when the request completes: the binding may change while it waits.
+        if (bound && call.ApcRoutine != nullptr)
         {
             // The kernel refuses an APC on a handle bound to a completion port.
             FreeRequest(request);
@@ -330,15 +361,19 @@ namespace ProcBridge::Hook
         {
             request->Done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         }
-        if ((port != nullptr && request->Port == nullptr) || (call.ApcRoutine != nullptr && request->Thread == nullptr)
-            || (call.Synchronous && request->Done == nullptr))
+        if ((call.ApcRoutine != nullptr && request->Thread == nullptr) || (call.Synchronous && request->Done == nullptr))
         {
             FreeRequest(request);
             Release(entry);
             return STATUS_INSUFFICIENT_RESOURCES;
         }
+        // Own copy of the event: the caller may close its handle while the request waits, the kernel keeps the object.
+        if (call.Event != nullptr)
+        {
+            request->Event = DuplicateLocal(call.Event);
+        }
         // The I/O manager clears the event when the request starts.
-        if (call.Event != nullptr && !ResetEvent(call.Event))
+        if (call.Event != nullptr && (request->Event == nullptr || !ResetEvent(request->Event)))
         {
             FreeRequest(request);
             Release(entry);
@@ -533,6 +568,8 @@ namespace ProcBridge::Hook
     {
         // Everything this thread calls (pipe opens and closes) goes straight to the system.
         ReentryGuard guard;
+        constexpr int MaxEmptyReplies = 3;
+        int emptyReplies = 0;
         while (true)
         {
             AcquireSRWLockExclusive(&_lock);
@@ -544,6 +581,11 @@ namespace ProcBridge::Hook
                 break;
             }
             const NTSTATUS stop = entry->Closed ? STATUS_NOTIFY_CLEANUP : request->CancelStatus;
+            const bool lost = stop == 0 && entry->MaybeLost;
+            if (lost)
+            {
+                entry->MaybeLost = false;
+            }
             ResetEvent(entry->CancelEvent);
             ReleaseSRWLockExclusive(&_lock);
             if (stop != 0)
@@ -551,11 +593,22 @@ namespace ProcBridge::Hook
                 Finish(entry, request, stop, 0);
                 continue;
             }
+            if (lost)
+            {
+                // The poll abandoned earlier may have consumed changes nobody saw: tell the caller to rescan.
+                Finish(entry, request, STATUS_NOTIFY_ENUM_DIR, 0);
+                continue;
+            }
             ChangeBatch batch{};
             NTSTATUS status = _resolver->WaitChanges(entry->Channel, entry->WatchId, entry->CancelEvent, entry->Reply, batch);
             if (status == STATUS_CANCELLED)
             {
-                continue; // closed or cancelled: the next round completes the request
+                // Closed or cancelled: the next round completes the request. The cancel may have won just as the
+                // reply came back, losing its changes: the next request is answered with a rescan request.
+                AcquireSRWLockExclusive(&_lock);
+                entry->MaybeLost = true;
+                ReleaseSRWLockExclusive(&_lock);
+                continue;
             }
             if (!NT_SUCCESS(status))
             {
@@ -564,8 +617,15 @@ namespace ProcBridge::Hook
             }
             if (batch.Count == 0 && !batch.Overflow)
             {
-                continue; // timeout, or the watch is being removed
+                // Timeout, or the watch is being removed. Repeated empty replies would spin: give up and ask for a rescan.
+                if (++emptyReplies > MaxEmptyReplies)
+                {
+                    emptyReplies = 0;
+                    Finish(entry, request, STATUS_NOTIFY_ENUM_DIR, 0);
+                }
+                continue;
             }
+            emptyReplies = 0;
             ULONG_PTR information = 0;
             if (Answer(request, entry->CompletionFilter, batch, status, information))
             {
@@ -695,6 +755,9 @@ namespace ProcBridge::Hook
             }
             request->Queued = false;
         }
+        // The binding as of now, like the I/O manager: our own copy of the port stays valid if it changes meanwhile.
+        const HANDLE port = entry->Port != nullptr ? DuplicateLocal(entry->Port) : nullptr;
+        const PVOID key = entry->Key;
         ReleaseSRWLockExclusive(&_lock);
 
         // Same order as the I/O manager: status block, event, then the completion port or the APC.
@@ -703,15 +766,16 @@ namespace ProcBridge::Hook
         {
             SetEvent(request->Event);
         }
-        if (request->Port != nullptr && request->ApcContext != nullptr)
+        if (port != nullptr && request->ApcContext != nullptr)
         {
-            _setIoCompletion(request->Port, request->Key, request->ApcContext, status, information);
+            _setIoCompletion(port, key, request->ApcContext, status, information);
         }
         else if (request->ApcRoutine != nullptr && request->Thread != nullptr)
         {
             _queueApcThread(request->Thread, reinterpret_cast<PVOID>(request->ApcRoutine), request->ApcContext,
                 request->IoStatusBlock, nullptr);
         }
+        CloseLocal(port);
         if (request->Synchronous)
         {
             request->Status = status;

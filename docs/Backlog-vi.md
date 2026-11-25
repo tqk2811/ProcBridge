@@ -225,10 +225,19 @@ Hook đã phục vụ thông báo thay đổi trên thư mục ảo (`DirectoryW
   lời gọi đầu tiên được giữ cho cả watch.
 - Handle nhân bản (`DuplicateHandle`) hay kế thừa sang con không dùng chung watch với handle gốc như file object thật;
   bản sao gọi notify thì mở watch riêng.
-- Huỷ (`CancelIo*`, alert) một long poll đang chờ thì lô thay đổi Broker gửi đúng lúc đó bị mất (kernel giữ lại cho
-  lần gọi sau). Lời gọi đồng bộ trên handle `FILE_SYNCHRONOUS_IO_ALERT` bị APC cắt ngang thì trả `STATUS_USER_APC` và
+- Huỷ (`CancelIo*`, alert) một long poll đang chờ thì lô thay đổi Broker gửi đúng lúc đó có thể bị mất (kernel giữ
+  lại cho lần gọi sau); Hook bù bằng cách trả `STATUS_NOTIFY_ENUM_DIR` cho yêu cầu kế tiếp (bên gọi quét lại), chưa
+  giữ lại đúng lô. Lời gọi đồng bộ trên handle `FILE_SYNCHRONOUS_IO_ALERT` bị APC cắt ngang thì trả `STATUS_USER_APC` và
   huỷ yêu cầu.
 - Thread gọi thoát không huỷ các yêu cầu nó đã gửi (kernel huỷ IRP của thread khi thread thoát).
+
+## [Vừa] Mỗi watch có yêu cầu chờ chiếm một thread pool và một pipe instance
+
+`DirectoryWatches` chạy một worker (`QueueUserWorkItem`, `WT_EXECUTELONGFUNCTION`) và giữ một pipe instance riêng
+cho mỗi handle thư mục ảo đang có yêu cầu chờ. Process mở hàng trăm handle theo dõi (IDE, công cụ build) sẽ chiếm
+nhiều thread pool và nhiều instance của pipe Broker. Phương án: dồn mọi watchId của process vào MỘT long poll
+(`WaitChanges` nhận danh sách watchId, trả `(watchId, thay đổi)`), một worker chung phân phát theo handle.
+Ghi 2026-11-25.
 
 ## [Vừa] Theo dõi thay đổi: phần còn thiếu sau M7 (C#)
 

@@ -22,8 +22,22 @@ public sealed class RemoteNotifyTests
                 Assert.Fail("The Broker's change watcher did not connect.");
             await Task.Delay(50);
         }
-        // The rescan of the connection is dispatched to the watches asynchronously.
-        await Task.Delay(500);
+        // The rescan of the connection is dispatched to the watches asynchronously: wait until it has been applied.
+        while (session.Broker.Pipe.Handler.Watches.DispatchedCount < 1)
+        {
+            if (DateTime.UtcNow > deadline)
+                Assert.Fail("The Broker did not dispatch the change watcher's rescan.");
+            await Task.Delay(10);
+        }
+    }
+
+    /// <summary>The hook removes a watch after the handle's close, on the thread pool: give it a moment.</summary>
+    private static async Task WaitForNoWatchesAsync(RemoteSession session)
+    {
+        DateTime deadline = DateTime.UtcNow.AddSeconds(5);
+        while (session.Broker.Pipe.Handler.Watches.Count != 0 && DateTime.UtcNow < deadline)
+            await Task.Delay(20);
+        Assert.AreEqual(0, session.Broker.Pipe.Handler.Watches.Count);
     }
 
     [TestMethod]
@@ -45,9 +59,10 @@ public sealed class RemoteNotifyTests
         Assert.AreEqual(0, remote.ExitCode, Lines(remote));
         Assert.Contains("notify.iocp: ok=1 key=0x1234 overlapped=1 action=1 name=n-iocp.txt", real.StandardOutput);
         Assert.Contains("notify.close: ended=1 signalled=1 status=0x10B", real.StandardOutput);
+        Assert.Contains("notify.eventClosed: signalled=1 status=0x0", real.StandardOutput);
         HookComparisonTests.AssertSameLines(real.StandardOutput, remote.StandardOutput);
         // Every handle was closed: the hook removed its watches.
-        Assert.AreEqual(0, session.Broker.Pipe.Handler.Watches.Count);
+        await WaitForNoWatchesAsync(session);
     }
 
     [TestMethod]
@@ -64,26 +79,31 @@ public sealed class RemoteNotifyTests
             $w = New-Object IO.FileSystemWatcher '{{v}}'
             $w.IncludeSubdirectories = $true
             foreach ($n in 'Created', 'Changed', 'Deleted', 'Renamed') { $null = Register-ObjectEvent $w $n -SourceIdentifier $n }
-            $w.EnableRaisingEvents = $true
-            [IO.File]::WriteAllText('{{r}}\fsw.txt', 'one')
-            Start-Sleep -Milliseconds 300
-            [IO.File]::AppendAllText('{{r}}\fsw.txt', 'two')
-            Start-Sleep -Milliseconds 300
-            [IO.File]::Move('{{r}}\fsw.txt', '{{r}}\fsw2.txt')
-            Start-Sleep -Milliseconds 300
-            [IO.File]::Delete('{{r}}\fsw2.txt')
             $seen = @{}
-            $deadline = (Get-Date).AddSeconds(30)
-            while ((Get-Date) -lt $deadline -and -not $seen.ContainsKey('Deleted:fsw2.txt')) {
-                $e = Wait-Event -Timeout 1
-                if ($e) {
-                    $a = $e.SourceEventArgs
-                    $line = '' + $a.ChangeType + ':' + $a.Name
-                    if ($a -is [IO.RenamedEventArgs]) { $line += '<-' + $a.OldName }
-                    $seen[$line] = 1
-                    Remove-Event -EventIdentifier $e.EventIdentifier
+            # Collects events until the wanted one is seen (or 30 s pass): each step waits for its own event.
+            function Wait-Seen($key) {
+                $deadline = (Get-Date).AddSeconds(30)
+                while ((Get-Date) -lt $deadline -and -not $seen.ContainsKey($key)) {
+                    $e = Wait-Event -Timeout 1
+                    if ($e) {
+                        $a = $e.SourceEventArgs
+                        $line = '' + $a.ChangeType + ':' + $a.Name
+                        if ($a -is [IO.RenamedEventArgs]) { $line += '<-' + $a.OldName }
+                        $seen[$line] = 1
+                        Remove-Event -EventIdentifier $e.EventIdentifier
+                    }
                 }
             }
+            # EnableRaisingEvents issues the first read synchronously: the watch exists from here on.
+            $w.EnableRaisingEvents = $true
+            [IO.File]::WriteAllText('{{r}}\fsw.txt', 'one')
+            Wait-Seen 'Created:fsw.txt'
+            [IO.File]::AppendAllText('{{r}}\fsw.txt', 'two')
+            Wait-Seen 'Changed:fsw.txt'
+            [IO.File]::Move('{{r}}\fsw.txt', '{{r}}\fsw2.txt')
+            Wait-Seen 'Renamed:fsw2.txt<-fsw.txt'
+            [IO.File]::Delete('{{r}}\fsw2.txt')
+            Wait-Seen 'Deleted:fsw2.txt'
             $w.Dispose()
             ($seen.Keys | Sort-Object) -join "`n"
             """;
@@ -113,6 +133,6 @@ public sealed class RemoteNotifyTests
         Assert.AreEqual(0, result.ExitCode, Lines(result));
         Assert.Contains("notify.event: ok=1 action=1 name=n-event.txt", result.StandardOutput);
         Assert.Contains("notify.close: ended=1 signalled=1 status=0x10B", result.StandardOutput);
-        Assert.AreEqual(0, session.Broker.Pipe.Handler.Watches.Count);
+        await WaitForNoWatchesAsync(session);
     }
 }

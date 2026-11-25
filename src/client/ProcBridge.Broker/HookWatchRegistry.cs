@@ -49,6 +49,11 @@ public sealed class HookWatchRegistry : IDisposable
     /// <summary>Test hook, called by the dispatching task before it applies a notification.</summary>
     internal Action? BeforeDispatch { get; set; }
 
+    private int _dispatched;
+
+    /// <summary>Notifications the dispatching task has applied so far; tests wait on it for the connect rescan.</summary>
+    internal int DispatchedCount => Volatile.Read(ref _dispatched);
+
     /// <summary>Stops listening to the cache; the watches stay but receive nothing more.</summary>
     public void Dispose()
     {
@@ -152,6 +157,10 @@ public sealed class HookWatchRegistry : IDisposable
             {
                 // One bad notification must not end the dispatching: the watches would silently go deaf.
                 System.Diagnostics.Trace.TraceError($"ProcBridge: applying a change notification to the hook watches failed: {e.Message}");
+            }
+            finally
+            {
+                Interlocked.Increment(ref _dispatched);
             }
         }
     }

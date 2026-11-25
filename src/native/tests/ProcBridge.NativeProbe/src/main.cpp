@@ -1997,6 +1997,43 @@ namespace
         WriteLine(step + L": ok=" + Num(ok) + L" " + (ok ? FirstNotifyEntry(buffer, bytes, extended) : Error(GetLastError())));
     }
 
+    /// The caller closes its event handle right after issuing the request: the system keeps the event object, so the
+    /// request still signals it (the wait uses a second handle to the same event).
+    void NotifyEventClosed(const std::wstring& watched, const std::wstring& real)
+    {
+        Handle directory(OpenWatched(watched, true));
+        Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+        HANDLE waitCopy = nullptr;
+        if (!DuplicateHandle(GetCurrentProcess(), event.Get(), GetCurrentProcess(), &waitCopy, 0, FALSE, DUPLICATE_SAME_ACCESS))
+        {
+            WriteLine(L"notify.eventClosed: duplicate " + Error(GetLastError()));
+            return;
+        }
+        Handle waiter(waitCopy);
+        IO_STATUS_BLOCK io{};
+        alignas(8) BYTE buffer[4096];
+        const auto notify = reinterpret_cast<NtNotifyChangeDirectoryFileFn>(
+            GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtNotifyChangeDirectoryFile"));
+        const NTSTATUS issued = notify(directory.Get(), event.Get(), nullptr, nullptr, &io, buffer, sizeof(buffer), NameFilter, FALSE);
+        event.Reset();
+        if (issued != STATUS_PENDING)
+        {
+            WriteLine(L"notify.eventClosed: issued=" + Status(issued));
+            return;
+        }
+        LaterCreate create(real + L"\\n-eclosed.txt", 0);
+        const DWORD waited = WaitForSingleObject(waiter.Get(), NotifyTimeoutMs);
+        if (waited != WAIT_OBJECT_0)
+        {
+            WriteLine(L"notify.eventClosed: timeout");
+            CancelIoEx(directory.Get(), nullptr);
+            WaitForSingleObject(directory.Get(), 0);
+            Sleep(200);
+            return;
+        }
+        WriteLine(L"notify.eventClosed: signalled=1 " + Status(io.Status));
+    }
+
     struct ApcResult
     {
         bool Done;
@@ -2200,6 +2237,7 @@ namespace
         NotifySync(watched, real);
         NotifyEvent(watched, real, false);
         NotifyEvent(watched, real, true);
+        NotifyEventClosed(watched, real);
         NotifyApc(watched, real);
         NotifyCompletionPort(watched, real);
         NotifyTree(watched, real);

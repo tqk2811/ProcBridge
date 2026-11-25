@@ -73,8 +73,10 @@ namespace ProcBridge::Hook
         Entry* Acquire(HANDLE handle, ULONG64 generation) noexcept;
         /// Removes the entry of handle from the table (under the lock) and marks it closed; nullptr when none.
         Entry* DetachLocked(HANDLE handle) noexcept;
-        /// Ends a detached entry: wakes its worker, sends Unwatch, drops the table's reference.
+        /// Ends a detached entry: wakes its worker, then sends Unwatch and drops the table's reference on the thread pool.
         void Retire(Entry* entry) noexcept;
+        static DWORD WINAPI RetireThunk(PVOID context) noexcept;
+        void RetireNow(Entry* entry) noexcept;
         void Release(Entry* entry) noexcept;
 
         static DWORD WINAPI WorkerThunk(PVOID context) noexcept;
