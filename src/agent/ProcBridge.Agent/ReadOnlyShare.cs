@@ -17,8 +17,8 @@ public sealed class ReadOnlyShare
     private const int DefaultListPage = 1024;
     private const uint FileTypeDisk = 1;
 
-    /// <summary>Serialized size of an entry besides its name: array and string headers, one u32 and seven 64-bit fields.</summary>
-    private const int ListEntryOverhead = 96;
+    /// <summary>Serialized size of an entry besides its name: array and string headers, one u32 and eight 64-bit fields.</summary>
+    private const int ListEntryOverhead = 112;
 
     /// <summary>Response array headers and the has-more flag, with slack.</summary>
     private const int ListResponseOverhead = 64;
@@ -153,7 +153,7 @@ public sealed class ReadOnlyShare
     {
         string path = ResolvePath(relativePath);
         FileSystemInfo info = GetExistingInfo(path);
-        return ToEntry(info, path.Length == RootPath.Length ? string.Empty : info.Name);
+        return ToEntry(info, path.Length == RootPath.Length ? string.Empty : info.Name, FileDetailsReader.Read(path));
     }
 
     /// <param name="maxResponseBytes">Upper bound for the serialized page; at least one entry is always returned.</param>
@@ -181,9 +181,13 @@ public sealed class ReadOnlyShare
                 break;
             count++;
         }
+        // File ids, change times and allocation sizes of the whole directory in one scan.
+        Dictionary<string, FileDetailsReader.FileDetails> details = FileDetailsReader.ReadDirectory(path);
         return new FsListResponse
         {
-            Entries = all.Skip(start).Take(count).Select(x => ToEntry(x, x.Name)).ToArray(),
+            Entries = all.Skip(start).Take(count)
+                .Select(x => ToEntry(x, x.Name, details.TryGetValue(x.Name, out FileDetailsReader.FileDetails d) ? d : null))
+                .ToArray(),
             HasMore = start + count < all.Length,
         };
     }
@@ -227,7 +231,9 @@ public sealed class ReadOnlyShare
         throw new ProtocolStatusException(parentExists ? NtStatus.ObjectNameNotFound : NtStatus.ObjectPathNotFound, "Not found.");
     }
 
-    private static FsEntry ToEntry(FileSystemInfo info, string name)
+    /// <param name="details">File id, change time and allocation size when they could be read; otherwise the change
+    /// time falls back to the last write time and the id and allocation size stay unknown.</param>
+    private static FsEntry ToEntry(FileSystemInfo info, string name, FileDetailsReader.FileDetails? details)
     {
         long lastWrite = info.LastWriteTimeUtc.ToFileTimeUtc();
         return new FsEntry
@@ -238,7 +244,9 @@ public sealed class ReadOnlyShare
             CreationTime = info.CreationTimeUtc.ToFileTimeUtc(),
             LastAccessTime = info.LastAccessTimeUtc.ToFileTimeUtc(),
             LastWriteTime = lastWrite,
-            ChangeTime = lastWrite,
+            ChangeTime = details?.ChangeTime ?? lastWrite,
+            FileId = details?.FileId ?? 0,
+            AllocationSize = details?.AllocationSize,
         };
     }
 }

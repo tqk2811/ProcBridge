@@ -33,6 +33,28 @@ public sealed class ReadOnlyShareTests
     }
 
     [TestMethod]
+    public void StatAndList_ReportFileIdChangeTimeAndAllocationOfMachineB()
+    {
+        using var folder = new TempFolder("share");
+        folder.WriteFile(@"sub\a.txt", "hello"u8.ToArray());
+        string path = System.IO.Path.Combine(folder.Path, "sub", "a.txt");
+        File.SetLastWriteTimeUtc(path, new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Utc));
+        var share = new ReadOnlyShare("src", folder.Path);
+
+        FsEntry stat = share.Stat("sub/a.txt");
+        FsEntry listed = share.List("sub", 0, 0).Entries.Single();
+
+        Assert.AreNotEqual(0ul, stat.FileId);
+        Assert.AreEqual(stat.FileId, listed.FileId);
+        // Setting the write time changes the change time, which is now later than the write time.
+        Assert.IsGreaterThan(stat.LastWriteTime, stat.ChangeTime);
+        Assert.AreEqual(stat.ChangeTime, listed.ChangeTime);
+        Assert.IsNotNull(stat.AllocationSize);
+        Assert.AreEqual(stat.AllocationSize, listed.AllocationSize);
+        Assert.AreNotEqual(0ul, share.Stat("sub").FileId);
+    }
+
+    [TestMethod]
     public void List_PageStaysWithinTheByteBudget_AndPagingCoversEverything()
     {
         using var folder = new TempFolder("share");

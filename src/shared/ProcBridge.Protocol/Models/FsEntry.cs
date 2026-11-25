@@ -17,8 +17,10 @@ public sealed class FsEntry
     [Key(4)] public required long LastAccessTime { get; init; }
     [Key(5)] public required long LastWriteTime { get; init; }
     [Key(6)] public required long ChangeTime { get; init; }
-    /// <summary>File id on machine B; 0 when unknown (M2 does not fill it yet).</summary>
+    /// <summary>File id on machine B; 0 when unknown.</summary>
     [Key(7)] public ulong FileId { get; init; }
+    /// <summary>Allocation size on machine B; null when unknown.</summary>
+    [Key(8)] public long? AllocationSize { get; init; }
 
     [IgnoreMember] public bool IsDirectory => (Attributes & DirectoryAttribute) != 0;
 

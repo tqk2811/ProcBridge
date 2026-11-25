@@ -17,6 +17,7 @@ public sealed class MessageRoundTripTests
         LastWriteTime = 133000000000000002,
         ChangeTime = 133000000000000003,
         FileId = 0xFEEDFACECAFEBEEF,
+        AllocationSize = 123456790528,
     };
 
     private static void AssertEntryEqual(FsEntry expected, FsEntry actual)
@@ -29,6 +30,7 @@ public sealed class MessageRoundTripTests
         Assert.AreEqual(expected.LastWriteTime, actual.LastWriteTime);
         Assert.AreEqual(expected.ChangeTime, actual.ChangeTime);
         Assert.AreEqual(expected.FileId, actual.FileId);
+        Assert.AreEqual(expected.AllocationSize, actual.AllocationSize);
     }
 
     [TestMethod]

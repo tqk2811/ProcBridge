@@ -95,7 +95,9 @@ public sealed class HookPipeEndToEndTests
 
         HookStatReply stat = await hook.CallOkAsync(new HookStatRequest { MappingIndex = 0, RelativePath = @"src\a.cs" }, HookStatReply.Read);
         Assert.AreEqual(10L, stat.Info.Size);
-        Assert.AreEqual(4096L, stat.Info.AllocationSize);
+        // Machine B's own allocation size (a tiny file may be resident in the MFT, so it is not a whole cluster).
+        Assert.IsGreaterThanOrEqualTo(10L, stat.Info.AllocationSize);
+        Assert.AreNotEqual(0ul, stat.Info.FileId);
 
         HookResolveReply resolve = await hook.CallOkAsync(new HookResolveRequest
         {
@@ -150,6 +152,8 @@ public sealed class HookPipeEndToEndTests
         foreach (uint disposition in new uint[] { 2, 3, 5 })
             Assert.AreEqual((uint)NtStatus.MediaWriteProtected, await ResolveAsync("new.txt", ReadAccess, disposition), $"disposition {disposition}");
         Assert.AreEqual((uint)NtStatus.MediaWriteProtected, await ResolveAsync("a.txt", ReadAccess, 5));
+        // FILE_CREATE on an existing name: the collision comes first, as on a local volume (CREATE_NEW).
+        Assert.AreEqual((uint)NtStatus.ObjectNameCollision, await ResolveAsync("a.txt", ReadAccess, 2));
         Assert.AreEqual((uint)NtStatus.ObjectNameNotFound, await ResolveAsync("new.txt", ReadAccess, 1));
         // FILE_OPEN_IF on an existing file with read access only just opens it.
         Assert.AreEqual(0u, await ResolveAsync("a.txt", ReadAccess, 3));

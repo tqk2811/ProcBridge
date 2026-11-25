@@ -101,13 +101,17 @@ public sealed class HookRequestHandler
                 {
                     // Report a missing file as such before the write-protect error, like a read-only volume does;
                     // when the call would create it, the volume's answer is the write-protect error itself.
+                    // FILE_CREATE on an existing name fails with a collision first, as on a local volume.
                     try
                     {
                         await _cache.StatAsync(remotePath, cancellationToken).ConfigureAwait(false);
                     }
                     catch (ProtocolStatusException e) when (mayCreate && e.Status == NtStatus.ObjectNameNotFound)
                     {
+                        throw new ProtocolStatusException(NtStatus.MediaWriteProtected, "Share is read only.");
                     }
+                    if (resolve.CreateDisposition == FileCreate)
+                        throw new ProtocolStatusException(NtStatus.ObjectNameCollision, "Name already exists.");
                     throw new ProtocolStatusException(NtStatus.MediaWriteProtected, "Share is read only.");
                 }
 
@@ -178,7 +182,7 @@ public sealed class HookRequestHandler
     {
         Attributes = entry.Attributes,
         Size = entry.Size,
-        AllocationSize = entry.IsDirectory ? 0 : (entry.Size + AllocationUnit - 1) / AllocationUnit * AllocationUnit,
+        AllocationSize = entry.AllocationSize ?? (entry.IsDirectory ? 0 : (entry.Size + AllocationUnit - 1) / AllocationUnit * AllocationUnit),
         CreationTime = entry.CreationTime,
         LastAccessTime = entry.LastAccessTime,
         LastWriteTime = entry.LastWriteTime,
