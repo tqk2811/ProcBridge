@@ -245,12 +245,6 @@ cho tải, hoặc Broker trả "đang tải" để Hook chờ tiếp.
   Cửa sổ chọn thư mục chưa tự mở tới đường dẫn đã chọn lần trước (chỉ hiện gợi ý).
 - Test mới phủ ViewModel; giao diện chỉ được thử khởi động/tắt và chụp màn hình bằng tay, chưa có test UI tự động.
 
-## [Vừa] Điều khiển luồng bằng cửa sổ tín dụng
-
-Plan mục 7 nói có cửa sổ tín dụng để file lớn không chặn request nhỏ. Hiện chỉ có: khối đọc tối đa
-`MaxReadSize`, giới hạn số request đồng thời mỗi kết nối phía Agent, và nhiều kết nối song song. Chưa có ưu
-tiên metadata hơn dữ liệu trên cùng một kết nối.
-
 ## [Vừa] Liệt kê thư mục lớn
 
 Agent liệt kê lại và sắp xếp cả thư mục cho mỗi trang `FsList` (O(n²) với thư mục rất lớn). Nên giữ con trỏ

@@ -164,6 +164,7 @@ internal static class Program
             await MeasureAsync(proxy, "open small files, read-ahead x8        ", preload: true, OpenSmallAsync, readAhead: 64 * 1024, readAheadParallelism: 8);
             await MeasureAsync(proxy, $"read big file whole ({_options.BigMegabytes} MB)           ", preload: true, ReadBigWholeAsync);
             await MeasureAsync(proxy, $"read big file, {ScatteredReads} x 64 KB scattered   ", preload: true, ReadBigScatteredAsync);
+            await MeasureAsync(proxy, "list every directory during big read   ", preload: false, ListDuringBigReadAsync);
             await MeasureAsync(proxy, $"write back {WrittenFiles} small files           ", preload: true, WriteSmallAsync);
             await MeasureAsync(proxy, $"write back one new {WriteBigMegabytes} MB file          ", preload: true, WriteBigAsync);
         }
@@ -252,6 +253,28 @@ internal static class Program
                 await CallAsync(broker, new HookFetchRangeRequest { RangeId = open.Info.RangeId, Flags = HookIpcProtocol.FetchFlagWhole, Offset = 0, Length = open.Info.Size }, HookFetchRangeReply.Read);
         }
 
+        /// <summary>
+        /// Lists every directory (no preload) while the big file downloads whole on the same connections: metadata must
+        /// not wait behind file data (flow control, plan section 7). Prints the listing time; the case time includes the download.
+        /// </summary>
+        private async Task ListDuringBigReadAsync(BrokerHost broker)
+        {
+            byte[] buffer = new byte[HookIpcProtocol.MaxMessageSize];
+            byte[] reply = new byte[HookIpcProtocol.MaxMessageSize];
+            HookResolveReply open = await ResolveAsync(broker, "big.bin", GenericRead);
+            Task download = open.Info.RangeId == 0
+                ? Task.CompletedTask
+                : CallAsync(broker, new HookFetchRangeRequest { RangeId = open.Info.RangeId, Flags = HookIpcProtocol.FetchFlagWhole, Offset = 0, Length = open.Info.Size }, HookFetchRangeReply.Read, buffer, reply);
+            // Let the download fill the connections first.
+            await Task.Delay(200);
+            var listing = Stopwatch.StartNew();
+            await ListAllAsync(broker);
+            listing.Stop();
+            bool overlapped = !download.IsCompleted;
+            await download;
+            Console.Write($"  (listing {listing.Elapsed.TotalMilliseconds:0.0} ms{(overlapped ? string.Empty : ", download ended first")})");
+        }
+
         private async Task ReadBigScatteredAsync(BrokerHost broker)
         {
             HookResolveReply open = await ResolveAsync(broker, "big.bin", GenericRead);
@@ -300,14 +323,22 @@ internal static class Program
 
         private delegate T ReplyReader<out T>(ref HookIpcReader reader);
 
-        private async Task<T> CallAsync<T>(BrokerHost broker, IHookIpcMessage request, ReplyReader<T> read)
+        /// <param name="buffer">Request buffer of a call running beside the others; the shared one by default.</param>
+        private async Task<T> CallAsync<T>(BrokerHost broker, IHookIpcMessage request, ReplyReader<T> read, byte[]? buffer = null, byte[]? reply = null)
         {
-            int size = HookIpcCodec.Encode(_buffer, 1, request);
-            int length = await broker.Pipe.Handler.HandleAsync(ClientId, _buffer.AsMemory(0, size), _reply, CancellationToken.None);
-            HookIpcHeader header = HookIpcCodec.ReadHeader(_reply.AsSpan(0, length));
+            buffer ??= _buffer;
+            reply ??= _reply;
+            int size = HookIpcCodec.Encode(buffer, 1, request);
+            int length = await broker.Pipe.Handler.HandleAsync(ClientId, buffer.AsMemory(0, size), reply, CancellationToken.None);
+            return ReadReply(request, read, reply.AsSpan(0, length));
+        }
+
+        private static T ReadReply<T>(IHookIpcMessage request, ReplyReader<T> read, ReadOnlySpan<byte> message)
+        {
+            HookIpcHeader header = HookIpcCodec.ReadHeader(message);
             if (header.Status != 0)
                 throw new InvalidOperationException($"{request.MessageType} failed with 0x{header.Status:X8}.");
-            var reader = new HookIpcReader(_reply.AsSpan(0, length));
+            var reader = new HookIpcReader(message);
             return read(ref reader);
         }
 

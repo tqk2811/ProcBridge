@@ -17,6 +17,7 @@ public sealed class ConnectionPool : IAsyncDisposable
     private readonly TransportOptions _options;
     private readonly Slot[] _slots;
     private long _connectCount;
+    private long _leastRoundTripTicks;
     private int _disposed;
 
     public ConnectionPool(IConnectionFactory factory, HelloRequest hello, TransportOptions options)
@@ -34,6 +35,16 @@ public sealed class ConnectionPool : IAsyncDisposable
 
     /// <summary>Total number of successful connects (first connects and reconnects).</summary>
     public long ConnectCount => Interlocked.Read(ref _connectCount);
+
+    /// <summary>Least Hello round trip of the connections opened so far (base latency of the link); null before the first.</summary>
+    public TimeSpan? LeastRoundTrip
+    {
+        get
+        {
+            long ticks = Interlocked.Read(ref _leastRoundTripTicks);
+            return ticks == 0 ? null : TimeSpan.FromTicks(ticks);
+        }
+    }
 
     /// <summary>Completed requests per slot, for diagnostics and tests.</summary>
     public long[] GetRequestsPerSlot() => _slots.Select(x => Interlocked.Read(ref x.Requests)).ToArray();
@@ -149,6 +160,12 @@ public sealed class ConnectionPool : IAsyncDisposable
                 throw;
             }
             Interlocked.Increment(ref _connectCount);
+            long ticks = Math.Max(1, connection.HelloRoundTrip.Ticks);
+            for (long least = Interlocked.Read(ref _leastRoundTripTicks); least == 0 || ticks < least; least = Interlocked.Read(ref _leastRoundTripTicks))
+            {
+                if (Interlocked.CompareExchange(ref _leastRoundTripTicks, ticks, least) == least)
+                    break;
+            }
             slot.Connection = connection;
             slot.ClearFailure();
             // The store above must not be reordered after the load below, or this side and Dispose could miss each other.

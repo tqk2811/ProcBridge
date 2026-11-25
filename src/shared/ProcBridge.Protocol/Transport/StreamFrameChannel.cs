@@ -8,7 +8,8 @@ namespace ProcBridge.Protocol.Transport;
 
 /// <summary>
 /// Length-prefixed framing over a byte stream (see <see cref="Frame"/> for the layout). Sends are serialized by a
-/// lock so several requests can share one connection; receiving is single reader.
+/// <see cref="FrameSendGate"/> so several requests can share one connection; frames up to <see cref="UrgentFrameSize"/>
+/// go before larger ones waiting for it (metadata before file data). Receiving is single reader.
 /// Owns the stream only when <c>ownsStream</c> is true. A send abandoned half way (cancellation, timeout, I/O error)
 /// leaves a partial frame on the wire, so the channel becomes unusable and closes an owned stream.
 /// </summary>
@@ -16,11 +17,14 @@ public sealed class StreamFrameChannel : IFrameChannel
 {
     private const int LengthPrefixSize = 4;
 
+    /// <summary>Frame bodies up to this size (requests, metadata, pings, small files) jump the queue of larger ones.</summary>
+    public const int UrgentFrameSize = 32 * 1024;
+
     private readonly Stream _stream;
     private readonly bool _ownsStream;
     private readonly int _maxFrameSize;
     private readonly IFrameProtector? _protector;
-    private readonly SemaphoreSlim _sendLock = new(1, 1);
+    private readonly FrameSendGate _sendLock = new();
     private readonly byte[] _lengthBuffer = new byte[LengthPrefixSize];
     private readonly byte[] _lengthBufferForSend = new byte[LengthPrefixSize];
     private volatile bool _broken;
@@ -54,7 +58,7 @@ public sealed class StreamFrameChannel : IFrameChannel
         {
             WriteFixedPart(prefix, frame, bodyLength);
 
-            await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+            await _sendLock.WaitAsync(bodyLength <= UrgentFrameSize, cancellationToken).ConfigureAwait(false);
             try
             {
                 if (_broken)
@@ -172,6 +176,9 @@ public sealed class StreamFrameChannel : IFrameChannel
             Payload = body[(Frame.FixedBodySize + headerLength)..],
         };
     }
+
+    /// <summary>Frames waiting to be sent (tests).</summary>
+    internal int WaitingSendCount => _sendLock.WaitingCount;
 
     public async ValueTask DisposeAsync()
     {

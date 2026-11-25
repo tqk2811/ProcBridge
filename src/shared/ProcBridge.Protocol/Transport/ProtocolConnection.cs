@@ -36,6 +36,9 @@ public sealed class ProtocolConnection : IAsyncDisposable
     /// <summary>Server answer to the Hello exchange.</summary>
     public HelloResponse Server { get; private set; } = null!;
 
+    /// <summary>Round trip of the Hello exchange: a small request on a new, idle connection (base latency of the link).</summary>
+    public TimeSpan HelloRoundTrip { get; private set; }
+
     /// <summary>
     /// Raised on the reader thread for every notification frame (server push, see <see cref="FrameKind.Notification"/>).
     /// Handlers must be quick and must not throw; the frame memory stays valid after the call.
@@ -75,7 +78,9 @@ public sealed class ProtocolConnection : IAsyncDisposable
         connection._readLoop = Task.Run(connection.ReadLoopAsync);
         try
         {
+            long started = System.Diagnostics.Stopwatch.GetTimestamp();
             Frame frame = await connection.SendAsync(MessageType.Hello, ProtocolSerializer.Serialize(hello), default, timeout.Token).ConfigureAwait(false);
+            connection.HelloRoundTrip = System.Diagnostics.Stopwatch.GetElapsedTime(started);
             HelloResponse response = ProtocolSerializer.Deserialize<HelloResponse>(frame.Header);
             if (response.ProtocolVersion != hello.ProtocolVersion)
                 throw new ProtocolStatusException(NtStatus.RevisionMismatch, $"Server speaks protocol {response.ProtocolVersion}, client {hello.ProtocolVersion}.");

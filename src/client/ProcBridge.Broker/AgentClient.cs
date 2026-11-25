@@ -8,7 +8,8 @@ namespace ProcBridge.Broker;
 
 /// <summary>
 /// Typed client for one share on one Agent. Owns its <see cref="ConnectionPool"/>; large files are downloaded as
-/// chunks fetched in parallel over the pool's connections.
+/// chunks fetched in parallel over the pool's connections. File data in flight is bounded per direction by a
+/// <see cref="CreditWindow"/> shared by every transfer, so metadata requests do not queue behind megabytes of data.
 /// </summary>
 public sealed class AgentClient : IAsyncDisposable
 {
@@ -18,6 +19,9 @@ public sealed class AgentClient : IAsyncDisposable
 
     public AgentClient(IConnectionFactory factory, string shareName, TransportOptions options, string clientName = "ProcBridge.Broker")
     {
+        long initialWindow = (long)options.ReadChunkSize * options.MaxParallelChunks;
+        Downloads = new CreditWindow(initialWindow, options.DataWindowMin, options.DataWindowMax);
+        Uploads = new CreditWindow(initialWindow, options.DataWindowMin, options.DataWindowMax);
         _options = options;
         _factory = factory;
         _hello = new HelloRequest { ProtocolVersion = ProtocolInfo.Version, ClientName = clientName, ShareName = shareName };
@@ -26,6 +30,23 @@ public sealed class AgentClient : IAsyncDisposable
 
     /// <summary>Connection pool, exposed for diagnostics (request spread, reconnect count).</summary>
     public ConnectionPool Pool { get; }
+
+    /// <summary>Credit window of file data coming from machine B (downloads, ranges, read-ahead).</summary>
+    public CreditWindow Downloads { get; }
+
+    /// <summary>Credit window of file data going to machine B (write-back blocks).</summary>
+    public CreditWindow Uploads { get; }
+
+    /// <summary>Sends one bulk request whose data (<paramref name="bytes"/>) is counted in <paramref name="window"/> while in flight.</summary>
+    private async Task<Frame> SendBulkAsync(CreditWindow window, int bytes, MessageType type, byte[] header, ReadOnlyMemory<byte> payload, CancellationToken cancellationToken)
+    {
+        if (Pool.LeastRoundTrip is { } roundTrip)
+            window.ObserveRoundTrip(roundTrip);
+        using CreditWindow.Lease lease = await window.AcquireAsync(bytes, cancellationToken).ConfigureAwait(false);
+        Frame frame = await Pool.SendAsync(type, header, payload, idempotent: true, cancellationToken).ConfigureAwait(false);
+        lease.Complete();
+        return frame;
+    }
 
     public async Task<FsEntry> StatAsync(string remotePath, CancellationToken cancellationToken)
     {
@@ -98,7 +119,7 @@ public sealed class AgentClient : IAsyncDisposable
             long offset = index * chunkSize;
             int length = (int)Math.Min(chunkSize, size - offset);
             var request = new FsReadRequest { Path = remotePath, Offset = offset, Length = length, ExpectedVersion = expected };
-            Frame frame = await Pool.SendAsync(MessageType.FsRead, ProtocolSerializer.Serialize(request), default, idempotent: true, token).ConfigureAwait(false);
+            Frame frame = await SendBulkAsync(Downloads, length, MessageType.FsRead, ProtocolSerializer.Serialize(request), default, token).ConfigureAwait(false);
             if (frame.Payload.Length != length)
                 throw new ProtocolStatusException(NtStatus.FileVersionChanged, $"Short read at {offset}: {frame.Payload.Length} of {length} bytes.");
             await RandomAccess.WriteAsync(handle, frame.Payload, offset, token).ConfigureAwait(false);
@@ -121,7 +142,7 @@ public sealed class AgentClient : IAsyncDisposable
             long start = offset + index * chunkSize;
             int count = (int)Math.Min(chunkSize, offset + length - start);
             var request = new FsReadRequest { Path = remotePath, Offset = start, Length = count, ExpectedVersion = expected };
-            Frame frame = await Pool.SendAsync(MessageType.FsRead, ProtocolSerializer.Serialize(request), default, idempotent: true, token).ConfigureAwait(false);
+            Frame frame = await SendBulkAsync(Downloads, count, MessageType.FsRead, ProtocolSerializer.Serialize(request), default, token).ConfigureAwait(false);
             if (frame.Payload.Length != count)
                 throw new ProtocolStatusException(NtStatus.FileVersionChanged, $"Short read at {start}: {frame.Payload.Length} of {count} bytes.");
             await RandomAccess.WriteAsync(destination, frame.Payload, start, token).ConfigureAwait(false);
@@ -183,7 +204,7 @@ public sealed class AgentClient : IAsyncDisposable
                 int read = await RandomAccess.ReadAsync(handle, buffer, offset, token).ConfigureAwait(false);
                 var request = new FsWriteRequest { Path = remotePath, UploadId = uploadId, Offset = offset };
                 // Writing the same block twice gives the same staging file, so a resend after a lost connection is safe.
-                await Pool.SendAsync(MessageType.FsWrite, ProtocolSerializer.Serialize(request), buffer.AsMemory(0, read), idempotent: true, token).ConfigureAwait(false);
+                await SendBulkAsync(Uploads, read, MessageType.FsWrite, ProtocolSerializer.Serialize(request), buffer.AsMemory(0, read), token).ConfigureAwait(false);
             }).ConfigureAwait(false);
         }
 

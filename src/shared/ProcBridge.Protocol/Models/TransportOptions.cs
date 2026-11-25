@@ -15,6 +15,15 @@ public sealed record TransportOptions
     /// <summary>Chunk requests in flight for one file download.</summary>
     public int MaxParallelChunks { get; init; } = 8;
 
+    /// <summary>
+    /// Least credit window for file data in flight per direction over the whole pool (see Transport.CreditWindow); the
+    /// window starts at <see cref="ReadChunkSize"/> × <see cref="MaxParallelChunks"/> and follows the link between these bounds.
+    /// </summary>
+    public long DataWindowMin { get; init; } = 512 * 1024;
+
+    /// <summary>Largest credit window, for fast links with a long round trip.</summary>
+    public long DataWindowMax { get; init; } = 16 * 1024 * 1024;
+
     public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(10);
 
     /// <summary>Time the secure handshake (or the join of a session) may take once the stream is open; a silent peer is given up on after it.</summary>
