@@ -4,5 +4,7 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageVersion Include="MSTest" Version="4.5.3" />
+    <PackageVersion Include="NSec.Cryptography" Version="26.4.0" />
+    <PackageVersion Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
   </ItemGroup>
 </Project>

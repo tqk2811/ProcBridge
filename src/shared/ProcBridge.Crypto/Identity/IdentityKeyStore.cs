@@ -1,0 +1,92 @@
+using System.Security.Cryptography;
+using ProcBridge.Crypto.Identity.Interfaces;
+
+namespace ProcBridge.Crypto.Identity;
+
+/// <summary>
+/// Persists one <see cref="IdentityKey"/> in a file, private key wrapped by an <see cref="IKeyProtector"/>.
+/// File layout: magic "PBIK", format version byte, protected private key.
+/// The protector is borrowed, not owned.
+/// </summary>
+public sealed class IdentityKeyStore
+{
+    private const byte FormatVersion = 1;
+    private static readonly byte[] _magic = "PBIK"u8.ToArray();
+
+    private readonly string _path;
+    private readonly IKeyProtector _protector;
+
+    public IdentityKeyStore(string path, IKeyProtector protector)
+    {
+        _path = path;
+        _protector = protector;
+    }
+
+    public bool Exists => File.Exists(_path);
+
+    /// <summary>Loads the stored key, or generates and saves a new one on first run.</summary>
+    public IdentityKey LoadOrCreate()
+    {
+        if (Exists)
+            return Load();
+        var key = IdentityKey.Generate();
+        try
+        {
+            Save(key);
+        }
+        catch
+        {
+            key.Dispose();
+            throw;
+        }
+        return key;
+    }
+
+    /// <exception cref="InvalidDataException">File is not a ProcBridge identity file.</exception>
+    /// <exception cref="CryptographicException">Protected blob cannot be unwrapped (other user/machine, corrupted).</exception>
+    public IdentityKey Load()
+    {
+        var data = File.ReadAllBytes(_path);
+        if (data.Length <= _magic.Length + 1 || !data.AsSpan(0, _magic.Length).SequenceEqual(_magic))
+            throw new InvalidDataException("Not a ProcBridge identity key file.");
+        if (data[_magic.Length] != FormatVersion)
+            throw new InvalidDataException($"Unsupported identity key file version {data[_magic.Length]}.");
+        var privateKey = _protector.Unprotect(data[(_magic.Length + 1)..]);
+        try
+        {
+            return IdentityKey.FromPrivateKey(privateKey);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(privateKey);
+        }
+    }
+
+    /// <summary>Writes atomically (temp file then replace) so a crash never leaves a half-written key.</summary>
+    public void Save(IdentityKey key)
+    {
+        var privateKey = key.ExportPrivateKey();
+        byte[] blob;
+        try
+        {
+            blob = _protector.Protect(privateKey);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(privateKey);
+        }
+
+        var directory = Path.GetDirectoryName(Path.GetFullPath(_path));
+        if (!string.IsNullOrEmpty(directory))
+            Directory.CreateDirectory(directory);
+        var tempPath = _path + ".tmp";
+        using (var stream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            stream.Write(_magic);
+            stream.WriteByte(FormatVersion);
+            stream.Write(blob);
+            stream.Flush(flushToDisk: true);
+        }
+        File.Move(tempPath, _path, overwrite: true);
+    }
+}
