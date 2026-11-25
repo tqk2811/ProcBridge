@@ -239,11 +239,6 @@ DbgHelp đọc pdb qua thư mục ảo và kịch bản khoá vùng của Native
   Cửa sổ chọn thư mục chưa tự mở tới đường dẫn đã chọn lần trước (chỉ hiện gợi ý).
 - Test mới phủ ViewModel; giao diện chỉ được thử khởi động/tắt và chụp màn hình bằng tay, chưa có test UI tự động.
 
-## [Vừa] Liệt kê thư mục lớn
-
-Agent liệt kê lại và sắp xếp cả thư mục cho mỗi trang `FsList` (O(n²) với thư mục rất lớn). Nên giữ con trỏ
-liệt kê theo kết nối hoặc cache danh sách ngắn hạn phía Agent.
-
 ## [Vừa] Cache phía Broker
 
 - Bảng version chỉ nằm trong bộ nhớ: khởi động lại Broker là tải lại mọi file. Lưu version cạnh file cache.

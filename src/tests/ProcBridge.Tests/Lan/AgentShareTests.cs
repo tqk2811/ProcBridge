@@ -110,6 +110,61 @@ public sealed class AgentShareTests
         Assert.IsGreaterThan(1, pages);
     }
 
+    /// <summary>
+    /// A large directory is scanned once per listing, not once per page (the pages used to rescan and sort the whole
+    /// directory each, O(n²)); the pages still add up to the directory exactly once.
+    /// </summary>
+    [TestMethod]
+    public void LargeDirectory_LaterPagesReuseTheFirstScan()
+    {
+        using var folder = new TempFolder("share");
+        string[] names = Enumerable.Range(0, 1500).Select(i => $"f{i:D5}.txt").ToArray();
+        foreach (string name in names)
+            folder.WriteFile(name, [1]);
+        var share = new AgentShare("src", folder.Path);
+
+        List<string> ListAll()
+        {
+            var seen = new List<string>();
+            int start = 0;
+            while (true)
+            {
+                FsListResponse page = share.List("", start, maxCount: 100);
+                seen.AddRange(page.Entries.Select(x => x.Name));
+                start += page.Entries.Length;
+                if (!page.HasMore)
+                    return seen;
+            }
+        }
+
+        CollectionAssert.AreEqual(names, ListAll());
+        Assert.AreEqual(1, share.ListScanCount);
+
+        // A new listing (start index 0) scans again and sees the change.
+        folder.WriteFile("f99999.txt", [1]);
+        CollectionAssert.AreEqual(names.Append("f99999.txt").ToArray(), ListAll());
+        Assert.AreEqual(2, share.ListScanCount);
+    }
+
+    /// <summary>Pages after the first see the directory as the first page did: no entry skipped or repeated by a change in between.</summary>
+    [TestMethod]
+    public void LargeDirectory_ChangeBetweenPages_DoesNotShiftThePaging()
+    {
+        using var folder = new TempFolder("share");
+        string[] names = Enumerable.Range(0, 600).Select(i => $"f{i:D5}.txt").ToArray();
+        foreach (string name in names)
+            folder.WriteFile(name, [1]);
+        var share = new AgentShare("src", folder.Path);
+
+        FsListResponse first = share.List("", 0, maxCount: 300);
+        // An entry sorted before the next page appears: by index alone the next page would repeat f00299.
+        folder.WriteFile("a-new.txt", [1]);
+        FsListResponse second = share.List("", first.Entries.Length, maxCount: 300);
+
+        CollectionAssert.AreEqual(names, first.Entries.Concat(second.Entries).Select(x => x.Name).ToArray());
+        Assert.IsFalse(second.HasMore);
+    }
+
     [TestMethod]
     [DataRow("console.txt")]
     [DataRow("com10")]

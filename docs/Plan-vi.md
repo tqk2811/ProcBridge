@@ -313,6 +313,11 @@ sequenceDiagram
   pool gửi lại trên kết nối mới, thay vì mỗi request chờ đủ `RequestTimeout`. `Ping` đi đầu cuối nên qua lane relay cũng
   vậy. Ngược lại, Agent đóng kết nối im lặng quá `IdleTimeout` (mặc định 2 phút) để máy A biến mất không giữ handle và
   khoá mãi.
+- Liệt kê thư mục theo trang (`FsList`, `StartIndex`): trang đầu (`StartIndex` 0) luôn quét và sắp xếp thư mục mới;
+  thư mục trên 256 mục giữ bản quét đó 10 giây (`DirectoryListingCache`, mỗi share tối đa 8 thư mục) để các trang sau
+  cắt từ cùng bản quét thay vì quét lại cả thư mục mỗi trang (trước đây O(n²) với thư mục rất lớn). Cache theo share chứ
+  không theo kết nối vì các trang có thể đi qua những kết nối khác nhau của pool. Các trang sau thấy thư mục như lúc
+  trang đầu, nên thay đổi xen giữa hai trang không làm lặp hay sót mục khi phân trang theo chỉ số.
 
 ---
 

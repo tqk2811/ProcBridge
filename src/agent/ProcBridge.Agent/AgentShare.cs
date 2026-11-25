@@ -15,6 +15,9 @@ namespace ProcBridge.Agent;
 public sealed partial class AgentShare
 {
     private const int DefaultListPage = 1024;
+
+    /// <summary>Directories with more entries than this keep their scan for the next pages (DirectoryListingCache).</summary>
+    private const int MinCachedListing = 256;
     private const uint FileTypeDisk = 1;
 
     /// <summary>Serialized size of an entry besides its name: array and string headers, one u32 and eight 64-bit fields.</summary>
@@ -45,6 +48,7 @@ public sealed partial class AgentShare
     };
 
     private readonly string[] _allowedRoots;
+    private readonly DirectoryListingCache _listings = new();
 
     public AgentShare(string name, string rootPath, bool writable = false)
     {
@@ -168,13 +172,13 @@ public sealed partial class AgentShare
         if (info is not DirectoryInfo directory)
             throw new ProtocolStatusException(NtStatus.NotADirectory, "Not a directory.");
 
-        // Sorted so paging by index is stable between pages.
-        FileSystemInfo[] all = directory.EnumerateFileSystemInfos("*", ListOptions)
-            .Where(x => !IsStagingName(x.Name))
-            .OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+        int pageSize = maxCount <= 0 ? DefaultListPage : Math.Min(maxCount, DefaultListPage * 4);
+        // Later pages of a large directory come from the scan of its first page instead of a new scan each.
+        DirectoryListingCache.Snapshot snapshot = _listings.Get(path, startIndex <= 0, () => ScanDirectory(directory, path), x => x.Entries.Length > MinCachedListing);
+        FileSystemInfo[] all = snapshot.Entries;
+        Dictionary<string, FileDetailsReader.FileDetails> details = snapshot.Details;
         int start = Math.Clamp(startIndex, 0, all.Length);
-        int limit = Math.Min(maxCount <= 0 ? DefaultListPage : Math.Min(maxCount, DefaultListPage * 4), all.Length - start);
+        int limit = Math.Min(pageSize, all.Length - start);
 
         // Names can be 255 characters, so the count alone does not keep the page inside one frame.
         int budget = maxResponseBytes - ListResponseOverhead;
@@ -186,8 +190,6 @@ public sealed partial class AgentShare
                 break;
             count++;
         }
-        // File ids, change times and allocation sizes of the whole directory in one scan.
-        Dictionary<string, FileDetailsReader.FileDetails> details = FileDetailsReader.ReadDirectory(path);
         return new FsListResponse
         {
             Entries = all.Skip(start).Take(count)
@@ -195,6 +197,20 @@ public sealed partial class AgentShare
                 .ToArray(),
             HasMore = start + count < all.Length,
         };
+    }
+
+    /// <summary>Directory scans <see cref="List"/> made so far (tests: later pages must not scan again).</summary>
+    internal long ListScanCount => _listings.ScanCount;
+
+    private static DirectoryListingCache.Snapshot ScanDirectory(DirectoryInfo directory, string path)
+    {
+        // Sorted so paging by index is stable between pages.
+        FileSystemInfo[] all = directory.EnumerateFileSystemInfos("*", ListOptions)
+            .Where(x => !IsStagingName(x.Name))
+            .OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        // File ids, change times and allocation sizes of the whole directory in one scan.
+        return new DirectoryListingCache.Snapshot(all, FileDetailsReader.ReadDirectory(path));
     }
 
     /// <summary>Upper bound of the serialized size of an entry named <paramref name="name"/>.</summary>
