@@ -2,10 +2,13 @@
   <PropertyGroup>
     <RootNamespace>ProcBridge.Agent</RootNamespace>
     <OutputType>Exe</OutputType>
+    <!-- Windows: DPAPI key store, and the Remote Explorer library. -->
+    <TargetFramework>net10.0-windows</TargetFramework>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\shared\ProcBridge.Protocol\ProcBridge.Protocol.csproj" />
     <ProjectReference Include="..\..\shared\ProcBridge.Crypto\ProcBridge.Crypto.csproj" />
+    <ProjectReference Include="..\..\shared\ProcBridge.Transport.Secure\ProcBridge.Transport.Secure.csproj" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="ProcBridge.Tests" />

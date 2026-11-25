@@ -70,12 +70,13 @@ public sealed class HookPipeEndToEndTests
         share.WriteFile(@"proj\src\a.cs", "class A {}"u8.ToArray());
         share.WriteFile(@"proj\readme.md", "# hi"u8.ToArray());
         using var cacheDir = new TempFolder("cache");
-        await using var agent = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
+        await using var agent = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
         agent.Start();
 
         string session = Guid.NewGuid().ToString("N");
         await using BrokerHost broker = BrokerHost.Start(new BrokerOptions
         {
+            AllowPlaintextTransport = true,
             SessionId = session,
             AgentHost = "127.0.0.1",
             AgentPort = agent.Port,
@@ -131,11 +132,12 @@ public sealed class HookPipeEndToEndTests
         using var share = new TempFolder("pipe");
         share.WriteFile("a.txt", "hello"u8.ToArray());
         using var cacheDir = new TempFolder("cache");
-        await using var agent = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
+        await using var agent = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
         agent.Start();
         string session = Guid.NewGuid().ToString("N");
         await using BrokerHost broker = BrokerHost.Start(new BrokerOptions
         {
+            AllowPlaintextTransport = true,
             SessionId = session, AgentHost = "127.0.0.1", AgentPort = agent.Port, ShareName = "src",
             Mappings = [new VirtualMapping(VirtualRoot, "")], CacheRoot = cacheDir.Path,
         });
@@ -166,11 +168,12 @@ public sealed class HookPipeEndToEndTests
         for (int i = 0; i < 8; i++)
             share.WriteFile($"f{i}.txt", [(byte)('0' + i)]);
         using var cacheDir = new TempFolder("cache");
-        await using var agent = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
+        await using var agent = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
         agent.Start();
         string session = Guid.NewGuid().ToString("N");
         await using BrokerHost broker = BrokerHost.Start(new BrokerOptions
         {
+            AllowPlaintextTransport = true,
             SessionId = session, AgentHost = "127.0.0.1", AgentPort = agent.Port, ShareName = "src",
             Mappings = [new VirtualMapping(VirtualRoot, "")], CacheRoot = cacheDir.Path,
         });
@@ -191,11 +194,12 @@ public sealed class HookPipeEndToEndTests
         share.WriteFile(@"proj\src\a.cs", "a"u8.ToArray());
         share.WriteFile(@"proj\other\x.cs", "x"u8.ToArray());
         using var cacheDir = new TempFolder("cache");
-        await using var agent = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
+        await using var agent = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
         agent.Start();
         string session = HookIpcProtocol.NewSessionId();
         await using BrokerHost broker = BrokerHost.Start(new BrokerOptions
         {
+            AllowPlaintextTransport = true,
             SessionId = session,
             AgentHost = "127.0.0.1",
             AgentPort = agent.Port,
@@ -248,11 +252,12 @@ public sealed class HookPipeEndToEndTests
         using var share = new TempFolder("pipe");
         Directory.CreateDirectory(share.Combine("proj"));
         using var cacheDir = new TempFolder("cache");
-        await using var agent = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
+        await using var agent = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
         agent.Start();
         string session = HookIpcProtocol.NewSessionId();
         await using BrokerHost broker = BrokerHost.Start(new BrokerOptions
         {
+            AllowPlaintextTransport = true,
             SessionId = session,
             AgentHost = "127.0.0.1",
             AgentPort = agent.Port,
@@ -282,6 +287,7 @@ public sealed class HookPipeEndToEndTests
         await Task.CompletedTask;
         return BrokerHost.Start(new BrokerOptions
         {
+            AllowPlaintextTransport = true,
             SessionId = session,
             AgentHost = "127.0.0.1",
             AgentPort = agent.Port,
@@ -306,7 +312,7 @@ public sealed class HookPipeEndToEndTests
     {
         using var share = new TempFolder("pipe");
         using var cacheDir = new TempFolder("cache");
-        await using var agent = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
+        await using var agent = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
         agent.Start();
         string session = HookIpcProtocol.NewSessionId();
         await using BrokerHost broker = await StartBrokerAsync(share, cacheDir, agent, session);
@@ -334,7 +340,7 @@ public sealed class HookPipeEndToEndTests
     {
         using var share = new TempFolder("pipe");
         using var cacheDir = new TempFolder("cache");
-        await using var agent = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
+        await using var agent = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
         agent.Start();
         string session = HookIpcProtocol.NewSessionId();
         await using BrokerHost broker = await StartBrokerAsync(share, cacheDir, agent, session);

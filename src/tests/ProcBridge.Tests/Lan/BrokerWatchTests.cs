@@ -25,7 +25,7 @@ public sealed class BrokerWatchTests
 
     private static AgentServer StartAgent(TempFolder share)
     {
-        var server = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
+        var server = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
         server.Start();
         return server;
     }
@@ -160,7 +160,7 @@ public sealed class BrokerWatchTests
         await server.DisposeAsync();
         await WaitUntilAsync(() => Task.FromResult(!cache.IsWatchActive), TimeSpan.FromSeconds(2));
 
-        await using var restarted = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = port });
+        await using var restarted = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = port });
         restarted.Start();
         await watcher.WaitActiveAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
         Assert.IsTrue(cache.IsWatchActive);
@@ -405,6 +405,7 @@ public sealed class BrokerWatchTests
         await using AgentServer server = StartAgent(share);
         await using BrokerHost host = BrokerHost.Start(new BrokerOptions
         {
+            AllowPlaintextTransport = true,
             SessionId = ProcBridge.HookIpc.HookIpcProtocol.NewSessionId(),
             AgentHost = "127.0.0.1",
             AgentPort = server.Port,

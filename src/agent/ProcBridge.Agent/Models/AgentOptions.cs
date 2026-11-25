@@ -23,6 +23,18 @@ public sealed record AgentOptions
     /// <summary>Longest a response may take to be written; a client that stops reading is dropped after it.</summary>
     public TimeSpan SendTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// Development and old tests only: serve plain frames without a handshake when no <c>AgentSecurity</c> is given.
+    /// Off by default, so an Agent never runs unencrypted by accident.
+    /// </summary>
+    public bool AllowPlaintextTransport { get; init; }
+
+    /// <summary>Time a new connection has to finish the secure handshake (or join) before it is dropped.</summary>
+    public TimeSpan HandshakeTimeout { get; init; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>Time the users have to compare the pairing code and decide.</summary>
+    public TimeSpan PairingTimeout { get; init; } = TimeSpan.FromMinutes(5);
+
     /// <summary>Time a new connection has to send Hello.</summary>
     public TimeSpan HelloTimeout { get; init; } = TimeSpan.FromSeconds(10);
 

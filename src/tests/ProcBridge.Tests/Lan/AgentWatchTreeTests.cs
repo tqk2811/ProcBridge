@@ -17,7 +17,7 @@ public sealed class AgentWatchTreeTests
 
     private static AgentServer StartAgent(TempFolder share, AgentOptions? options = null)
     {
-        var server = new AgentServer([new ReadOnlyShare("src", share.Path)], (options ?? new AgentOptions()) with { BindAddress = IPAddress.Loopback, Port = 0 });
+        var server = new AgentServer([new ReadOnlyShare("src", share.Path)], (options ?? new AgentOptions()) with { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
         server.Start();
         return server;
     }
@@ -128,7 +128,7 @@ public sealed class AgentWatchTreeTests
     {
         using var share = new TempFolder("watch");
         // A long batch window lets every change land in one batch.
-        await using AgentServer server = StartAgent(share, new AgentOptions { WatchBatchDelay = TimeSpan.FromSeconds(2) });
+        await using AgentServer server = StartAgent(share, new AgentOptions { AllowPlaintextTransport = true, WatchBatchDelay = TimeSpan.FromSeconds(2) });
         await using ProtocolConnection connection = await ConnectAsync(server);
         BlockingCollection<FsChangeNotification> received = await WatchAsync(connection);
 
@@ -205,7 +205,7 @@ public sealed class AgentWatchTreeTests
     {
         using TempFolder share = BuildTree();
         // A tiny frame forces directories to be split over several pages.
-        await using AgentServer server = StartAgent(share, new AgentOptions { MaxFrameSize = 4096, MaxReadSize = 1024 });
+        await using AgentServer server = StartAgent(share, new AgentOptions { AllowPlaintextTransport = true, MaxFrameSize = 4096, MaxReadSize = 1024 });
         await using ProtocolConnection connection = await ConnectAsync(server);
 
         (Dictionary<string, List<FsEntry>> tree, bool truncated, int pages) = await WalkAsync(connection, string.Empty, 0);
@@ -246,7 +246,7 @@ public sealed class AgentWatchTreeTests
     public async Task Tree_EntryLimit_ReportsTruncated()
     {
         using TempFolder share = BuildTree();
-        await using AgentServer server = StartAgent(share, new AgentOptions { MaxTreeEntries = 50 });
+        await using AgentServer server = StartAgent(share, new AgentOptions { AllowPlaintextTransport = true, MaxTreeEntries = 50 });
         await using ProtocolConnection connection = await ConnectAsync(server);
 
         (Dictionary<string, List<FsEntry>> tree, bool truncated, _) = await WalkAsync(connection, string.Empty, 0);

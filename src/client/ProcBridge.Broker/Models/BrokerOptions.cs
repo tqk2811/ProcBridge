@@ -48,6 +48,12 @@ public sealed record BrokerOptions
 
     public TransportOptions Transport { get; init; } = new();
 
+    /// <summary>Identity, paired Agents and the Agent's key: frames are encrypted end to end (plan section 9).</summary>
+    public BrokerSecurity? Security { get; init; }
+
+    /// <summary>Development and old tests only: talk plain frames when <see cref="Security"/> is null. Off by default.</summary>
+    public bool AllowPlaintextTransport { get; init; }
+
     public string GetCacheRoot() => CacheRoot ?? Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ProcBridge", "cache", SessionId);
 }

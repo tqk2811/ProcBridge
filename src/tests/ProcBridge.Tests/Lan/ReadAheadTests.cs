@@ -18,7 +18,7 @@ public sealed class ReadAheadTests
 
     private static AgentServer StartAgent(TempFolder share)
     {
-        var server = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
+        var server = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
         server.Start();
         return server;
     }

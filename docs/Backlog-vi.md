@@ -154,11 +154,6 @@ chờ đủ `RequestTimeout`. Nên có ping/keepalive và đánh dấu kết n�
 lúc khởi động có lẽ quá hạn khi máy CI chậm. Nên tách thời hạn khởi động khỏi thời hạn request, hoặc để test
 chỉ hạ thời hạn sau khi hook đã khởi động. Ghi 2026-11-25.
 
-## [Thấp] Agent chưa xác thực, chưa mã hoá
-
-Đến M5 mới có ghép cặp và mã hoá (`IFrameProtector` là chỗ cắm). Hiện Agent lắng nghe `0.0.0.0` không kiểm ai
-kết nối; chỉ chạy trong LAN tin cậy.
-
 ## [Thấp] Review độc lập cho M2
 
 Đợt M2 (phần C# và phần ghép Hook ↔ Broker) do subagent làm, không được tạo subagent review nên chưa có lượt
@@ -208,24 +203,16 @@ không bị huỷ khi `BrokerHost` dừng.
 
 - Kênh người dùng của mã 6 số chỉ đi B→A, nên thông điệp confirm chỉ chứng minh mã khớp ở phía A chứ
   không chứng minh người gửi là A thật (kẻ đứng giữa cũng có mã của riêng nó).
-- Trước khi gọi `PairingResponder.Accept` ([PairingResponder.cs](../src/shared/ProcBridge.Crypto/Pairing/PairingResponder.cs)),
-  WPF của Agent phải bắt người dùng so `PeerFingerprint` với vân tay A hiển thị, không để nút chấp nhận
-  bấm được ngay. Phương án khác: SAS hai chiều (A cũng hiện mã để nhập ở B).
+- Transport đã có API: `AgentServer.PairingRequested` đưa `PairingRequest` (mã 6 số, `PeerFingerprint`, tên A) và
+  `Accept`/`Reject` ([PairingRequest.cs](../src/shared/ProcBridge.Transport.Secure/PairingRequest.cs)); Agent console
+  hiện mã + vân tay và hỏi y/N. WPF của Agent phải bắt người dùng so `PeerFingerprint` với vân tay A hiển thị,
+  không để nút chấp nhận bấm được ngay. Phương án khác: SAS hai chiều (A cũng hiện mã để nhập ở B).
 - Ghi từ review bảo mật M5 (2026-11-25).
 
-## [Vừa] Gắn ProcBridge.Crypto vào transport (M2/M6)
+## [Vừa] Giao diện quản lý máy đã ghép cặp
 
-- Broker/Agent chạy bắt tay IK khi mở phiên, `NoiseHandshake.CreatePairing` + `PairingInitiator`/`PairingResponder`
-  khi ghép cặp (thông điệp ghép cặp đi qua `GetPairingChannel`).
-- Gửi khung bằng `SecureChannel.SealAndWriteAsync` khi nhiều luồng cùng ghi một kết nối.
-- Kết nối phụ của cùng phiên gửi id kênh ở dạng rõ trước khung đầu, bên kia gọi `AcceptChannel`.
-- Prologue nên chứa số phiên bản giao thức (`ProtocolInfo.Version`) để hai bản lệch nhau bị từ chối.
-- Điều kiện xong M5 "bắt gói trên dây không thấy nội dung" cần kiểm khi đã có transport.
-
-## [Vừa] Lưu danh sách máy đã ghép cặp
-
-Thư viện chỉ trả khoá công khai của bên kia và nhận delegate kiểm khoá; chưa có kho lưu khoá tin cậy
-(file bọc DPAPI hoặc ký HMAC), xoá/thu hồi máy, hiển thị vân tay trên WPF của Agent.
+Kho `PairedMachineStore` (file bọc DPAPI, liệt kê, thu hồi) đã có cho cả A và B, và CLI tạm (`--list-paired`,
+`--revoke` ở Agent và Launcher). Còn thiếu màn hình WPF liệt kê vân tay, đổi tên máy và thu hồi.
 
 ## [Thấp] Giới hạn thử ghép cặp
 
@@ -283,3 +270,15 @@ Chưa có cách thay khoá định danh của một máy mà không ghép cặp 
 - Vị trí: `src/agent/ProcBridge.Agent.Explorer/PathScopeGuard.cs` (`OpenEntryForChange`).
 - Vấn đề: handle nguồn của Delete/Rename được mở với `FileShareAll` (cần để xoá/đổi tên khi file đang bị process khác mở). Một process cục bộ có quyền ghi ở cả hai nơi (trong và ngoài gốc) có thể dời object đã qua kiểm phạm vi ra ngoài gốc trước khi thao tác chạy; thao tác vẫn tác động đúng object đã kiểm nhưng object đó nay nằm ngoài gốc. Không mở rộng quyền của máy A (máy A không điều khiển được process cục bộ này); chỉ cần lưu ý nếu Agent chạy quyền cao hơn user cục bộ. Hướng nếu cần: kiểm lại `GetFinalPath` ngay trước bước đánh dấu xoá/đổi tên.
 - Ghi ngày: 2026-11-25.
+
+## [Thấp] Join kênh bằng id phiên gửi rõ
+
+Kết nối phụ gửi rõ `id phiên (16 byte đầu của handshake hash) | id kênh`; Agent gọi `AcceptChannel` ngay nên kẻ
+nghe lén trong LAN có thể gửi trước id kênh kế tiếp để "đốt" nó: kết nối thật bị từ chối và Broker phải bắt tay
+lại (chỉ là từ chối dịch vụ, không lộ dữ liệu). Nên chỉ ghi nhận id kênh sau khi khung đầu tiên giải mã được, hoặc
+thêm MAC theo khoá phiên vào yêu cầu join. Ghi 2026-11-25.
+
+## [Thấp] Phiên mã hoá theo đường relay (M6)
+
+`SecureConnectionFactory`/`SecureServer` làm việc trên `IStreamConnector`/`Stream`, mới có `TcpStreamConnector`. Relay
+cần một connector WebSocket và phía Agent gọi `SecureServer.AcceptAsync` cho từng tunnel. Ghi 2026-11-25.

@@ -27,6 +27,18 @@ public sealed record LauncherOptions
     /// </summary>
     public bool DisableBuildServers { get; init; }
 
+    /// <summary>Identity, paired Agents and the Agent's key; null only with <see cref="AllowPlaintextTransport"/>.</summary>
+    public BrokerSecurity? Security { get; init; }
+
+    /// <summary>Development only (<c>--plaintext</c>): talk unencrypted frames to an Agent started with <c>--plaintext</c>.</summary>
+    public bool AllowPlaintextTransport { get; init; }
+
+    /// <summary><c>--agent-fingerprint</c>: which paired Agent to trust when several were paired at the same address.</summary>
+    public string? AgentFingerprint { get; init; }
+
+    /// <summary><c>--data</c>: folder of the identity key and paired machine list; null for <c>%LOCALAPPDATA%\ProcBridge\launcher</c>.</summary>
+    public string? DataDirectory { get; init; }
+
     /// <summary>Target command line, passed to CreateProcess as is (cmd.exe has its own quoting rules).</summary>
     public required string CommandLine { get; init; }
 }

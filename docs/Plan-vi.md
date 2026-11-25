@@ -349,6 +349,20 @@ Broker kết nối TCP thẳng tới Agent (cổng cấu hình được). Tìm A
 - Nhiều luồng cùng gửi trên một kênh thì dùng `SealAndWriteAsync` để khung lên dây đúng thứ tự counter.
 - Payload của message 1 bắt tay phát lại được, tầng trên không coi nó là lệnh.
 
+Đã gắn vào transport (nhánh `feature/secure-transport`, project `ProcBridge.Transport.Secure`):
+
+- Mỗi kết nối TCP mở đầu bằng phần rõ `magic "PBS1" | op`. `Handshake`: Noise IK (prologue
+  `ProcBridge/<ProtocolInfo.Version>`), Agent kiểm khoá A bằng kho máy đã ghép cặp và đóng kết nối nếu lạ, rồi A gửi
+  id kênh. `Join`: kết nối phụ gửi rõ `id phiên (16 byte đầu handshake hash) | id kênh`, Agent trả một byte chấp
+  nhận / không biết phiên (A bắt tay lại). Một lần bắt tay phục vụ mọi kết nối của pool. Sau đó khung đi qua
+  `IFrameProtector` (`SecureFrameProtector` = `SecureChannel.Seal/Open`) trong `StreamFrameChannel`.
+- `Pairing`: Noise XX, rồi trên kênh ghép cặp: tên A, commit, nonce, reveal; Agent phát `PairingRequested` (mã 6 số
+  + vân tay A + tên), confirm của A chứng minh mã khớp, chỉ `Accept` của người dùng B mới lưu khoá A; tin cuối báo
+  quyết định và tên B, A lưu khoá B kèm địa chỉ. Ghép cặp tắt mặc định (`AllowPairing`).
+- Kho `PairedMachineStore` (JSON bọc DPAPI, liệt kê vân tay, thu hồi) dùng cho cả A và B; thu hồi đóng ngay các
+  kết nối của máy đó ở Agent và từ chối bắt tay/join mới.
+- Agent và Broker mặc định bắt buộc mã hoá; `AllowPlaintextTransport` (`--plaintext`) chỉ cho phát triển và test cũ.
+
 ```mermaid
 sequenceDiagram
     participant BR as Broker (A)

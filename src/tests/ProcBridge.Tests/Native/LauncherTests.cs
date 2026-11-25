@@ -41,11 +41,12 @@ public sealed class LauncherTests
     public async Task Run_ReadsThroughAgent_AndStopsBrokerAfterwards(string platform)
     {
         using HookSandbox sandbox = new(platform);
-        await using var agent = new AgentServer([new ReadOnlyShare("share", sandbox.RealRoot)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
+        await using var agent = new AgentServer([new ReadOnlyShare("share", sandbox.RealRoot)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
         agent.Start();
         string marker = Path.Combine(sandbox.BaseDirectory, "copied.txt");
         var options = new LauncherOptions
         {
+            AllowPlaintextTransport = true,
             AgentHost = "127.0.0.1",
             AgentPort = agent.Port,
             ShareName = "share",

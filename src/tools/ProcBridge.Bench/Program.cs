@@ -44,7 +44,7 @@ internal static class Program
             string[] paths = CreateTree(share, dirs, files, size);
             Console.WriteLine($"Tree: {dirs} directories x {files} files of {size} bytes = {paths.Length} files, loopback TCP.");
 
-            await using var agent = new AgentServer([new ReadOnlyShare("src", share)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
+            await using var agent = new AgentServer([new ReadOnlyShare("src", share)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
             agent.Start();
 
             for (int run = 1; run <= runs; run++)

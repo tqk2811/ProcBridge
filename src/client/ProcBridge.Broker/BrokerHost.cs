@@ -3,7 +3,9 @@ using System.Runtime.Versioning;
 using ProcBridge.Broker.Models;
 using ProcBridge.HookIpc;
 using ProcBridge.Protocol;
+using ProcBridge.Protocol.Interfaces;
 using ProcBridge.Protocol.Transport;
+using ProcBridge.Transport.Secure;
 
 namespace ProcBridge.Broker;
 
@@ -15,10 +17,12 @@ namespace ProcBridge.Broker;
 public sealed class BrokerHost : IAsyncDisposable
 {
     private readonly CancellationTokenSource _stopping;
+    private readonly IDisposable? _factory;
     private int _disposed;
 
-    private BrokerHost(AgentClient client, FileCache cache, ChangeWatcher? watcher, HookIpcServer pipe, Task preload, CancellationTokenSource stopping)
+    private BrokerHost(AgentClient client, FileCache cache, ChangeWatcher? watcher, HookIpcServer pipe, Task preload, CancellationTokenSource stopping, IDisposable? factory)
     {
+        _factory = factory;
         _stopping = stopping;
         Client = client;
         Cache = cache;
@@ -41,7 +45,8 @@ public sealed class BrokerHost : IAsyncDisposable
 
     public static BrokerHost Start(BrokerOptions options)
     {
-        var client = new AgentClient(new TcpConnectionFactory(options.AgentHost, options.AgentPort, options.Transport), options.ShareName, options.Transport);
+        IConnectionFactory factory = CreateConnectionFactory(options);
+        var client = new AgentClient(factory, options.ShareName, options.Transport);
         var cache = new FileCache(client, options.GetCacheRoot(), new FileCacheOptions
         {
             MetadataTtl = options.MetadataTtl,
@@ -64,7 +69,21 @@ public sealed class BrokerHost : IAsyncDisposable
 
         var stopping = new CancellationTokenSource();
         Task preload = options.PreloadTree ? PreloadAsync(cache, watcher, options, stopping.Token) : Task.CompletedTask;
-        return new BrokerHost(client, cache, watcher, pipe, preload, stopping);
+        return new BrokerHost(client, cache, watcher, pipe, preload, stopping, factory as IDisposable);
+    }
+
+    /// <summary>Encrypted factory when <see cref="BrokerOptions.Security"/> is set; plain only when explicitly allowed.</summary>
+    /// <exception cref="ArgumentException">No security and plain transport not allowed.</exception>
+    public static IConnectionFactory CreateConnectionFactory(BrokerOptions options)
+    {
+        if (options.Security is { } security)
+        {
+            return new SecureConnectionFactory(new TcpStreamConnector(options.AgentHost, options.AgentPort), security.Identity,
+                security.PairedMachines, security.AgentPublicKey, options.Transport);
+        }
+        if (!options.AllowPlaintextTransport)
+            throw new ArgumentException("The Broker needs BrokerSecurity (paired Agent); plain transport is for development only.", nameof(options));
+        return new TcpConnectionFactory(options.AgentHost, options.AgentPort, options.Transport);
     }
 
     private static async Task PreloadAsync(FileCache cache, ChangeWatcher? watcher, BrokerOptions options, CancellationToken cancellationToken)
@@ -121,6 +140,7 @@ public sealed class BrokerHost : IAsyncDisposable
             // Reported by PreloadAsync already.
         }
         await Client.DisposeAsync().ConfigureAwait(false);
+        _factory?.Dispose();
         _stopping.Dispose();
     }
 }

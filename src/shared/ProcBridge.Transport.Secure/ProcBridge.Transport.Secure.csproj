@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- End-to-end encryption of the A <-> B transport (plan section 9, M5): Noise handshake, pairing and paired machine store. -->
+  <PropertyGroup>
+    <RootNamespace>ProcBridge.Transport.Secure</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ProcBridge.Protocol\ProcBridge.Protocol.csproj" />
+    <ProjectReference Include="..\ProcBridge.Crypto\ProcBridge.Crypto.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="ProcBridge.Tests" />
+  </ItemGroup>
+</Project>

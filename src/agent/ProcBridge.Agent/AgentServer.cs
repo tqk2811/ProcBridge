@@ -2,13 +2,18 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using ProcBridge.Agent.Models;
+using ProcBridge.Protocol.Interfaces;
 using ProcBridge.Protocol.Transport;
+using ProcBridge.Transport.Secure;
+using ProcBridge.Transport.Secure.Models;
 
 namespace ProcBridge.Agent;
 
 /// <summary>
 /// TCP listener of the Agent: accepts connections from Brokers and runs one <see cref="AgentSession"/> per
-/// connection. M2 has no authentication or encryption yet (M5): only run it on a trusted LAN.
+/// connection. With an <see cref="AgentSecurity"/> every connection first goes through the <see cref="SecureServer"/>
+/// (Noise IK handshake against the paired machines, or a pairing) and frames are encrypted end to end (plan section 9).
+/// Without it the server only starts when <see cref="AgentOptions.AllowPlaintextTransport"/> is set (development).
 /// </summary>
 public sealed class AgentServer : IAsyncDisposable
 {
@@ -16,22 +21,64 @@ public sealed class AgentServer : IAsyncDisposable
     private readonly AgentOptions _options;
     private readonly TcpListener _listener;
     private readonly CancellationTokenSource _stopping = new();
-    private readonly ConcurrentDictionary<AgentSession, Task> _sessions = new();
+    private readonly ConcurrentDictionary<TcpClient, Connection> _connections = new();
     private readonly ConcurrentDictionary<string, Lazy<ShareWatcher>> _watchers = new(StringComparer.OrdinalIgnoreCase);
+    private readonly SecureServer? _secure;
     private Task _acceptLoop = Task.CompletedTask;
     private int _disposed;
 
-    public AgentServer(IEnumerable<ReadOnlyShare> shares, AgentOptions options)
+    /// <param name="security">Identity and paired machines; null serves plain frames and needs <see cref="AgentOptions.AllowPlaintextTransport"/>.</param>
+    /// <exception cref="ArgumentException">No security and plain transport not allowed.</exception>
+    public AgentServer(IEnumerable<ReadOnlyShare> shares, AgentOptions options, AgentSecurity? security = null)
     {
+        if (security is null && !options.AllowPlaintextTransport)
+            throw new ArgumentException("The Agent needs an identity and paired machines (AgentSecurity); plain transport is for development only.", nameof(security));
         _shares = shares.ToDictionary(x => x.Name, StringComparer.OrdinalIgnoreCase);
         _options = options;
         _listener = new TcpListener(options.BindAddress, options.Port);
+        if (security is not null)
+        {
+            _secure = new SecureServer(security.Identity, security.PairedMachines, new SecureServerOptions
+            {
+                HandshakeTimeout = options.HandshakeTimeout,
+                AllowPairing = security.AllowPairing,
+                PairingTimeout = options.PairingTimeout,
+                MaxFrameSize = options.MaxFrameSize,
+            });
+            _secure.PeerRevoked += AbortPeer;
+            _secure.PairingRequested += OnPairingRequested;
+        }
     }
+
+    /// <summary>
+    /// A machine A asks to pair: show <see cref="PairingRequest.Code"/> and <see cref="PairingRequest.PeerFingerprint"/>,
+    /// then call <see cref="PairingRequest.Accept"/> or <see cref="PairingRequest.Reject"/>. Raised only while
+    /// <see cref="AllowPairing"/> is on; without a handler the request is rejected.
+    /// </summary>
+    public event Action<PairingRequest>? PairingRequested;
+
+    /// <summary>True when connections are encrypted (an <see cref="AgentSecurity"/> was given).</summary>
+    public bool IsSecure => _secure is not null;
+
+    /// <summary>Accept pairing requests (the UI turns it on while pairing a new machine). Always false without security.</summary>
+    public bool AllowPairing
+    {
+        get => _secure?.AllowPairing ?? false;
+        set
+        {
+            if (_secure is null)
+                throw new InvalidOperationException("Pairing needs an AgentSecurity.");
+            _secure.AllowPairing = value;
+        }
+    }
+
+    /// <summary>Fingerprint of this Agent's identity key, or null without security.</summary>
+    public string? Fingerprint => _secure?.Fingerprint;
 
     /// <summary>Port actually listened on (useful when <see cref="AgentOptions.Port"/> is 0).</summary>
     public int Port => ((IPEndPoint)_listener.LocalEndpoint).Port;
 
-    public int ActiveSessionCount => _sessions.Count;
+    public int ActiveSessionCount => _connections.Count;
 
     /// <summary>The watcher of <paramref name="share"/>, created on first use and shared by every connection.</summary>
     internal ShareWatcher GetWatcher(ReadOnlyShare share)
@@ -62,22 +109,38 @@ public sealed class AgentServer : IAsyncDisposable
             }
 
             client.NoDelay = true;
-            var channel = new StreamFrameChannel(client.GetStream(), ownsStream: true, _options.MaxFrameSize);
-            var session = new AgentSession(channel, client, _shares, _options, GetWatcher);
-
-            // The session removes itself when it ends; it must not start before it is registered, or a connection
-            // that fails at once would be removed first and then re-added for good.
-            var registered = new TaskCompletionSource();
-            _sessions[session] = RunSessionAsync(session, registered.Task);
-            registered.SetResult();
+            // Registered before it runs, so a connection that fails at once cannot be removed before it is added.
+            var connection = new Connection(client);
+            _connections[client] = connection;
+            connection.Run = Task.Run(() => RunConnectionAsync(connection));
         }
     }
 
-    private async Task RunSessionAsync(AgentSession session, Task registered)
+    private async Task RunConnectionAsync(Connection connection)
     {
-        await registered.ConfigureAwait(false);
         try
         {
+            IFrameChannel channel;
+            if (_secure is null)
+            {
+                channel = new StreamFrameChannel(connection.Client.GetStream(), ownsStream: true, _options.MaxFrameSize);
+            }
+            else
+            {
+                string remote = connection.Client.Client.RemoteEndPoint?.ToString() ?? string.Empty;
+                SecureFrameChannel? secure = await _secure.AcceptAsync(connection.Client.GetStream(), remote, _stopping.Token).ConfigureAwait(false);
+                if (secure is null)
+                    return;
+                connection.PeerFingerprint = secure.PeerFingerprint;
+                // Revoked while the handshake ran: the revocation event may have missed this connection.
+                if (!_secure.PairedMachines.IsTrusted(secure.PeerFingerprint))
+                {
+                    await secure.DisposeAsync().ConfigureAwait(false);
+                    return;
+                }
+                channel = secure;
+            }
+            var session = new AgentSession(channel, connection.Client, _shares, _options, GetWatcher);
             await session.RunAsync(_stopping.Token).ConfigureAwait(false);
         }
         catch (Exception e) when (e is not OutOfMemoryException)
@@ -86,7 +149,27 @@ public sealed class AgentServer : IAsyncDisposable
         }
         finally
         {
-            _sessions.TryRemove(session, out _);
+            connection.Client.Dispose();
+            _connections.TryRemove(connection.Client, out _);
+        }
+    }
+
+    private void OnPairingRequested(PairingRequest request)
+    {
+        Action<PairingRequest>? handler = PairingRequested;
+        if (handler is null)
+            request.Reject();
+        else
+            handler(request);
+    }
+
+    /// <summary>Closes every connection of a revoked machine.</summary>
+    private void AbortPeer(string fingerprint)
+    {
+        foreach (Connection connection in _connections.Values)
+        {
+            if (connection.PeerFingerprint == fingerprint)
+                connection.Client.Dispose();
         }
     }
 
@@ -104,14 +187,35 @@ public sealed class AgentServer : IAsyncDisposable
         catch (OperationCanceledException)
         {
         }
-        foreach (AgentSession session in _sessions.Keys)
-            session.Abort();
-        await Task.WhenAll(_sessions.Values).ConfigureAwait(false);
+        foreach (Connection connection in _connections.Values)
+            connection.Client.Dispose();
+        await Task.WhenAll(_connections.Values.Select(x => x.Run)).ConfigureAwait(false);
+        if (_secure is not null)
+        {
+            _secure.PeerRevoked -= AbortPeer;
+            _secure.Dispose();
+        }
         foreach (Lazy<ShareWatcher> watcher in _watchers.Values)
         {
             if (watcher.IsValueCreated)
                 watcher.Value.Dispose();
         }
         _stopping.Dispose();
+    }
+
+    /// <summary>One accepted socket; <see cref="PeerFingerprint"/> is set once the handshake authenticated the peer.</summary>
+    private sealed class Connection(TcpClient client)
+    {
+        private volatile string? _peerFingerprint;
+
+        public TcpClient Client { get; } = client;
+
+        public Task Run { get; set; } = Task.CompletedTask;
+
+        public string? PeerFingerprint
+        {
+            get => _peerFingerprint;
+            set => _peerFingerprint = value;
+        }
     }
 }

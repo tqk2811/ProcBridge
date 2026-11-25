@@ -54,6 +54,8 @@ public sealed class LaunchSession
             ShareName = _options.ShareName,
             Mappings = _options.Mappings,
             CacheRoot = _options.CacheRoot,
+            Security = _options.Security,
+            AllowPlaintextTransport = _options.AllowPlaintextTransport,
         });
 
         // Spawn passes everything after "--" to CreateProcess untouched.
