@@ -14,14 +14,23 @@ internal static class CryptoTestHelper
         NoisePattern pattern,
         IdentityKey initiatorKey,
         IdentityKey responderKey,
-        Func<byte[], bool>? initiatorVerifier = null,
-        Func<byte[], bool>? responderVerifier = null)
+        Func<byte[], bool> initiatorVerifier,
+        Func<byte[], bool> responderVerifier)
     {
         using var initiator = new NoiseHandshake(
             pattern, isInitiator: true, initiatorKey, Prologue,
             pattern == NoisePattern.IK ? responderKey.PublicKey : default, initiatorVerifier);
         using var responder = new NoiseHandshake(
             pattern, isInitiator: false, responderKey, Prologue, default, responderVerifier);
+        Run(initiator, responder);
+        return (initiator.CreateSession(), responder.CreateSession());
+    }
+
+    /// <summary>Runs an XX pairing handshake (any key accepted) and returns both untrusted sessions.</summary>
+    public static (SecureSession Initiator, SecureSession Responder) PairingHandshake(IdentityKey initiatorKey, IdentityKey responderKey)
+    {
+        using var initiator = NoiseHandshake.CreatePairing(isInitiator: true, initiatorKey, Prologue);
+        using var responder = NoiseHandshake.CreatePairing(isInitiator: false, responderKey, Prologue);
         Run(initiator, responder);
         return (initiator.CreateSession(), responder.CreateSession());
     }

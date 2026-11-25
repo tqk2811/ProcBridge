@@ -10,7 +10,7 @@ namespace ProcBridge.Tests.Crypto;
 public sealed class PairingTests
 {
     private static (SecureSession A, SecureSession B) PairingSessions(IdentityKey a, IdentityKey b)
-        => CryptoTestHelper.Handshake(NoisePattern.XX, a, b);
+        => CryptoTestHelper.PairingHandshake(a, b);
 
     [TestMethod]
     public void CorrectCode_PairsBothSides_AndKeysWorkForIK()

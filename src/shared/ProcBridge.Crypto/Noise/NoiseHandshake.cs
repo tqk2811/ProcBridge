@@ -36,6 +36,7 @@ public sealed class NoiseHandshake : IDisposable
     private readonly NoiseToken[][] _messages;
     private readonly X25519KeyPair _localStatic;
     private readonly Func<byte[], bool>? _remoteStaticVerifier;
+    private readonly bool _isPairing;
     private X25519KeyPair? _localEphemeral;
     private byte[]? _remoteStatic;
     private byte[]? _remoteEphemeral;
@@ -50,19 +51,33 @@ public sealed class NoiseHandshake : IDisposable
     /// <param name="prologue">Data both sides must agree on (protocol version); mismatch fails the handshake.</param>
     /// <param name="remoteStaticPublicKey">Responder key, required for the IK initiator, otherwise empty.</param>
     /// <param name="remoteStaticVerifier">
-    /// Called once with the peer's static key after it is authenticated; return false to reject
-    /// (unknown or unpaired machine). Null accepts any key: only for pairing, followed by SAS confirmation.
+    /// Required. Called once with the peer's static key after it is authenticated; return false to reject
+    /// (unknown or unpaired machine). For the IK initiator it is checked once against
+    /// <paramref name="remoteStaticPublicKey"/> up front. To accept an unknown key use
+    /// <see cref="CreatePairing"/> instead.
     /// </param>
+    /// <exception cref="ArgumentNullException"><paramref name="remoteStaticVerifier"/> is null.</exception>
     public NoiseHandshake(
         NoisePattern pattern,
         bool isInitiator,
         IdentityKey localStatic,
         ReadOnlySpan<byte> prologue,
-        ReadOnlySpan<byte> remoteStaticPublicKey = default,
-        Func<byte[], bool>? remoteStaticVerifier = null)
-        : this(pattern, isInitiator, localStatic.KeyPair, null, prologue, remoteStaticPublicKey, remoteStaticVerifier)
+        ReadOnlySpan<byte> remoteStaticPublicKey,
+        Func<byte[], bool> remoteStaticVerifier)
+        : this(pattern, isInitiator, localStatic.KeyPair, null, prologue, remoteStaticPublicKey,
+            remoteStaticVerifier ?? throw new ArgumentNullException(nameof(remoteStaticVerifier)), isPairing: false)
     {
+        if (pattern == NoisePattern.IK && isInitiator && !remoteStaticVerifier(remoteStaticPublicKey.ToArray()))
+            throw new CryptoProtocolException("Responder static key is not trusted.");
     }
+
+    /// <summary>
+    /// Noise XX handshake for first-time pairing: accepts any peer static key. The resulting
+    /// <see cref="SecureSession"/> is untrusted until pairing (SAS confirmation) completes, so it
+    /// cannot open data channels; see <see cref="SecureSession.IsTrusted"/>.
+    /// </summary>
+    public static NoiseHandshake CreatePairing(bool isInitiator, IdentityKey localStatic, ReadOnlySpan<byte> prologue)
+        => new(NoisePattern.XX, isInitiator, localStatic.KeyPair, null, prologue, default, null, isPairing: true);
 
     /// <summary>Test hook: fixed ephemeral key for official test vectors (ownership transferred).</summary>
     internal NoiseHandshake(
@@ -72,13 +87,15 @@ public sealed class NoiseHandshake : IDisposable
         X25519KeyPair? fixedEphemeral,
         ReadOnlySpan<byte> prologue,
         ReadOnlySpan<byte> remoteStaticPublicKey,
-        Func<byte[], bool>? remoteStaticVerifier)
+        Func<byte[], bool>? remoteStaticVerifier,
+        bool isPairing = false)
     {
         Pattern = pattern;
         IsInitiator = isInitiator;
         _localStatic = localStatic;
         _localEphemeral = fixedEphemeral;
         _remoteStaticVerifier = remoteStaticVerifier;
+        _isPairing = isPairing;
         _messages = pattern switch
         {
             NoisePattern.XX => _xx,
@@ -113,6 +130,9 @@ public sealed class NoiseHandshake : IDisposable
     public NoisePattern Pattern { get; }
 
     public bool IsInitiator { get; }
+
+    /// <summary>True for a handshake made by <see cref="CreatePairing"/> (peer key not verified).</summary>
+    public bool IsPairing => _isPairing;
 
     public bool IsCompleted => _messageIndex >= _messages.Length;
 

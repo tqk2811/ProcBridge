@@ -37,7 +37,7 @@ public sealed class NoiseHandshakeTests
 
         // A believes it talks to B, but the machine answering holds a different key.
         using var initiator = new NoiseHandshake(NoisePattern.IK, true, a, CryptoTestHelper.Prologue, b.PublicKey, CryptoTestHelper.Trust(b));
-        using var responder = new NoiseHandshake(NoisePattern.IK, false, impostor, CryptoTestHelper.Prologue);
+        using var responder = new NoiseHandshake(NoisePattern.IK, false, impostor, CryptoTestHelper.Prologue, default, CryptoTestHelper.Trust(a));
 
         var first = initiator.WriteMessage(ReadOnlySpan<byte>.Empty);
         Assert.ThrowsExactly<CryptoProtocolException>(() => responder.ReadMessage(first));
@@ -64,7 +64,7 @@ public sealed class NoiseHandshakeTests
         using var paired = IdentityKey.Generate();
 
         Assert.ThrowsExactly<CryptoProtocolException>(() =>
-            CryptoTestHelper.Handshake(NoisePattern.XX, a, b, CryptoTestHelper.Trust(paired), null));
+            CryptoTestHelper.Handshake(NoisePattern.XX, a, b, CryptoTestHelper.Trust(paired), CryptoTestHelper.Trust(a)));
     }
 
     [TestMethod]
@@ -72,8 +72,8 @@ public sealed class NoiseHandshakeTests
     {
         using var a = IdentityKey.Generate();
         using var b = IdentityKey.Generate();
-        using var initiator = new NoiseHandshake(NoisePattern.IK, true, a, "v1"u8, b.PublicKey);
-        using var responder = new NoiseHandshake(NoisePattern.IK, false, b, "v2"u8);
+        using var initiator = new NoiseHandshake(NoisePattern.IK, true, a, "v1"u8, b.PublicKey, CryptoTestHelper.Trust(b));
+        using var responder = new NoiseHandshake(NoisePattern.IK, false, b, "v2"u8, default, CryptoTestHelper.Trust(a));
 
         var first = initiator.WriteMessage(ReadOnlySpan<byte>.Empty);
         Assert.ThrowsExactly<CryptoProtocolException>(() => responder.ReadMessage(first));
@@ -84,8 +84,8 @@ public sealed class NoiseHandshakeTests
     {
         using var a = IdentityKey.Generate();
         using var b = IdentityKey.Generate();
-        using var initiator = new NoiseHandshake(NoisePattern.XX, true, a, CryptoTestHelper.Prologue);
-        using var responder = new NoiseHandshake(NoisePattern.XX, false, b, CryptoTestHelper.Prologue);
+        using var initiator = new NoiseHandshake(NoisePattern.XX, true, a, CryptoTestHelper.Prologue, default, CryptoTestHelper.Trust(b));
+        using var responder = new NoiseHandshake(NoisePattern.XX, false, b, CryptoTestHelper.Prologue, default, CryptoTestHelper.Trust(a));
 
         responder.ReadMessage(initiator.WriteMessage(ReadOnlySpan<byte>.Empty));
         var second = responder.WriteMessage("hello"u8);
@@ -100,8 +100,8 @@ public sealed class NoiseHandshakeTests
     {
         using var a = IdentityKey.Generate();
         using var b = IdentityKey.Generate();
-        using var initiator = new NoiseHandshake(NoisePattern.XX, true, a, CryptoTestHelper.Prologue);
-        using var responder = new NoiseHandshake(NoisePattern.XX, false, b, CryptoTestHelper.Prologue);
+        using var initiator = new NoiseHandshake(NoisePattern.XX, true, a, CryptoTestHelper.Prologue, default, CryptoTestHelper.Trust(b));
+        using var responder = new NoiseHandshake(NoisePattern.XX, false, b, CryptoTestHelper.Prologue, default, CryptoTestHelper.Trust(a));
 
         var first = initiator.WriteMessage(ReadOnlySpan<byte>.Empty);
         Assert.ThrowsExactly<CryptoProtocolException>(() => responder.ReadMessage(first.AsSpan(0, 10)));
@@ -112,12 +112,52 @@ public sealed class NoiseHandshakeTests
     {
         using var a = IdentityKey.Generate();
         using var b = IdentityKey.Generate();
-        using var initiator = new NoiseHandshake(NoisePattern.IK, true, a, CryptoTestHelper.Prologue, b.PublicKey);
-        using var responder = new NoiseHandshake(NoisePattern.IK, false, b, CryptoTestHelper.Prologue);
+        using var initiator = new NoiseHandshake(NoisePattern.IK, true, a, CryptoTestHelper.Prologue, b.PublicKey, CryptoTestHelper.Trust(b));
+        using var responder = new NoiseHandshake(NoisePattern.IK, false, b, CryptoTestHelper.Prologue, default, CryptoTestHelper.Trust(a));
 
         CollectionAssert.AreEqual("hello"u8.ToArray(), responder.ReadMessage(initiator.WriteMessage("hello"u8)));
         CollectionAssert.AreEqual("world"u8.ToArray(), initiator.ReadMessage(responder.WriteMessage("world"u8)));
         Assert.IsTrue(initiator.IsCompleted);
         Assert.IsTrue(responder.IsCompleted);
+    }
+
+    [TestMethod]
+    [DataRow(NoisePattern.XX, true)]
+    [DataRow(NoisePattern.XX, false)]
+    [DataRow(NoisePattern.IK, true)]
+    [DataRow(NoisePattern.IK, false)]
+    public void PublicConstructor_NullVerifier_IsRejected(NoisePattern pattern, bool isInitiator)
+    {
+        using var a = IdentityKey.Generate();
+        using var b = IdentityKey.Generate();
+        var remote = pattern == NoisePattern.IK && isInitiator ? b.PublicKey.ToArray() : [];
+
+        Assert.ThrowsExactly<ArgumentNullException>(() =>
+            new NoiseHandshake(pattern, isInitiator, a, CryptoTestHelper.Prologue, remote, null!).Dispose());
+    }
+
+    [TestMethod]
+    public void IK_Responder_RejectsAnyKeyWhenVerifierSaysNo()
+    {
+        using var a = IdentityKey.Generate();
+        using var b = IdentityKey.Generate();
+        using var initiator = new NoiseHandshake(NoisePattern.IK, true, a, CryptoTestHelper.Prologue, b.PublicKey, CryptoTestHelper.Trust(b));
+        using var responder = new NoiseHandshake(NoisePattern.IK, false, b, CryptoTestHelper.Prologue, default, _ => false);
+
+        Assert.ThrowsExactly<CryptoProtocolException>(() => responder.ReadMessage(initiator.WriteMessage(ReadOnlySpan<byte>.Empty)));
+    }
+
+    [TestMethod]
+    public void CreatePairing_AcceptsUnknownKeys_AndIsMarkedPairing()
+    {
+        using var a = IdentityKey.Generate();
+        using var b = IdentityKey.Generate();
+        using var initiator = NoiseHandshake.CreatePairing(true, a, CryptoTestHelper.Prologue);
+        using var responder = NoiseHandshake.CreatePairing(false, b, CryptoTestHelper.Prologue);
+
+        CryptoTestHelper.Run(initiator, responder);
+        Assert.IsTrue(initiator.IsPairing);
+        Assert.AreEqual(NoisePattern.XX, initiator.Pattern);
+        CollectionAssert.AreEqual(b.PublicKey.ToArray(), initiator.RemoteStaticPublicKey);
     }
 }
