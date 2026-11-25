@@ -5,7 +5,7 @@ namespace ProcBridge::Hook
 {
     namespace
     {
-        // "\??\X:" — index of the first character after the drive letter colon.
+        // "\??\X:": index of the first character after the drive letter colon.
         constexpr USHORT DriveRelativeStart = 6;
 
         bool IsDriveLetterNtPath(const UNICODE_STRING& path) noexcept
