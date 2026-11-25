@@ -401,7 +401,7 @@ public sealed class HookRequestHandler : IDisposable
         else
         {
             // Opens that only read may get a ranged copy; anything that may write brings the whole file in first.
-            item = await _cache.EnsureAsync(remotePath, allowRanges: !mayChange, cancellationToken).ConfigureAwait(false);
+            item = await _cache.EnsureAsync(remotePath, entry, allowRanges: !mayChange, cancellationToken).ConfigureAwait(false);
         }
 
         ulong token = 0;
