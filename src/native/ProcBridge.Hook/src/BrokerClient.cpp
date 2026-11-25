@@ -256,50 +256,66 @@ namespace ProcBridge::Hook
             Destroy(_connection);
             _connection = fresh;
         }
-        if (!done && GetLastError() == ERROR_IO_PENDING)
+        bool pending = !done && GetLastError() == ERROR_IO_PENDING;
+        while (true)
         {
-            const HANDLE events[2] = { _connection->Event, cancelEvent };
-            const DWORD waited = WaitForMultipleObjects(cancelEvent != nullptr ? 2 : 1, events, FALSE, timeoutMs);
-            if (waited != WAIT_OBJECT_0)
+            if (pending)
             {
-                // The instance is in an unknown state now: drop it.
-                CancelIoEx(_connection->Pipe, &overlapped);
-                GetOverlappedResult(_connection->Pipe, &overlapped, &received, TRUE);
-                _healthy = false;
-                return waited == WAIT_OBJECT_0 + 1 ? STATUS_CANCELLED : STATUS_IO_TIMEOUT;
+                const HANDLE events[2] = { _connection->Event, cancelEvent };
+                const DWORD waited = WaitForMultipleObjects(cancelEvent != nullptr ? 2 : 1, events, FALSE, timeoutMs);
+                if (waited != WAIT_OBJECT_0)
+                {
+                    // The instance is in an unknown state now: drop it.
+                    CancelIoEx(_connection->Pipe, &overlapped);
+                    GetOverlappedResult(_connection->Pipe, &overlapped, &received, TRUE);
+                    _healthy = false;
+                    return waited == WAIT_OBJECT_0 + 1 ? STATUS_CANCELLED : STATUS_IO_TIMEOUT;
+                }
+                done = GetOverlappedResult(_connection->Pipe, &overlapped, &received, FALSE);
             }
-            done = GetOverlappedResult(_connection->Pipe, &overlapped, &received, FALSE);
-        }
-        else if (done)
-        {
-            done = GetOverlappedResult(_connection->Pipe, &overlapped, &received, FALSE);
-        }
-        if (!done)
-        {
-            _healthy = false;
-            // ERROR_MORE_DATA: a reply larger than the protocol allows.
-            return GetLastError() == ERROR_MORE_DATA ? STATUS_INVALID_NETWORK_RESPONSE : STATUS_NETWORK_UNREACHABLE;
-        }
+            else if (done)
+            {
+                done = GetOverlappedResult(_connection->Pipe, &overlapped, &received, FALSE);
+            }
+            if (!done)
+            {
+                _healthy = false;
+                // ERROR_MORE_DATA: a reply larger than the protocol allows.
+                return GetLastError() == ERROR_MORE_DATA ? STATUS_INVALID_NETWORK_RESPONSE : STATUS_NETWORK_UNREACHABLE;
+            }
 
-        HookIpc::MessageHeader answer{};
-        if (received < sizeof(answer))
-        {
-            _healthy = false;
-            return STATUS_INVALID_NETWORK_RESPONSE;
+            HookIpc::MessageHeader answer{};
+            if (received < sizeof(answer))
+            {
+                _healthy = false;
+                return STATUS_INVALID_NETWORK_RESPONSE;
+            }
+            memcpy(&answer, _connection->Reply, sizeof(answer));
+            if (answer.Size != received || answer.Version != HookIpc::ProtocolVersion || answer.RequestId != header.RequestId
+                || (answer.Status == 0 && answer.MessageType != header.MessageType))
+            {
+                _healthy = false;
+                return STATUS_INVALID_NETWORK_RESPONSE;
+            }
+            if (answer.Status == HookIpc::StatusInProgress)
+            {
+                // The Broker is still working on it (a large download): read the next message and wait the whole
+                // timeout again, so only a Broker that stops making progress fails the call.
+                overlapped = OVERLAPPED{};
+                overlapped.hEvent = _connection->Event;
+                ResetEvent(_connection->Event);
+                received = 0;
+                done = ReadFile(_connection->Pipe, _connection->Reply, HookIpc::MaxMessageSize, nullptr, &overlapped);
+                pending = !done && GetLastError() == ERROR_IO_PENDING;
+                continue;
+            }
+            if (answer.Status != 0)
+            {
+                return ToProcessStatus(answer.Status);
+            }
+            reply.Body = _connection->Reply + sizeof(answer);
+            reply.BodySize = received - static_cast<ULONG>(sizeof(answer));
+            return STATUS_SUCCESS;
         }
-        memcpy(&answer, _connection->Reply, sizeof(answer));
-        if (answer.Size != received || answer.Version != HookIpc::ProtocolVersion || answer.RequestId != header.RequestId
-            || (answer.Status == 0 && answer.MessageType != header.MessageType))
-        {
-            _healthy = false;
-            return STATUS_INVALID_NETWORK_RESPONSE;
-        }
-        if (answer.Status != 0)
-        {
-            return ToProcessStatus(answer.Status);
-        }
-        reply.Body = _connection->Reply + sizeof(answer);
-        reply.BodySize = received - static_cast<ULONG>(sizeof(answer));
-        return STATUS_SUCCESS;
     }
 }

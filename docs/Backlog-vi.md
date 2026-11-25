@@ -210,12 +210,6 @@ mở khoá với Key khác vẫn thành công, khác hành vi NTFS. Ít chương
 `cdb`/`dotnet-dump` (máy test không cài), debug bằng Visual Studio và VS Code, mở DB SQLite trên Agent. Hiện thay bằng
 DbgHelp đọc pdb qua thư mục ảo và kịch bản khoá vùng của NativeProbe.
 
-## [Vừa] Thời hạn IPC cho file lớn
-
-Hook chờ Broker tối đa `PROCBRIDGE_IPC_TIMEOUT_MS` (mặc định 60 giây) cho mọi request, kể cả `Resolve` phải tải
-trọn file. File lớn qua mạng chậm sẽ quá hạn (`STATUS_IO_TIMEOUT`) dù Broker vẫn đang tải. Cần thời hạn riêng
-cho tải, hoặc Broker trả "đang tải" để Hook chờ tiếp.
-
 ## [Vừa] Launcher chưa đủ cho người dùng
 
 - CLI chưa đọc cấu hình từ file.

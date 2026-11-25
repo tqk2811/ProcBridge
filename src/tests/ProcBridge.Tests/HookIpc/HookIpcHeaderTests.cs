@@ -58,6 +58,7 @@ public sealed partial class HookIpcHeaderTests
         Assert.AreEqual((long)HookIpcProtocol.FetchReplyFlagComplete, Constant(header, "FetchReplyFlagComplete"));
         Assert.AreEqual((long)HookIpcProtocol.LockFlagExclusive, Constant(header, "LockFlagExclusive"));
         Assert.AreEqual((long)HookIpcProtocol.LockFlagFailImmediately, Constant(header, "LockFlagFailImmediately"));
+        Assert.AreEqual((long)HookIpcProtocol.StatusInProgress, Constant(header, "StatusInProgress"));
         StringAssert.Contains(header, $@"L""\\\\.\\pipe\\{HookIpcProtocol.PipeNamePrefix}""");
     }
 

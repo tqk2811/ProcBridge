@@ -588,7 +588,11 @@ người dùng cần nó để chọn thư mục máy B trước khi mở phiên
 
 - Hook nói chuyện với Broker qua `\\.\pipe\ProcBridge-<phiên>` (định dạng `ProcBridge/HookIpc.h`): pool instance
   có khoá (mỗi lời gọi lấy một instance rảnh hoặc mở mới), chế độ message, `TransactNamedPipe` overlapped có
-  thời hạn (`PROCBRIDGE_IPC_TIMEOUT_MS`, mặc định 60 s; quá hạn trả `STATUS_IO_TIMEOUT`). Mỗi instance mới được
+  thời hạn (`PROCBRIDGE_IPC_TIMEOUT_MS`, mặc định 60 s; quá hạn trả `STATUS_IO_TIMEOUT`). Thời hạn tính từ tin nhắn
+  cuối của Broker chứ không từ lúc gửi request: request còn chạy (tải file lớn qua mạng chậm) được Broker gửi tin nhắn
+  tiến độ (`Status = StatusInProgress`, không body, cùng `RequestId`) mỗi `IpcProgressInterval` (mặc định 5 s), hook
+  đọc tiếp và chờ lại đủ thời hạn, nên file lớn không còn quá hạn khi Broker vẫn đang tải, còn Broker treo thật vẫn quá
+  hạn (giao thức IPC v5). Phần việc dưới request bị chặn bởi `RequestTimeout` và keepalive của tầng vận chuyển. Mỗi instance mới được
   kiểm `GetNamedPipeServerProcessId` khớp PID Broker (`PROCBRIDGE_BROKER_PID`), mở với
   `SECURITY_IDENTIFICATION`; sai PID thì khởi động hook thất bại. Mã `0xE000000x` còn sót cũng bị đổi sang mã chuẩn.
 - `BrokerResolver` (cùng giao diện `IPathResolver` với `PathMapper` của M1): lúc khởi động gửi `Hello`, rồi

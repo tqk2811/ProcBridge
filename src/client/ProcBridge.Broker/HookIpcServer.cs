@@ -6,6 +6,7 @@ using System.Runtime.Versioning;
 using Microsoft.Win32.SafeHandles;
 using ProcBridge.HookIpc;
 using ProcBridge.HookIpc.Enums;
+using ProcBridge.HookIpc.Models;
 
 namespace ProcBridge.Broker;
 
@@ -20,6 +21,7 @@ public sealed class HookIpcServer : IAsyncDisposable
     private readonly string _pipeName;
     private readonly HookRequestHandler _handler;
     private readonly Func<bool, NamedPipeServerStream> _createInstance;
+    private readonly TimeSpan _progressInterval;
     private readonly CancellationTokenSource _stopping = new();
     private readonly ConcurrentDictionary<NamedPipeServerStream, Task> _clients = new();
     private int _peakClientCount;
@@ -32,12 +34,20 @@ public sealed class HookIpcServer : IAsyncDisposable
 
     /// <param name="pipeName">Name without the <c>\\.\pipe\</c> prefix, see <see cref="HookIpcProtocol.GetPipeName"/>.</param>
     /// <param name="createInstance">Creates a pipe instance (argument: is it the first one); tests inject failures here.</param>
-    public HookIpcServer(string pipeName, HookRequestHandler handler, Func<bool, NamedPipeServerStream>? createInstance = null)
+    /// <param name="progressInterval">
+    /// A request still running after this long gets a progress message (<see cref="HookIpcProtocol.StatusInProgress"/>),
+    /// and another one each interval, so the hook keeps waiting for a large download; default <see cref="DefaultProgressInterval"/>.
+    /// </param>
+    public HookIpcServer(string pipeName, HookRequestHandler handler, Func<bool, NamedPipeServerStream>? createInstance = null, TimeSpan? progressInterval = null)
     {
         _pipeName = pipeName;
         _handler = handler;
         _createInstance = createInstance ?? (first => CreateDefaultInstance(pipeName, first));
+        _progressInterval = progressInterval ?? DefaultProgressInterval;
     }
+
+    /// <summary>Well below the hook's default call timeout (60 s) and the start-up one (30 s).</summary>
+    public static readonly TimeSpan DefaultProgressInterval = TimeSpan.FromSeconds(5);
 
     public string PipeName => _pipeName;
 
@@ -168,7 +178,7 @@ public sealed class HookIpcServer : IAsyncDisposable
 
                 int size = IsWaitChanges(request.AsSpan(0, length))
                     ? await HandleWhileWatchingPipeAsync(pipe, clientId, request.AsMemory(0, length), reply).ConfigureAwait(false)
-                    : await _handler.HandleAsync(clientId, request.AsMemory(0, length), reply, _stopping.Token).ConfigureAwait(false);
+                    : await HandleWithProgressAsync(pipe, clientId, request.AsMemory(0, length), reply).ConfigureAwait(false);
                 if (size < 0)
                     return; // The client went away while its request was being handled.
                 await pipe.WriteAsync(reply.AsMemory(0, size), _stopping.Token).ConfigureAwait(false);
@@ -184,6 +194,47 @@ public sealed class HookIpcServer : IAsyncDisposable
             _handler.ClientDisconnected(clientId);
             await pipe.DisposeAsync().ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Handles a request, sending a progress message each <see cref="_progressInterval"/> while it runs: the hook waits its
+    /// call timeout from the last message, so a slow download is not cut off while a stuck one still times out. The
+    /// work under the request is bounded by the transport (request timeout, keepalive), so progress cannot go on forever.
+    /// </summary>
+    private async Task<int> HandleWithProgressAsync(NamedPipeServerStream pipe, long clientId, ReadOnlyMemory<byte> request, Memory<byte> reply)
+    {
+        Task<int> handle = _handler.HandleAsync(clientId, request, reply, _stopping.Token);
+        if (handle.IsCompleted || _progressInterval <= TimeSpan.Zero)
+            return await handle.ConfigureAwait(false);
+
+        HookIpcHeader header;
+        try
+        {
+            header = HookIpcCodec.ReadHeader(request.Span);
+        }
+        catch (HookIpcFormatException)
+        {
+            return await handle.ConfigureAwait(false); // The handler answers a malformed request with an error.
+        }
+        byte[] progress = new byte[HookIpcProtocol.HeaderSize];
+        int size = HookIpcCodec.EncodeError(progress, header.MessageType, header.RequestId, HookIpcProtocol.StatusInProgress);
+        using var waiting = CancellationTokenSource.CreateLinkedTokenSource(_stopping.Token);
+        try
+        {
+            while (await Task.WhenAny(handle, Task.Delay(_progressInterval, waiting.Token)).ConfigureAwait(false) != handle)
+            {
+                _stopping.Token.ThrowIfCancellationRequested();
+                await pipe.WriteAsync(progress.AsMemory(0, size), _stopping.Token).ConfigureAwait(false);
+            }
+            waiting.Cancel(); // Ends the pending delay.
+        }
+        catch (Exception e) when (e is IOException or OperationCanceledException or ObjectDisposedException)
+        {
+            // The client is gone (or the server stops): let the request finish before the connection is torn down.
+            await handle.ConfigureAwait(false);
+            throw;
+        }
+        return await handle.ConfigureAwait(false);
     }
 
     private static bool IsWaitChanges(ReadOnlySpan<byte> message)

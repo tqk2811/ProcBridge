@@ -93,6 +93,13 @@ public sealed record BrokerOptions
     /// <summary>How often failed write-backs are tried again while the Broker runs.</summary>
     public TimeSpan WriteRetryDelay { get; init; } = TimeSpan.FromSeconds(10);
 
+    /// <summary>
+    /// How often a hook request still running (a large download) gets a progress message, so the hook's call timeout
+    /// (<c>PROCBRIDGE_IPC_TIMEOUT_MS</c>) counts from the last sign of life instead of from the request; see
+    /// <see cref="HookIpcServer.DefaultProgressInterval"/>.
+    /// </summary>
+    public TimeSpan IpcProgressInterval { get; init; } = TimeSpan.FromSeconds(5);
+
     public string GetWriteQueueRoot() => WriteQueueRoot ?? Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ProcBridge", "queue");
 

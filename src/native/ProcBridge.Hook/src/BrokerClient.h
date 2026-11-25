@@ -113,8 +113,9 @@ namespace ProcBridge::Hook
         /// answer in time, or a network status when the pipe fails.
         NTSTATUS Send(BrokerReply& reply) noexcept { return Send(reply, nullptr, _client._timeoutMs); }
 
-        /// Like Send, waiting at most timeoutMs (INFINITE allowed); a signalled cancelEvent (optional) abandons the
-        /// exchange with STATUS_CANCELLED. Either way the instance is then unusable (see Healthy).
+        /// Like Send, waiting at most timeoutMs (INFINITE allowed) for each message of the Broker: progress messages
+        /// (HookIpc::StatusInProgress) of a long request restart the wait. A signalled cancelEvent (optional) abandons
+        /// the exchange with STATUS_CANCELLED. Either way the instance is then unusable (see Healthy).
         NTSTATUS Send(BrokerReply& reply, HANDLE cancelEvent, DWORD timeoutMs) noexcept;
 
         /// False when the pipe instance is in an unknown state after Send: a channel must then be closed.
