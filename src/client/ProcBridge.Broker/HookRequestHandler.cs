@@ -279,10 +279,14 @@ public sealed class HookRequestHandler : IDisposable
                     LastWriteTime = set.Fields.HasFlag(HookSetInfoFields.LastWriteTime) && !contentFieldsLater ? set.LastWriteTime : null,
                     EndOfFile = set.Fields.HasFlag(HookSetInfoFields.EndOfFile) && !contentFieldsLater ? set.EndOfFile : null,
                 };
-                FsEntry entry = change.Attributes is null && change.CreationTime is null && change.LastAccessTime is null
-                    && change.LastWriteTime is null && change.EndOfFile is null
-                    ? await _cache.StatAsync(remotePath, cancellationToken).ConfigureAwait(false)
-                    : await _cache.SetInfoAsync(change, cancellationToken).ConfigureAwait(false);
+                if (change.Attributes is null && change.CreationTime is null && change.LastAccessTime is null
+                    && change.LastWriteTime is null && change.EndOfFile is null)
+                    return new HookStatReply { Info = ToFileInfo(await _cache.StatAsync(remotePath, cancellationToken).ConfigureAwait(false)), Type = type };
+                FsEntry entry;
+                // Not in the middle of a write-back of the same file: machine B's commit keeps the attributes it read
+                // before replacing the file, so a change landing between that read and the replace would be undone.
+                using (await _writeBack!.LockPathsAsync([remotePath], cancellationToken).ConfigureAwait(false))
+                    entry = await _cache.SetInfoAsync(change, cancellationToken).ConfigureAwait(false);
                 return new HookStatReply { Info = ToFileInfo(entry), Type = type };
             }
 

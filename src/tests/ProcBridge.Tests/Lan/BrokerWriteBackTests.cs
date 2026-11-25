@@ -285,6 +285,31 @@ public sealed class BrokerWriteBackTests
     }
 
     [TestMethod]
+    public async Task SetInfo_WaitsForTheWriteBackOfTheSameFile()
+    {
+        // Machine B's commit reads the attributes, replaces the file (which carries the old attributes over) and puts
+        // read-only back: an attribute change landing in between was undone (WriteScenario: "attributes normal" read 0x3).
+        await using Session s = await Session.StartAsync();
+        s.Share.WriteFile("a.txt", "a"u8.ToArray());
+        await s.ResolveAsync("a.txt", GenericRead, 1);
+
+        Task<HookStatReply> set;
+        using (await s.Broker.WriteBack.LockPathsAsync(["a.txt"], CancellationToken.None))
+        {
+            // Stands for an entry of a.txt being sent right now.
+            set = s.Hook.CallOkAsync(new HookSetInfoRequest
+            {
+                MappingIndex = 0, RelativePath = "a.txt", Fields = HookSetInfoFields.Attributes, Attributes = 0x2,
+            }, HookStatReply.Read);
+            await Task.Delay(300);
+            Assert.IsFalse(set.IsCompleted, "SetInfo went to machine B in the middle of a write-back of the same file.");
+            Assert.IsFalse(File.GetAttributes(s.Share.Combine("a.txt")).HasFlag(FileAttributes.Hidden));
+        }
+        await set.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.IsTrue(File.GetAttributes(s.Share.Combine("a.txt")).HasFlag(FileAttributes.Hidden));
+    }
+
+    [TestMethod]
     public async Task SetFileTimeOnRewrittenSameSizeFile_StillUploadsNewContent()
     {
         // CopyFile over a file of the same size: CREATE_ALWAYS, write, then SetFileTime with the source's time.
