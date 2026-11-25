@@ -133,4 +133,17 @@ public sealed class RegistryExplorerProviderTests
         using var key = Registry.CurrentUser.OpenSubKey(_subKey);
         Assert.IsNotNull(key);
     }
+
+    [TestMethod]
+    public void SetValue_WithoutValue_IsInvalidArgumentAndAudited()
+    {
+        // A request decoded from the wire may carry nil for a required member: it must come back as a status, never as an exception.
+        var audit = new RecordingAuditLog();
+        var request = new RegistrySetValueRequest { Path = _root, Value = null! };
+
+        var response = Session(ExplorerPermissions.RegistryWrite, audit).Registry.SetValue(request);
+
+        Assert.AreEqual(ExplorerStatus.InvalidArgument, response.Status);
+        Assert.AreEqual(ExplorerStatus.InvalidArgument, audit.Entries.Single().Status);
+    }
 }

@@ -26,12 +26,14 @@ public sealed class RegistryExplorerProvider : ExplorerProviderBase
         return new RegistryListResponse { Path = path.Normalized, SubKeys = key.GetSubKeyNames(), Values = values };
     });
 
-    public ExplorerAckResponse SetValue(RegistrySetValueRequest request) => Write(ExplorerPermissions.RegistryWrite, "Reg.SetValue", $"{request.Path}\\{request.Value.Name}", () =>
+    public ExplorerAckResponse SetValue(RegistrySetValueRequest request) => Write(ExplorerPermissions.RegistryWrite, "Reg.SetValue", $"{request.Path}\\{request.Value?.Name}", () =>
     {
+        // Required members can still arrive as nil from the wire.
+        var value = request.Value ?? throw new ExplorerDeniedException(ExplorerStatus.InvalidArgument, "Value is missing.");
         var path = _guard.Resolve(request.Path);
         using var key = Open(path, writable: true);
-        var (data, kind) = ToData(request.Value);
-        key.SetValue(request.Value.Name, data, kind);
+        var (data, kind) = ToData(value);
+        key.SetValue(value.Name, data, kind);
     });
 
     public ExplorerAckResponse DeleteValue(RegistryDeleteValueRequest request) => Write(ExplorerPermissions.RegistryWrite, "Reg.DeleteValue", $"{request.Path}\\{request.Name}", () =>
