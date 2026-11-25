@@ -13,12 +13,14 @@
   <Folder Name="/agent/">
     <Project Path="agent/ProcBridge.Agent/ProcBridge.Agent.csproj" />
     <Project Path="agent/ProcBridge.Agent.Explorer/ProcBridge.Agent.Explorer.csproj" />
+    <Project Path="agent/ProcBridge.Agent.Wpf.Core/ProcBridge.Agent.Wpf.Core.csproj" />
   </Folder>
   <Folder Name="/tools/">
     <Project Path="tools/ProcBridge.Bench/ProcBridge.Bench.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/ProcBridge.Tests/ProcBridge.Tests.csproj" />
+    <Project Path="tests/ProcBridge.Agent.Wpf.Tests/ProcBridge.Agent.Wpf.Tests.csproj" />
   </Folder>
   <Folder Name="/Solution Items/">
     <File Path="Directory.Build.props" />
