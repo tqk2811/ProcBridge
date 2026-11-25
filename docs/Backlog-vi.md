@@ -43,3 +43,10 @@ Việc còn treo và việc nên làm của ProcBridge. Mỗi mục: vấn đề
 - Vị trí: `src/tests/ProcBridge.Tests/Explorer/ServiceAndSystemInfoTests.cs`, `FileExplorerProviderTests.cs` (`SymbolicLinkFileLeadingOutside_IsOutOfScope`).
 - Vấn đề: không đụng service thật nên nhánh Start/Stop/Restart chưa chạy trong test (cần service giả cài tạm, chạy admin); test symlink file bị Inconclusive khi máy không bật Developer Mode/không chạy admin.
 - Ghi ngày: 2026-11-25.
+
+### [Thấp] Explorer: handle nguồn của Delete/Rename mở FileShareAll nên process cục bộ có quyền ghi hai nơi có thể dời object ra ngoài sau khi kiểm
+
+- Vị trí: `src/agent/ProcBridge.Agent.Explorer/PathScopeGuard.cs` (`OpenEntryForChange`).
+- Vấn đề: handle nguồn của Delete/Rename được mở với `FileShareAll` (cần để xoá/đổi tên khi file đang bị process khác mở). Một process cục bộ có quyền ghi ở cả hai nơi (trong và ngoài gốc) có thể dời object đã qua kiểm phạm vi ra ngoài gốc trước khi thao tác chạy; thao tác vẫn tác động đúng object đã kiểm nhưng object đó nay nằm ngoài gốc. Không mở rộng quyền của máy A (máy A không điều khiển được process cục bộ này); chỉ cần lưu ý nếu Agent chạy quyền cao hơn user cục bộ. Hướng nếu cần: kiểm lại `GetFinalPath` ngay trước bước đánh dấu xoá/đổi tên.
+- Ghi ngày: 2026-11-25.
+
