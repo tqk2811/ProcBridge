@@ -435,6 +435,10 @@ sequenceDiagram
 - **Theo dõi thay đổi** (M7): Agent dùng `ReadDirectoryChangesW` trên máy B và đẩy sự kiện về Broker để
   làm mất hiệu lực cache, đồng thời phục vụ `NtNotifyChangeDirectoryFile` của process đích (IDE, công
   cụ build theo dõi file).
+  Hook ↔ Broker: mỗi process chỉ giữ MỘT long poll `WaitAnyChanges` trên một pipe instance riêng, gom thay đổi của
+  mọi handle đang theo dõi (Broker trả theo từng watchId, thêm watch mới thì poll đang chờ trả rỗng để Hook poll lại).
+  Hook đệm thay đổi theo từng handle như bộ đệm notify của kernel, nên process mở hàng trăm handle theo dõi vẫn chỉ
+  tốn một thread và một pipe instance (2026-11-26).
 - Mất kết nối giữa phiên: dữ liệu dirty được giữ trong cache và hàng đợi, kết nối lại thì gửi tiếp.
   Đọc file chưa có trong cache thì trả lỗi mạng.
 

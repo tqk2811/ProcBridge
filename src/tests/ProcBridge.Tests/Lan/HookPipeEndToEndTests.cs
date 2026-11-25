@@ -202,6 +202,68 @@ public sealed class HookPipeEndToEndTests
     }
 
     [TestMethod]
+    public async Task WaitAnyChanges_CollectsEveryWatchOfTheProcess_AndWakesOnNewWatch()
+    {
+        using var share = new TempFolder("pipe");
+        share.WriteFile(@"proj\a\x.cs", "x"u8.ToArray());
+        share.WriteFile(@"proj\b\y.cs", "y"u8.ToArray());
+        using var cacheDir = new TempFolder("cache");
+        await using var agent = new AgentServer([new AgentShare("src", share.Path)], new AgentOptions { AllowPlaintextTransport = true, BindAddress = IPAddress.Loopback, Port = 0 });
+        agent.Start();
+        string session = HookIpcProtocol.NewSessionId();
+        await using BrokerHost broker = await StartBrokerAsync(share, cacheDir, agent, session);
+        await broker.Watcher!.WaitActiveAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.Delay(200); // the rescan of the subscription would overflow watches registered before it
+        await using FakeHook poller = await FakeHook.ConnectAsync(HookIpcProtocol.GetPipeName(session));
+        await using FakeHook control = await FakeHook.ConnectAsync(HookIpcProtocol.GetPipeName(session));
+
+        HookWatchReply a = await control.CallOkAsync(new HookWatchRequest { MappingIndex = 0, WatchSubtree = false, RelativePath = "a" }, HookWatchReply.Read);
+        HookWaitAnyChangesReply idle = await poller.CallOkAsync(new HookWaitAnyChangesRequest { TimeoutMilliseconds = 50 }, HookWaitAnyChangesReply.Read);
+        Assert.IsEmpty(idle.Watches);
+
+        // A poll in progress returns (empty) when the process adds a watch, so the next poll covers it.
+        Task<HookWaitAnyChangesReply> blocked = poller.CallOkAsync(new HookWaitAnyChangesRequest { TimeoutMilliseconds = HookIpcProtocol.InfiniteTimeout }, HookWaitAnyChangesReply.Read);
+        await Task.Delay(100);
+        Assert.IsFalse(blocked.IsCompleted);
+        HookWatchReply b = await control.CallOkAsync(new HookWatchRequest { MappingIndex = 0, WatchSubtree = false, RelativePath = "b" }, HookWatchReply.Read);
+        Assert.IsEmpty((await blocked.WaitAsync(TimeSpan.FromSeconds(2))).Watches);
+
+        File.WriteAllText(share.Combine(@"proj\a\x.cs"), "changed");
+        File.WriteAllText(share.Combine(@"proj\b\y.cs"), "changed");
+        var seen = new Dictionary<uint, List<HookChange>> { [a.WatchId] = [], [b.WatchId] = [] };
+        DateTime deadline = DateTime.UtcNow.AddSeconds(5);
+        while ((seen[a.WatchId].Count == 0 || seen[b.WatchId].Count == 0) && DateTime.UtcNow < deadline)
+        {
+            HookWaitAnyChangesReply reply = await poller.CallOkAsync(new HookWaitAnyChangesRequest { TimeoutMilliseconds = 500 }, HookWaitAnyChangesReply.Read);
+            foreach (HookWatchChanges group in reply.Watches)
+            {
+                Assert.IsFalse(group.Overflow);
+                seen[group.WatchId].AddRange(group.Changes);
+            }
+        }
+        Assert.Contains(new HookChange(3 /* FILE_ACTION_MODIFIED */, "x.cs"), seen[a.WatchId]);
+        Assert.Contains(new HookChange(3, "y.cs"), seen[b.WatchId]);
+
+        // Another process sees none of these watches.
+        File.WriteAllText(share.Combine(@"proj\a\x.cs"), "again");
+        await Task.Delay(300);
+        Assert.IsEmpty((await CallAnyAsStrangerAsync(broker)).Watches);
+    }
+
+    private static async Task<HookWaitAnyChangesReply> CallAnyAsStrangerAsync(BrokerHost broker)
+    {
+        const long Stranger = 4242;
+        byte[] request = new byte[64];
+        int size = HookIpcCodec.Encode(request, 1, new HookWaitAnyChangesRequest { TimeoutMilliseconds = 0 });
+        byte[] reply = new byte[HookIpcProtocol.MaxMessageSize];
+        broker.Pipe.Handler.ClientConnected(Stranger);
+        int length = await broker.Pipe.Handler.HandleAsync(Stranger, request.AsMemory(0, size), reply, CancellationToken.None);
+        broker.Pipe.Handler.ClientDisconnected(Stranger);
+        var reader = new HookIpcReader(reply.AsSpan(0, length));
+        return HookWaitAnyChangesReply.Read(ref reader);
+    }
+
+    [TestMethod]
     public async Task WaitChanges_Blocked_ReturnsWhenUnwatchedFromAnotherInstance()
     {
         using var share = new TempFolder("pipe");

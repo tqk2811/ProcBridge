@@ -66,6 +66,35 @@ public sealed class RemoteNotifyTests
     }
 
     [TestMethod]
+    [DataRow("x64")]
+    [DataRow("Win32")]
+    public async Task ManyWatchedHandles_ShareOnePipeInstance_AndMatchRealFolder(string platform)
+    {
+        const int count = 64;
+        using HookSandbox sandbox = new(platform);
+        string reference = Path.Combine(sandbox.BaseDirectory, "reference");
+        for (int i = 0; i < count; i++)
+        {
+            Directory.CreateDirectory(Path.Combine(reference, "m" + i));
+            Directory.CreateDirectory(Path.Combine(sandbox.RealRoot, "m" + i));
+        }
+        await using RemoteSession session = RemoteSession.Start(sandbox);
+        await WaitForChangeWatcherAsync(session);
+
+        ProcessResult real = sandbox.Run(sandbox.Binaries.Probe, $"--notify-many \"{reference}\" \"{reference}\" {count}");
+        ProcessResult remote = session.Run($"\"{sandbox.Binaries.Probe}\" --notify-many \"{sandbox.VirtualRoot}\" \"{sandbox.RealRoot}\" {count}");
+
+        Assert.AreEqual(0, real.ExitCode, Lines(real));
+        Assert.AreEqual(0, remote.ExitCode, Lines(remote));
+        for (int round = 1; round <= 3; round++)
+            Assert.Contains($"notify.many.round{round}: issued={count} seen={count}", real.StandardOutput);
+        HookComparisonTests.AssertSameLines(real.StandardOutput, remote.StandardOutput);
+        // One long poll serves every handle: far fewer pipe instances than watched handles.
+        Assert.IsLessThan(16, session.Broker.Pipe.PeakClientCount, $"peak pipe connections {session.Broker.Pipe.PeakClientCount}");
+        await WaitForNoWatchesAsync(session);
+    }
+
+    [TestMethod]
     public async Task FileSystemWatcher_SeesChangesOnMachineB()
     {
         using HookSandbox sandbox = new("x64");

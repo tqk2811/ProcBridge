@@ -28,6 +28,11 @@
 //                            watched directory like FILE_NOTIFY_INFORMATION.FileName. Count 0 without
 //                            ChangesFlagOverflow = timeout. ChangesFlagOverflow = changes lost: complete the
 //                            notify with STATUS_NOTIFY_ENUM_DIR.
+//   WaitAnyChanges request : WaitAnyChangesRequest (one long poll for every watch of the process; use a pipe
+//                            instance of its own)
+//                  reply   : WaitAnyChangesReply, then GroupCount x (WatchChangesHeader, Count x (ChangeEntry,
+//                            String Name)). No group = timeout or a new watch of the process: poll again.
+//                            WatchChangesHeader.Flags & ChangesFlagOverflow = changes of that watch were lost.
 //   Unwatch        request : UnwatchRequest; reply has no body
 //   Close   request : TokenRequest (handle with a write token closed: write the cache copy back if it changed)
 //           reply   : no body
@@ -49,7 +54,7 @@
 
 namespace ProcBridge::HookIpc
 {
-    constexpr uint16_t ProtocolVersion = 3;
+    constexpr uint16_t ProtocolVersion = 4;
     constexpr uint32_t HeaderSize = 16;
     constexpr uint32_t MaxMessageSize = 65536;
     constexpr uint32_t FileInfoSize = 64;
@@ -85,6 +90,7 @@ namespace ProcBridge::HookIpc
         FetchRange = 14,
         Lock = 15,
         Unlock = 16,
+        WaitAnyChanges = 17,
     };
 
     enum class Architecture : uint16_t
@@ -185,6 +191,24 @@ namespace ProcBridge::HookIpc
         uint16_t Flags; // ChangesFlagOverflow
     };
 
+    struct WaitAnyChangesRequest
+    {
+        uint32_t TimeoutMilliseconds; // InfiniteTimeout = until a change or a new watch
+    };
+
+    struct WaitAnyChangesReply
+    {
+        uint16_t GroupCount;
+        uint16_t Reserved;
+    };
+
+    struct WatchChangesHeader
+    {
+        uint32_t WatchId;
+        uint16_t Count;
+        uint16_t Flags; // ChangesFlagOverflow
+    };
+
     struct ChangeEntry
     {
         uint32_t Action; // FILE_ACTION_*
@@ -263,6 +287,9 @@ namespace ProcBridge::HookIpc
     static_assert(sizeof(WatchReply) == 8);
     static_assert(sizeof(WaitChangesRequest) == 8);
     static_assert(sizeof(WaitChangesReply) == 4);
+    static_assert(sizeof(WaitAnyChangesRequest) == 4);
+    static_assert(sizeof(WaitAnyChangesReply) == 4);
+    static_assert(sizeof(WatchChangesHeader) == 8);
     static_assert(sizeof(ChangeEntry) == 4);
     static_assert(sizeof(UnwatchRequest) == 4);
     static_assert(sizeof(TokenRequest) == 8);

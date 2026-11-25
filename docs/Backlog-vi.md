@@ -295,14 +295,6 @@ Hook đã phục vụ thông báo thay đổi trên thư mục ảo (`DirectoryW
   huỷ yêu cầu.
 - Thread gọi thoát không huỷ các yêu cầu nó đã gửi (kernel huỷ IRP của thread khi thread thoát).
 
-## [Vừa] Mỗi watch có yêu cầu chờ chiếm một thread pool và một pipe instance
-
-`DirectoryWatches` chạy một worker (`QueueUserWorkItem`, `WT_EXECUTELONGFUNCTION`) và giữ một pipe instance riêng
-cho mỗi handle thư mục ảo đang có yêu cầu chờ. Process mở hàng trăm handle theo dõi (IDE, công cụ build) sẽ chiếm
-nhiều thread pool và nhiều instance của pipe Broker. Phương án: dồn mọi watchId của process vào MỘT long poll
-(`WaitChanges` nhận danh sách watchId, trả `(watchId, thay đổi)`), một worker chung phân phát theo handle.
-Ghi 2026-11-25.
-
 ## [Vừa] Theo dõi thay đổi: phần còn thiếu sau M7 (C#)
 
 - `CompletionFilter` chưa được áp đúng: Agent dùng `FileSystemWatcher` nên không biết thuộc tính nào đổi, Broker

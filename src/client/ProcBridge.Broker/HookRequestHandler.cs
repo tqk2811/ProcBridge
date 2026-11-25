@@ -74,7 +74,7 @@ public sealed class HookRequestHandler : IDisposable
         _holds?.ClientDisconnected(clientId);
     }
 
-    /// <summary>Directory watches of the hook (WatchDirectory, WaitChanges, Unwatch).</summary>
+    /// <summary>Directory watches of the hook (WatchDirectory, WaitChanges, WaitAnyChanges, Unwatch).</summary>
     public HookWatchRegistry Watches { get; }
 
     public void Dispose() => Watches.Dispose();
@@ -223,6 +223,15 @@ public sealed class HookRequestHandler : IDisposable
                     ? Timeout.InfiniteTimeSpan
                     : TimeSpan.FromMilliseconds(wait.TimeoutMilliseconds);
                 return await Watches.WaitAsync(clientId, wait.WatchId, timeout, cancellationToken).ConfigureAwait(false);
+            }
+
+            case HookIpcMessageType.WaitAnyChanges:
+            {
+                HookWaitAnyChangesRequest wait = Read(request, HookWaitAnyChangesRequest.Read);
+                TimeSpan timeout = wait.TimeoutMilliseconds == HookIpcProtocol.InfiniteTimeout
+                    ? Timeout.InfiniteTimeSpan
+                    : TimeSpan.FromMilliseconds(wait.TimeoutMilliseconds);
+                return await Watches.WaitAnyAsync(clientId, timeout, cancellationToken).ConfigureAwait(false);
             }
 
             case HookIpcMessageType.Unwatch:

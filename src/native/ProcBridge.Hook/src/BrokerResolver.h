@@ -64,11 +64,11 @@ namespace ProcBridge::Hook
         NTSTATUS Rename(int mapping, const UNICODE_STRING& ntPath, int newMapping, const UNICODE_STRING& newNtPath,
             bool replaceIfExists, HookIpc::FileInfo& info, UNICODE_STRING& newRealPath) const noexcept override;
         NTSTATUS Delete(int mapping, const UNICODE_STRING& ntPath, bool keepItem, uint64_t expectedFileId) const noexcept override;
-        NTSTATUS Watch(int mapping, const UNICODE_STRING& ntPath, bool subtree, ULONG completionFilter, WatchChannel*& channel,
+        NTSTATUS OpenWatchChannel(WatchChannel*& channel) const noexcept override;
+        NTSTATUS Watch(int mapping, const UNICODE_STRING& ntPath, bool subtree, ULONG completionFilter,
             uint32_t& watchId) const noexcept override;
-        NTSTATUS WaitChanges(WatchChannel*& channel, uint32_t watchId, HANDLE cancelEvent, BYTE* buffer,
-            ChangeBatch& batch) const noexcept override;
-        void Unwatch(WatchChannel* channel, uint32_t watchId) const noexcept override;
+        NTSTATUS WaitAnyChanges(WatchChannel*& channel, BYTE* buffer, ULONG& bytes) const noexcept override;
+        void Unwatch(uint32_t watchId) const noexcept override;
         NTSTATUS FetchRange(uint32_t rangeId, int64_t offset, int64_t length, bool whole, bool& complete) const noexcept override;
         NTSTATUS LockRange(bool lock, uint64_t writeToken, int64_t offset, int64_t length, ULONG key, uint16_t flags) const noexcept override;
 

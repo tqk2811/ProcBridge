@@ -6,6 +6,7 @@
 //        ProcBridge.NativeProbe.<arch>.exe --<command> <arguments>   (single checks, see RunCommand)
 //        ProcBridge.NativeProbe.<arch>.exe --write <new folder>     (M3 write scenario, see WriteScenario)
 //        ProcBridge.NativeProbe.<arch>.exe --notify <watched> <real> (M7 change notifications, see NotifyScenario)
+//        ProcBridge.NativeProbe.<arch>.exe --notify-many <watched> <real> <count> (many watched handles, see NotifyMany)
 //        ProcBridge.NativeProbe.<arch>.exe --read-at|--map-hash|--load|--symbols|--lock|--lock-async ... (M8, see ReadAt and below)
 // Expected tree under <root> (created by the test): a.txt, sub\b.txt, sub\deep\c.bin, empty\,
 // ro.txt (read-only), unicode file name. Last access times are never printed (they drift), nor the times
@@ -2286,6 +2287,114 @@ namespace
         return 0;
     }
 
+    /// --notify-many <watched> <real> <count>: watches the folders m0..m<count-1> (made by the caller) at once, each
+    /// handle with an overlapped request of its own, and creates a file in each through <real>. Round 1 issues every
+    /// request before the files appear; round 2 issues them again; round 3 creates the files before issuing (the
+    /// handle keeps the changes since its first request, like the kernel's notify buffer). Prints how many handles saw
+    /// the right file in each round.
+    int NotifyMany(const wchar_t* watchedArgument, const wchar_t* realArgument, const wchar_t* countArgument)
+    {
+        const std::wstring watched = watchedArgument;
+        const std::wstring real = realArgument;
+        const int count = _wtoi(countArgument);
+        if (count <= 0 || count > 1024)
+        {
+            return 2;
+        }
+        struct Watch
+        {
+            HANDLE Directory = INVALID_HANDLE_VALUE;
+            HANDLE Event = nullptr;
+            OVERLAPPED Overlapped{};
+            DWORD Buffer[256]{}; // FILE_NOTIFY_INFORMATION is DWORD aligned
+        };
+        std::vector<Watch> watches(static_cast<size_t>(count));
+        int opened = 0;
+        for (int i = 0; i < count; ++i)
+        {
+            Watch& watch = watches[static_cast<size_t>(i)];
+            watch.Directory = OpenWatched(watched + L"\\m" + std::to_wstring(i), true);
+            watch.Event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            opened += watch.Directory != INVALID_HANDLE_VALUE && watch.Event != nullptr ? 1 : 0;
+        }
+        WriteLine(L"notify.many: opened=" + Num(opened) + L"/" + Num(count));
+        const auto issue = [&](Watch& watch) noexcept
+        {
+            ResetEvent(watch.Event);
+            watch.Overlapped = OVERLAPPED{};
+            watch.Overlapped.hEvent = watch.Event;
+            return ReadDirectoryChangesW(watch.Directory, watch.Buffer, sizeof(watch.Buffer), FALSE, NameFilter, nullptr,
+                &watch.Overlapped, nullptr) != FALSE;
+        };
+        const auto create = [&](const std::wstring& name) noexcept
+        {
+            for (int i = 0; i < count; ++i)
+            {
+                const HANDLE file = CreateFileW((real + L"\\m" + std::to_wstring(i) + L"\\" + name).c_str(), GENERIC_WRITE, 0, nullptr,
+                    CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (file != INVALID_HANDLE_VALUE)
+                {
+                    CloseHandle(file);
+                }
+            }
+        };
+        const auto collect = [&](const std::wstring& name) noexcept
+        {
+            int seen = 0;
+            const DWORD deadline = GetTickCount() + NotifyTimeoutMs;
+            for (Watch& watch : watches)
+            {
+                const DWORD now = GetTickCount();
+                const DWORD left = static_cast<LONG>(deadline - now) > 0 ? deadline - now : 0;
+                DWORD bytes = 0;
+                if (WaitForSingleObject(watch.Event, left) != WAIT_OBJECT_0)
+                {
+                    CancelIoEx(watch.Directory, &watch.Overlapped);
+                    GetOverlappedResult(watch.Directory, &watch.Overlapped, &bytes, TRUE);
+                    continue;
+                }
+                if (GetOverlappedResult(watch.Directory, &watch.Overlapped, &bytes, FALSE)
+                    && FirstNotifyEntry(reinterpret_cast<const BYTE*>(watch.Buffer), bytes, false) == L"action=1 name=" + name)
+                {
+                    ++seen;
+                }
+            }
+            return seen;
+        };
+        const std::wstring rounds[] = { L"r1.txt", L"r2.txt", L"r3.txt" };
+        for (int round = 0; round < 3; ++round)
+        {
+            if (round == 2)
+            {
+                create(rounds[round]);
+                Sleep(NotifyChangeDelayMs); // the changes reach the handles before their requests
+            }
+            int issued = 0;
+            for (Watch& watch : watches)
+            {
+                issued += issue(watch) ? 1 : 0;
+            }
+            if (round < 2)
+            {
+                create(rounds[round]);
+            }
+            const int seen = collect(rounds[round]);
+            WriteLine(L"notify.many.round" + Num(round + 1) + L": issued=" + Num(issued) + L" seen=" + Num(seen));
+        }
+        for (Watch& watch : watches)
+        {
+            if (watch.Directory != INVALID_HANDLE_VALUE)
+            {
+                CloseHandle(watch.Directory);
+            }
+            if (watch.Event != nullptr)
+            {
+                CloseHandle(watch.Event);
+            }
+        }
+        return 0;
+    }
+
     int WriteScenarioCommand(const wchar_t* rootArgument)
     {
         wchar_t full[MAX_PATH];
@@ -2609,6 +2718,10 @@ namespace
         if (command == L"--notify" && argc == 4)
         {
             return NotifyScenario(argv[2], argv[3]);
+        }
+        if (command == L"--notify-many" && argc == 5)
+        {
+            return NotifyMany(argv[2], argv[3], argv[4]);
         }
         if (command == L"--threads" && argc == 4)
         {

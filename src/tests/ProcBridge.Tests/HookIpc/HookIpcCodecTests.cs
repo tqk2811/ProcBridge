@@ -130,6 +130,19 @@ public sealed class HookIpcCodecTests
         Assert.IsTrue(changes.Overflow);
         CollectionAssert.AreEqual(new[] { new HookChange(1, "a.cs"), new HookChange(5, @"sub\b.cs") }, changes.Changes.ToArray());
 
+        Assert.AreEqual(250u, RoundTrip(new HookWaitAnyChangesRequest { TimeoutMilliseconds = 250 }, HookWaitAnyChangesRequest.Read).TimeoutMilliseconds);
+        HookWaitAnyChangesReply any = RoundTrip(new HookWaitAnyChangesReply
+        {
+            Watches = [new HookWatchChanges(7, [new(1, "a.cs"), new(3, @"sub\b.cs")], false), new HookWatchChanges(9, [], true)],
+        }, HookWaitAnyChangesReply.Read);
+        Assert.HasCount(2, any.Watches);
+        Assert.AreEqual(7u, any.Watches[0].WatchId);
+        Assert.IsFalse(any.Watches[0].Overflow);
+        CollectionAssert.AreEqual(new[] { new HookChange(1, "a.cs"), new HookChange(3, @"sub\b.cs") }, any.Watches[0].Changes.ToArray());
+        Assert.AreEqual(9u, any.Watches[1].WatchId);
+        Assert.IsTrue(any.Watches[1].Overflow);
+        Assert.IsEmpty(any.Watches[1].Changes);
+
         Assert.AreEqual(99u, RoundTrip(new HookUnwatchRequest { WatchId = 99 }, HookUnwatchRequest.Read).WatchId);
         byte[] buffer = new byte[64];
         Assert.AreEqual(HookIpcProtocol.HeaderSize, HookIpcCodec.Encode(buffer, 1, new HookUnwatchReply()));
@@ -154,7 +167,7 @@ public sealed class HookIpcCodecTests
         // header(16) + u16 + u16 + u16 len + 2 chars
         Assert.AreEqual(16 + 2 + 2 + 2 + 4, size);
         CollectionAssert.AreEqual(
-            new byte[] { 26, 0, 0, 0, 3, 0, 2, 0, 4, 3, 2, 1, 0, 0, 0, 0, 0x0B, 0x0A, 0, 0, 2, 0, (byte)'a', 0, (byte)'b', 0 },
+            new byte[] { 26, 0, 0, 0, 4, 0, 2, 0, 4, 3, 2, 1, 0, 0, 0, 0, 0x0B, 0x0A, 0, 0, 2, 0, (byte)'a', 0, (byte)'b', 0 },
             buffer[..size]);
 
         size = HookIpcCodec.Encode(buffer, 0, new HookStatReply { Info = SampleInfo });

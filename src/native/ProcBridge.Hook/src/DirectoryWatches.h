@@ -26,11 +26,12 @@ namespace ProcBridge::Hook
     };
 
     /// Directory change notifications of virtual directory handles, served by the Broker.
-    /// The first notify call on a handle registers a watch (WatchDirectory) on a pipe instance of its own (a channel),
-    /// which then carries the WaitChanges long polls; while the watch lives the channel keeps this process known to the
-    /// Broker. Each request waits in the handle's queue and a worker (thread pool, one per handle at a time) completes
-    /// the requests in order, like the kernel: IO_STATUS_BLOCK, event, then completion port (FileCompletionInformation
-    /// recorded by SetCompletionPort) or APC to the issuing thread. A synchronous handle makes the caller wait.
+    /// The first notify call on a handle registers a watch (WatchDirectory). One poller thread per process collects
+    /// the changes of every watch with a single WaitAnyChanges long poll on a pipe instance of its own (opened before
+    /// the first watch, it keeps this process known to the Broker), whatever the number of watched handles. Changes
+    /// are buffered per handle like the kernel's notify buffer and complete the handle's waiting requests in order:
+    /// IO_STATUS_BLOCK, event, then completion port (FileCompletionInformation recorded by SetCompletionPort) or APC
+    /// to the issuing thread. A synchronous handle makes the caller wait.
     /// Closing the handle removes the watch (Unwatch) and completes what waits with STATUS_NOTIFY_CLEANUP;
     /// NtCancelIoFile[Ex] completes the matching requests with STATUS_CANCELLED.
     class DirectoryWatches final
@@ -68,24 +69,44 @@ namespace ProcBridge::Hook
         using NtSetIoCompletionFn = NTSTATUS(NTAPI*)(HANDLE, PVOID, PVOID, NTSTATUS, ULONG_PTR);
         using NtQueueApcThreadFn = NTSTATUS(NTAPI*)(HANDLE, PVOID, PVOID, PVOID, PVOID);
 
+        /// Changes kept per handle between two requests; beyond that the next request gets STATUS_NOTIFY_ENUM_DIR.
+        static constexpr ULONG MaxPendingBytes = HookIpc::MaxMessageSize;
+
+        /// Opens the poll channel and starts the poller thread once per process.
+        NTSTATUS EnsurePoller() noexcept;
+        static DWORD WINAPI PollerThunk(PVOID context) noexcept;
+        /// Never returns: the poller lives as long as the process.
+        [[noreturn]] void Poll() noexcept;
+        /// Hands the groups of one WaitAnyChanges reply to their handles.
+        void Dispatch(const BYTE* body, ULONG bytes) noexcept;
+        /// Completes every waiting request with status (the poll failed).
+        void FailAll(NTSTATUS status) noexcept;
+
         /// Entry of handle with a reference, created when missing (nullptr when out of memory). An entry of an older
         /// generation (the handle value was closed and reused) is detached first.
         Entry* Acquire(HANDLE handle, ULONG64 generation) noexcept;
-        /// Removes the entry of handle from the table (under the lock) and marks it closed; nullptr when none.
-        Entry* DetachLocked(HANDLE handle) noexcept;
-        /// Ends a detached entry: wakes its worker, then sends Unwatch and drops the table's reference on the thread pool.
-        void Retire(Entry* entry) noexcept;
+        /// Entry registered as watch watchId with a reference, nullptr when none.
+        Entry* FindWatch(uint32_t watchId) noexcept;
+        /// Removes the entry of handle from the table and marks it closed; its requests move to *requests (under _lock).
+        Entry* DetachLocked(HANDLE handle, Request** requests) noexcept;
+        /// Ends a detached entry: completes the detached requests, then sends Unwatch and drops the table's
+        /// reference on the thread pool.
+        void Retire(Entry* entry, Request* requests) noexcept;
         static DWORD WINAPI RetireThunk(PVOID context) noexcept;
         void RetireNow(Entry* entry) noexcept;
         void Release(Entry* entry) noexcept;
 
-        static DWORD WINAPI WorkerThunk(PVOID context) noexcept;
-        void Work(Entry* entry) noexcept;
+        /// Adds the changes of one group to the handle's buffer.
+        void Append(Entry* entry, const BYTE* changes, ULONG bytes, USHORT count, bool overflow) noexcept;
+        /// Answers waiting requests of entry from its buffer, in order, while both are there.
+        void Deliver(Entry* entry) noexcept;
         /// Builds the notify answer of a batch into the request's buffer. False when no change of the batch passes
         /// completionFilter (the request keeps waiting).
         bool Answer(Request* request, ULONG completionFilter, const ChangeBatch& batch, NTSTATUS& status, ULONG_PTR& information) noexcept;
-        /// Unlinks request (when still queued) and completes it like the kernel.
-        void Finish(Entry* entry, Request* request, NTSTATUS status, ULONG_PTR information) noexcept;
+        /// Completes an unlinked request like the kernel and drops its reference on the entry.
+        void Finish(Request* request, NTSTATUS status, ULONG_PTR information) noexcept;
+        /// Completes a list of unlinked requests (linked by Next) with status.
+        void FinishAll(Request* requests, NTSTATUS status) noexcept;
         static void FreeRequest(Request* request) noexcept;
 
         const IPathResolver* _resolver = nullptr;
@@ -95,5 +116,9 @@ namespace ProcBridge::Hook
         Entry** _entries = nullptr;     // under _lock
         size_t _capacity = 0;
         std::atomic<size_t> _count{ 0 }; // written under _lock
+        SRWLOCK _pollerLock = SRWLOCK_INIT;
+        bool _pollerStarted = false;    // under _pollerLock
+        WatchChannel* _channel = nullptr; // the poller's once started
+        BYTE* _pollBuffer = nullptr;
     };
 }
