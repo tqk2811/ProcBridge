@@ -452,6 +452,10 @@ Ghép cặp qua relay (nhánh `feature/relay-pairing`, quyết định 2026-11-2
   `--pair --relay <url> [--code <mã>]`; app WPF của Launcher có ô "Máy B chỉ thấy qua relay" (URL relay + mã 8 số) và
   Remote Explorer đi qua relay cho máy ghép cặp kiểu này. Test: `PairingSlotTests` (relay e2e), `RelayPairingTests`
   (ghép cặp qua relay đầu cuối rồi mở phiên theo HostId).
+- Hồ sơ chạy của app WPF Launcher chọn máy ghép cặp qua relay (địa chỉ `relay <url>`) thì tự bật "Kết nối qua relay"
+  với URL đó (giữ nguyên nếu hồ sơ đã có relay riêng); `LaunchOptionsFactory` dùng relay của máy khi hồ sơ không ghi
+  relay. App WPF của Agent nghe `IAgentHost.RelayStatusChanged` (từ `RelayHostLink.PairingCodeChanged` và
+  `ConnectionChanged`) nên mã mời mới hiện ngay, không chờ lượt làm mới 1 giây của cửa sổ.
 
 ```mermaid
 sequenceDiagram

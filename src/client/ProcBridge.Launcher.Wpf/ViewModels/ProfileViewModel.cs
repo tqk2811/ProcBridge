@@ -4,6 +4,7 @@ using ProcBridge.Launcher.Wpf.Helpers;
 using ProcBridge.Launcher.Wpf.Interfaces;
 using ProcBridge.Launcher.Wpf.Models;
 using ProcBridge.Launcher.Wpf.Mvvm;
+using ProcBridge.Transport.Relay;
 using ProcBridge.Transport.Secure.Models;
 
 namespace ProcBridge.Launcher.Wpf.ViewModels;
@@ -62,6 +63,7 @@ public sealed class ProfileViewModel : ObservableObject
         PickShareRootCommand = new RelayCommand(PickShareRoot);
         PickWorkingDirectoryCommand = new RelayCommand(() => WorkingDirectory = _dialogs.PickLocalFolder(WorkingDirectory) ?? WorkingDirectory);
         LoadSharesCommand = new AsyncRelayCommand(LoadSharesAsync, () => _explorers is not null);
+        ApplyRelayOfMachine();
     }
 
     /// <summary>Shares machine B serves (name and folder), filled by <see cref="LoadSharesCommand"/>.</summary>
@@ -115,7 +117,11 @@ public sealed class ProfileViewModel : ObservableObject
     public string MachineFingerprint
     {
         get => _machineFingerprint;
-        set => SetProperty(ref _machineFingerprint, value ?? string.Empty);
+        set
+        {
+            if (SetProperty(ref _machineFingerprint, value ?? string.Empty))
+                ApplyRelayOfMachine();
+        }
     }
 
     public string ShareName
@@ -218,6 +224,20 @@ public sealed class ProfileViewModel : ObservableObject
         UseRelay = UseRelay,
         RelayUrl = RelayUrl.Trim(),
     };
+
+    /// <summary>
+    /// A machine paired through the relay (address <c>relay &lt;url&gt;</c>) has no LAN address: turn "Kết nối qua relay" on
+    /// with that URL, unless the profile already goes through a relay of its own.
+    /// </summary>
+    private void ApplyRelayOfMachine()
+    {
+        if (RelayPairingConnector.TryParseRelayAddress(Machine?.Address) is not { } relayUrl)
+            return;
+        if (UseRelay && !string.IsNullOrWhiteSpace(RelayUrl))
+            return;
+        UseRelay = true;
+        RelayUrl = relayUrl.ToString();
+    }
 
     private FolderMappingViewModel Add(FolderMappingViewModel mapping)
     {

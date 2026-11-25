@@ -440,11 +440,8 @@ Ghi 2026-11-25 (M6).
 
 Ghép cặp qua relay bằng mã mời đã chạy (Plan 9, "Ghép cặp qua relay"). Còn lại:
 
-- Hồ sơ chạy của app WPF Launcher không tự điền URL relay và bật "Kết nối qua relay" cho máy ghép cặp qua relay
-  (địa chỉ lưu dạng `relay <url>`); hiện chỉ báo lỗi để người dùng tự bật.
 - Chưa chạy thử giao diện thật (UIA) của ô mã mời ở hai app WPF, chỉ test tầng ViewModel; chưa thử với relay thật trên
   internet.
-- Mã mời đổi sau mỗi lần dùng và mỗi 5 phút; app WPF của Agent chỉ thấy mã mới ở lượt làm mới định kỳ của cửa sổ.
 
 Ghi 2026-11-26.
 

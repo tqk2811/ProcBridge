@@ -56,15 +56,48 @@ public sealed class RelayProfileTests
     }
 
     [TestMethod]
-    public void OptionsFactory_MachinePairedThroughTheRelay_NeedsTheRelayOn()
+    public void OptionsFactory_MachinePairedThroughTheRelay_UsesItsRelayWhenTheProfileHasNone()
     {
-        PairedMachine relayPaired = FakeRegistry.Machine("B", "FING-ERPR-INTB", "relay https://relay.example/");
+        PairedMachine relayPaired = FakeRegistry.Machine("B", "FING-ERPR-INTB", "relay https://paired.example/");
+        var factory = new LaunchOptionsFactory(@"C:\pb");
 
-        var e = Assert.ThrowsExactly<ProfileValidationException>(
-            () => new LaunchOptionsFactory(@"C:\pb").Create(Sample() with { UseRelay = false }, relayPaired));
+        LauncherOptions relayOff = factory.Create(Sample() with { UseRelay = false }, relayPaired);
+        LauncherOptions blankUrl = factory.Create(Sample() with { RelayUrl = " " }, relayPaired);
+        LauncherOptions ownRelay = factory.Create(Sample(), relayPaired);
 
-        StringAssert.Contains(e.Errors.Single(), "relay");
-        Assert.IsNotNull(new LaunchOptionsFactory(@"C:\pb").Create(Sample(), relayPaired).Relay);
+        Assert.AreEqual(new Uri("https://paired.example/"), relayOff.Relay!.Url);
+        Assert.AreEqual(new Uri("https://paired.example/"), blankUrl.Relay!.Url);
+        Assert.AreEqual(new Uri("https://relay.example/"), ownRelay.Relay!.Url);
+    }
+
+    [TestMethod]
+    public void ProfileViewModel_PickingAMachinePairedThroughTheRelay_TurnsTheRelayOnWithItsUrl()
+    {
+        PairedMachine relayPaired = FakeRegistry.Machine("R", "RELA-YPAI-RED0", "relay https://paired.example/");
+        PairedMachine[] machines = [MachineB, relayPaired];
+        var viewModel = new ProfileViewModel(Sample() with { UseRelay = false, RelayUrl = string.Empty }, new FakeDialogs(),
+            fingerprint => machines.FirstOrDefault(x => x.Fingerprint == fingerprint));
+        Assert.IsFalse(viewModel.UseRelay, "A LAN machine keeps the relay off.");
+
+        viewModel.MachineFingerprint = relayPaired.Fingerprint;
+
+        Assert.IsTrue(viewModel.UseRelay);
+        Assert.AreEqual("https://paired.example/", viewModel.RelayUrl);
+        Assert.IsNotNull(new LaunchOptionsFactory(@"C:\pb").Create(viewModel.ToModel(), relayPaired).Relay);
+    }
+
+    [TestMethod]
+    public void ProfileViewModel_SavedProfileOfARelayMachine_IsFixedOnLoad_ButAnOwnRelayIsKept()
+    {
+        PairedMachine relayPaired = FakeRegistry.Machine("R", "RELA-YPAI-RED0", "relay https://paired.example/");
+
+        var fixedOnLoad = new ProfileViewModel(Sample() with { MachineFingerprint = relayPaired.Fingerprint, UseRelay = false, RelayUrl = string.Empty },
+            new FakeDialogs(), _ => relayPaired);
+        var ownRelay = new ProfileViewModel(Sample() with { MachineFingerprint = relayPaired.Fingerprint }, new FakeDialogs(), _ => relayPaired);
+
+        Assert.IsTrue(fixedOnLoad.UseRelay);
+        Assert.AreEqual("https://paired.example/", fixedOnLoad.RelayUrl);
+        Assert.AreEqual("https://relay.example/", ownRelay.RelayUrl);
     }
 
     [TestMethod]

@@ -31,6 +31,8 @@ public sealed class AgentHost : IAgentHost
 
     public event Action<IPairingPrompt>? PairingRequested;
 
+    public event Action? RelayStatusChanged;
+
     public bool IsRunning => _server is not null;
 
     public int Port => _server?.Port ?? 0;
@@ -79,6 +81,11 @@ public sealed class AgentHost : IAgentHost
             Relay = relay is null ? null : new AgentRelayOptions { Endpoint = relay },
         }, security);
         server.PairingRequested += OnPairingRequested;
+        if (server.Relay is { } link)
+        {
+            link.PairingCodeChanged += OnRelayStatusChanged;
+            link.ConnectionChanged += OnRelayConnectionChanged;
+        }
         try
         {
             server.Start();
@@ -86,6 +93,7 @@ public sealed class AgentHost : IAgentHost
         catch
         {
             server.PairingRequested -= OnPairingRequested;
+            UnsubscribeRelay(server);
             server.DisposeAsync().AsTask().GetAwaiter().GetResult(); // Nothing accepted yet, so this completes at once.
             throw;
         }
@@ -99,8 +107,23 @@ public sealed class AgentHost : IAgentHost
             return;
         _server = null;
         server.PairingRequested -= OnPairingRequested;
+        UnsubscribeRelay(server);
         await server.DisposeAsync();
+        OnRelayStatusChanged();
     }
+
+    private void UnsubscribeRelay(AgentServer server)
+    {
+        if (server.Relay is { } link)
+        {
+            link.PairingCodeChanged -= OnRelayStatusChanged;
+            link.ConnectionChanged -= OnRelayConnectionChanged;
+        }
+    }
+
+    private void OnRelayConnectionChanged(bool connected) => OnRelayStatusChanged();
+
+    private void OnRelayStatusChanged() => RelayStatusChanged?.Invoke();
 
     public IReadOnlyList<AgentConnectionInfo> GetConnections() => _server?.GetConnections() ?? [];
 

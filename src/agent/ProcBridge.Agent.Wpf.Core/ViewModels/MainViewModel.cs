@@ -74,6 +74,7 @@ public sealed class MainViewModel : ObservableObject
             x => (x ?? SelectedPairedMachine) is PairedMachineItemViewModel);
 
         _host.PairingRequested += OnPairingRequested;
+        _host.RelayStatusChanged += OnRelayStatusChanged;
         _pairedMachines.Revoked += OnRevoked;
         ReloadPairedMachines();
     }
@@ -366,6 +367,7 @@ public sealed class MainViewModel : ObservableObject
     public async Task ShutdownAsync()
     {
         _host.PairingRequested -= OnPairingRequested;
+        _host.RelayStatusChanged -= OnRelayStatusChanged;
         _pairedMachines.Revoked -= OnRevoked;
         Save();
         await _host.StopAsync();
@@ -373,6 +375,13 @@ public sealed class MainViewModel : ObservableObject
     }
 
     private void OnPairingRequested(IPairingPrompt prompt) => Post(() => ShowPairing(prompt));
+
+    /// <summary>A new invite code (after a use or its expiry) shows at once, not at the next tick of the window timer.</summary>
+    private void OnRelayStatusChanged() => Post(() =>
+    {
+        RelayState = IsRunning ? _host.RelayState : null;
+        RelayPairingCode = IsRunning ? _host.RelayPairingCode : null;
+    });
 
     private void ShowPairing(IPairingPrompt prompt)
     {
