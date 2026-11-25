@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using ProcBridge.Crypto.Identity;
 using ProcBridge.Crypto.Identity.Interfaces;
+using ProcBridge.Crypto.Storage;
 using ProcBridge.Transport.Secure.Models;
 
 namespace ProcBridge.Transport.Secure;
@@ -25,8 +26,7 @@ public sealed class PairedMachineStore
     private const byte FormatVersion = 1;
     private static readonly byte[] _magic = "PBPM"u8.ToArray();
 
-    private readonly SharedStoreFile? _file;
-    private readonly IKeyProtector? _protector;
+    private readonly ProtectedStoreFile? _file;
     private readonly Lock _lock = new();
     private Dictionary<string, PairedMachine> _machines = new(StringComparer.Ordinal);
 
@@ -40,8 +40,7 @@ public sealed class PairedMachineStore
     /// <exception cref="CryptographicException">The file cannot be unwrapped (other user, corrupted).</exception>
     public PairedMachineStore(string path, IKeyProtector protector)
     {
-        _file = new SharedStoreFile(path, _magic, FormatVersion);
-        _protector = protector;
+        _file = new ProtectedStoreFile(path, _magic, FormatVersion, protector);
         _machines = ReadFile();
     }
 
@@ -233,10 +232,9 @@ public sealed class PairedMachineStore
     private Dictionary<string, PairedMachine> ReadFile()
     {
         var machines = new Dictionary<string, PairedMachine>(StringComparer.Ordinal);
-        byte[]? body = _file!.ReadBody();
-        if (body is null)
+        byte[]? json = _file!.Read();
+        if (json is null)
             return machines;
-        byte[] json = _protector!.Unprotect(body);
         PairedMachine[] list = JsonSerializer.Deserialize<PairedMachine[]>(json) ?? [];
         foreach (PairedMachine machine in list)
         {
@@ -248,5 +246,5 @@ public sealed class PairedMachineStore
     }
 
     private void WriteFile(Dictionary<string, PairedMachine> machines)
-        => _file!.WriteBody(_protector!.Protect(JsonSerializer.SerializeToUtf8Bytes(machines.Values.ToArray())));
+        => _file!.Write(JsonSerializer.SerializeToUtf8Bytes(machines.Values.ToArray()));
 }
