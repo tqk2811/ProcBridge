@@ -36,6 +36,25 @@ namespace
     using NtQueryObjectFn = NTSTATUS(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
     using NtSetInformationFileFn = NTSTATUS(NTAPI*)(HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG, ULONG);
     using NtQueryAttributesFileFn = NTSTATUS(NTAPI*)(POBJECT_ATTRIBUTES, PVOID);
+    using NtQueryInformationByNameFn = NTSTATUS(NTAPI*)(POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK, PVOID, ULONG, ULONG);
+    using NtDeleteFileFn = NTSTATUS(NTAPI*)(POBJECT_ATTRIBUTES);
+
+    // FILE_STAT_INFORMATION (FileStatInformation = 68).
+    constexpr ULONG FileStatInformationClass = 68;
+    struct FileStatInfo
+    {
+        LARGE_INTEGER FileId;
+        LARGE_INTEGER CreationTime;
+        LARGE_INTEGER LastAccessTime;
+        LARGE_INTEGER LastWriteTime;
+        LARGE_INTEGER ChangeTime;
+        LARGE_INTEGER AllocationSize;
+        LARGE_INTEGER EndOfFile;
+        ULONG FileAttributes;
+        ULONG ReparseTag;
+        ULONG NumberOfLinks;
+        ACCESS_MASK EffectiveAccess;
+    };
 
     std::wstring Hex(unsigned long long value)
     {
@@ -181,6 +200,7 @@ namespace
             _ntQueryObject = reinterpret_cast<NtQueryObjectFn>(GetProcAddress(ntdll, "NtQueryObject"));
             _ntSetInformationFile = reinterpret_cast<NtSetInformationFileFn>(GetProcAddress(ntdll, "NtSetInformationFile"));
             _ntQueryAttributesFile = reinterpret_cast<NtQueryAttributesFileFn>(GetProcAddress(ntdll, "NtQueryAttributesFile"));
+            _ntQueryInformationByName = reinterpret_cast<NtQueryInformationByNameFn>(GetProcAddress(ntdll, "NtQueryInformationByName"));
         }
 
         void Run()
@@ -202,6 +222,7 @@ namespace
             OverlappedRead();
             Errors();
             BadPointers();
+            QueryByName();
         }
 
     private:
@@ -710,6 +731,31 @@ namespace
             VirtualFree(bad, 0, MEM_RELEASE);
         }
 
+        /// NtQueryInformationByName (no handle). Older systems without the export print "unsupported".
+        void QueryByName() const
+        {
+            for (const wchar_t* relative : { L"a.txt", L"sub", L"sub\\deep\\c.bin", L"missing.txt" })
+            {
+                if (_ntQueryInformationByName == nullptr)
+                {
+                    Line(L"NtQueryInformationByName", L"unsupported");
+                    return;
+                }
+                const std::wstring ntPath = L"\\??\\" + Path(relative);
+                UNICODE_STRING name{};
+                RtlInitUnicodeString(&name, ntPath.c_str());
+                OBJECT_ATTRIBUTES attributes{};
+                InitializeObjectAttributes(&attributes, &name, OBJ_CASE_INSENSITIVE, nullptr, nullptr);
+                IO_STATUS_BLOCK io{};
+                FileStatInfo stat{};
+                const NTSTATUS status = _ntQueryInformationByName(&attributes, &io, &stat, sizeof(stat), FileStatInformationClass);
+                Line(L"NtQueryInformationByName", Path(relative) + L" -> " + Status(status) + (NT_SUCCESS(status)
+                    ? L" attr=" + Hex(stat.FileAttributes) + L" size=" + Num(stat.EndOfFile.QuadPart) + L" created="
+                        + Time(stat.CreationTime) + L" written=" + Time(stat.LastWriteTime)
+                    : L""));
+            }
+        }
+
         std::wstring _root;
         const ProbeOutput& _out;
         NtQueryInformationFileFn _ntQueryInformationFile;
@@ -719,6 +765,7 @@ namespace
         NtQueryObjectFn _ntQueryObject;
         NtSetInformationFileFn _ntSetInformationFile;
         NtQueryAttributesFileFn _ntQueryAttributesFile;
+        NtQueryInformationByNameFn _ntQueryInformationByName;
     };
 }
 
@@ -805,6 +852,19 @@ namespace
         return 0;
     }
 
+    /// --delete <file>: NtDeleteFile on the DOS path, prints the status.
+    int DeleteByName(const wchar_t* file)
+    {
+        const auto deleteFile = reinterpret_cast<NtDeleteFileFn>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtDeleteFile"));
+        const std::wstring ntPath = std::wstring(L"\\??\\") + file;
+        UNICODE_STRING name{};
+        RtlInitUnicodeString(&name, ntPath.c_str());
+        OBJECT_ATTRIBUTES attributes{};
+        InitializeObjectAttributes(&attributes, &name, OBJ_CASE_INSENSITIVE, nullptr, nullptr);
+        WriteLine(L"delete: " + Status(deleteFile(&attributes)));
+        return 0;
+    }
+
     int RunCommand(int argc, wchar_t** argv)
     {
         const std::wstring command = argv[1];
@@ -815,6 +875,10 @@ namespace
         if (command == L"--failed-close" && argc == 3)
         {
             return FailedClose(argv[2]);
+        }
+        if (command == L"--delete" && argc == 3)
+        {
+            return DeleteByName(argv[2]);
         }
         std::fputs("ProcBridge.NativeProbe: unknown command\n", stderr);
         return 2;

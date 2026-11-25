@@ -35,6 +35,8 @@ namespace ProcBridge::Hook
         NtQueryInformationFileFn g_ntSetInformationFile = nullptr;
         NtQueryObjectFn g_ntQueryObject = nullptr;
         NtCloseFn g_ntClose = nullptr;
+        NtQueryInformationByNameFn g_ntQueryInformationByName = nullptr;
+        NtDeleteFileFn g_ntDeleteFile = nullptr;
 
         thread_local unsigned t_hookDepth = 0;
 
@@ -359,6 +361,38 @@ namespace ProcBridge::Hook
             return QueryAttributes(g_ntQueryFullAttributesFile, objectAttributes, information);
         }
 
+        /// Path-based query without a handle (GetFileInformationByName, newer kernelbase attribute paths).
+        NTSTATUS NTAPI HookNtQueryInformationByName(POBJECT_ATTRIBUTES objectAttributes, PIO_STATUS_BLOCK ioStatusBlock,
+            PVOID information, ULONG length, ULONG informationClass)
+        {
+            ReentryGuard guard;
+            if (!guard.IsOutermost())
+            {
+                return g_ntQueryInformationByName(objectAttributes, ioStatusBlock, information, length, informationClass);
+            }
+            RedirectedAttributes redirect(objectAttributes);
+            if (redirect.Error() != STATUS_SUCCESS)
+            {
+                return redirect.Error();
+            }
+            return g_ntQueryInformationByName(redirect.Get(), ioStatusBlock, information, length, informationClass);
+        }
+
+        NTSTATUS NTAPI HookNtDeleteFile(POBJECT_ATTRIBUTES objectAttributes)
+        {
+            ReentryGuard guard;
+            if (!guard.IsOutermost())
+            {
+                return g_ntDeleteFile(objectAttributes);
+            }
+            RedirectedAttributes redirect(objectAttributes);
+            if (redirect.Error() != STATUS_SUCCESS)
+            {
+                return redirect.Error();
+            }
+            return g_ntDeleteFile(redirect.Get());
+        }
+
         bool TryGetNameOffset(ULONG informationClass, ULONG& nameOffset) noexcept
         {
             switch (informationClass)
@@ -566,6 +600,7 @@ namespace ProcBridge::Hook
             const char* Name;
             void* Detour;
             void** Original;
+            bool Optional; // export missing on older Windows: skip instead of failing
         };
     }
 
@@ -586,12 +621,19 @@ namespace ProcBridge::Hook
             { "NtSetInformationFile", reinterpret_cast<void*>(&HookNtSetInformationFile), reinterpret_cast<void**>(&g_ntSetInformationFile) },
             { "NtQueryObject", reinterpret_cast<void*>(&HookNtQueryObject), reinterpret_cast<void**>(&g_ntQueryObject) },
             { "NtClose", reinterpret_cast<void*>(&HookNtClose), reinterpret_cast<void**>(&g_ntClose) },
+            { "NtDeleteFile", reinterpret_cast<void*>(&HookNtDeleteFile), reinterpret_cast<void**>(&g_ntDeleteFile) },
+            { "NtQueryInformationByName", reinterpret_cast<void*>(&HookNtQueryInformationByName),
+                reinterpret_cast<void**>(&g_ntQueryInformationByName), true },
         };
         for (const HookEntry& hook : hooks)
         {
             void* target = reinterpret_cast<void*>(GetProcAddress(ntdll, hook.Name));
             if (target == nullptr)
             {
+                if (hook.Optional)
+                {
+                    continue;
+                }
                 return ERROR_PROC_NOT_FOUND;
             }
             if (MH_CreateHook(target, hook.Detour, hook.Original) != MH_OK)

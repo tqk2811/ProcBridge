@@ -28,6 +28,23 @@ public sealed class HookProbeCommandTests
     [TestMethod]
     [DataRow("x64")]
     [DataRow("Win32")]
+    public void NtDeleteFile_DeletesBackingFile(string platform)
+    {
+        using HookSandbox sandbox = new(platform);
+        string realFile = Path.Combine(sandbox.RealRoot, "sub", "delete-me.txt");
+        File.WriteAllText(realFile, "x");
+
+        ProcessResult result = sandbox.RunHooked(
+            $"\"{sandbox.Binaries.Probe}\" --delete \"{sandbox.VirtualRoot}\\sub\\delete-me.txt\"");
+
+        Assert.AreEqual(0, result.ExitCode, result.StandardOutput + result.StandardError);
+        Assert.AreEqual("delete: status=0x0", result.StandardOutput.TrimEnd());
+        Assert.IsFalse(File.Exists(realFile));
+    }
+
+    [TestMethod]
+    [DataRow("x64")]
+    [DataRow("Win32")]
     public void FailedClose_KeepsVirtualName(string platform)
     {
         using HookSandbox sandbox = new(platform);
