@@ -2,11 +2,14 @@
   <PropertyGroup>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+    <!-- Windows TFM: the Explorer library uses Windows only APIs (registry, services). -->
+    <TargetFramework>net10.0-windows</TargetFramework>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="MSTest" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\shared\ProcBridge.Protocol\ProcBridge.Protocol.csproj" />
+    <ProjectReference Include="..\..\agent\ProcBridge.Agent.Explorer\ProcBridge.Agent.Explorer.csproj" />
   </ItemGroup>
 </Project>
