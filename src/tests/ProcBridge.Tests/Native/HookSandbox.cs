@@ -29,6 +29,9 @@ internal sealed class HookSandbox : IDisposable
         CreateTree();
     }
 
+    /// <summary>Folder holding <see cref="RealRoot"/>; the virtual root path also sits directly inside it.</summary>
+    public string BaseDirectory => _baseDirectory;
+
     public string RealRoot { get; }
 
     /// <summary>Virtual folder; longer than <see cref="RealRoot"/> on purpose so name rewriting changes lengths.</summary>
@@ -36,11 +39,15 @@ internal sealed class HookSandbox : IDisposable
 
     public NativeBinaries Binaries => _binaries;
 
-    public ProcessResult Run(string fileName, string arguments) => RunProcess(fileName, arguments);
+    public ProcessResult Run(string fileName, string arguments) => RunProcess(fileName, arguments, null);
 
     /// <summary>Runs a command line under ProcBridge.Spawn with the virtual root mapped onto the real root.</summary>
-    public ProcessResult RunHooked(string commandLine)
-        => RunProcess(_binaries.Spawn, $"--map \"{VirtualRoot}\" \"{RealRoot}\" -- {commandLine}");
+    public ProcessResult RunHooked(string commandLine, string? workingDirectory = null)
+        => RunSpawn($"--map \"{VirtualRoot}\" \"{RealRoot}\" -- {commandLine}", workingDirectory);
+
+    /// <summary>Runs ProcBridge.Spawn with raw arguments (own --map options and command line).</summary>
+    public ProcessResult RunSpawn(string arguments, string? workingDirectory = null)
+        => RunProcess(_binaries.Spawn, arguments, workingDirectory);
 
     public void Dispose()
     {
@@ -79,10 +86,11 @@ internal sealed class HookSandbox : IDisposable
         File.WriteAllBytes(Path.Combine(RealRoot, "sub", "deep", "c.bin"), binary);
     }
 
-    private static ProcessResult RunProcess(string fileName, string arguments)
+    private static ProcessResult RunProcess(string fileName, string arguments, string? workingDirectory)
     {
         ProcessStartInfo startInfo = new(fileName, arguments)
         {
+            WorkingDirectory = workingDirectory ?? string.Empty,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,

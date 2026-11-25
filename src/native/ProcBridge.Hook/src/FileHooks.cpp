@@ -8,6 +8,7 @@
 // Directory listings (NtQueryDirectoryFile[Ex]) return leaf names only, so with a local backing
 // folder they need no rewriting in M1; M2 replaces them with listings built from machine B.
 #include "FileHooks.h"
+#include "DirectoryNameCache.h"
 #include "HandleTable.h"
 #include "PathString.h"
 #include <MinHook.h>
@@ -24,6 +25,7 @@ namespace ProcBridge::Hook
 
         const IPathResolver* g_resolver = nullptr;
         HandleTable g_handles;
+        DirectoryNameCache g_directoryNames;
 
         NtCreateFileFn g_ntCreateFile = nullptr;
         NtOpenFileFn g_ntOpenFile = nullptr;
@@ -68,22 +70,29 @@ namespace ProcBridge::Hook
                     // Relative to a virtual directory handle: that handle already points at the backing
                     // folder, so the name stays as is; only the result has to be tracked.
                     _mapping = g_handles.Find(source->RootDirectory);
-                    return;
+                    if (_mapping < 0)
+                    {
+                        ResolveBelowRealDirectory(source->RootDirectory, *source->ObjectName);
+                    }
                 }
-                const int mapping = g_resolver->FindMapping(*source->ObjectName);
-                if (mapping < 0)
+                else
                 {
-                    return;
+                    const int mapping = g_resolver->FindMapping(*source->ObjectName);
+                    if (mapping < 0)
+                    {
+                        return;
+                    }
+                    _mapping = mapping;
+                    _failed = !g_resolver->TranslateToReal(mapping, *source->ObjectName, _name);
+                    _rewritten = !_failed;
                 }
-                _mapping = mapping;
-                if (!g_resolver->TranslateToReal(mapping, *source->ObjectName, _name))
+                if (_rewritten)
                 {
-                    _failed = true;
-                    return;
+                    // Always an absolute backing path: RootDirectory (if any) is dropped.
+                    _attributes = *source;
+                    _attributes.RootDirectory = nullptr;
+                    _attributes.ObjectName = &_name;
                 }
-                _attributes = *source;
-                _attributes.ObjectName = &_name;
-                _rewritten = true;
             }
 
             ~RedirectedAttributes()
@@ -103,6 +112,71 @@ namespace ProcBridge::Hook
             POBJECT_ATTRIBUTES Get() noexcept { return _rewritten ? &_attributes : _source; }
 
         private:
+            /// RootDirectory is a real directory (typically the current directory handle): join its name
+            /// with the relative name and translate when the result lies inside a virtual root.
+            void ResolveBelowRealDirectory(HANDLE root, const UNICODE_STRING& relative) noexcept
+            {
+                const bool cached = g_directoryNames.Visit(root, [&](const UNICODE_STRING& rootName)
+                    {
+                        ResolveJoined(rootName, relative);
+                    });
+                if (cached)
+                {
+                    return;
+                }
+                const size_t bufferBytes = sizeof(ObjectNameInfo) + MaxNameBytes;
+                HeapBuffer buffer(bufferBytes);
+                if (!buffer)
+                {
+                    return;
+                }
+                const auto* info = reinterpret_cast<const ObjectNameInfo*>(buffer.Get());
+                const NTSTATUS status = g_ntQueryObject(root, ObjectNameInformation, buffer.Get(), static_cast<ULONG>(bufferBytes), nullptr);
+                UNICODE_STRING rootName{};
+                if (NT_SUCCESS(status) && info->Name.Buffer != nullptr)
+                {
+                    rootName = info->Name;
+                    while (rootName.Length > 0 && rootName.Buffer[rootName.Length / sizeof(wchar_t) - 1] == L'\\')
+                    {
+                        rootName.Length -= sizeof(wchar_t);
+                    }
+                }
+                g_directoryNames.Add(root, rootName.Buffer, rootName.Length);
+                ResolveJoined(rootName, relative);
+            }
+
+            void ResolveJoined(const UNICODE_STRING& rootName, const UNICODE_STRING& relative) noexcept
+            {
+                if (rootName.Length == 0 || !g_resolver->IsNearVirtualRoot(rootName))
+                {
+                    return;
+                }
+                const size_t joinedBytes = static_cast<size_t>(rootName.Length) + sizeof(wchar_t) + relative.Length;
+                UNICODE_STRING joined{};
+                if (!AllocateString(joined, joinedBytes))
+                {
+                    _failed = true;
+                    return;
+                }
+                BYTE* cursor = reinterpret_cast<BYTE*>(joined.Buffer);
+                memcpy(cursor, rootName.Buffer, rootName.Length);
+                joined.Length = rootName.Length;
+                if (relative.Length > 0)
+                {
+                    *reinterpret_cast<wchar_t*>(cursor + rootName.Length) = L'\\';
+                    memcpy(cursor + rootName.Length + sizeof(wchar_t), relative.Buffer, relative.Length);
+                    joined.Length = static_cast<USHORT>(joinedBytes);
+                }
+                const int mapping = g_resolver->FindMappingByDevicePath(joined);
+                if (mapping >= 0)
+                {
+                    _mapping = mapping;
+                    _failed = !g_resolver->TranslateDeviceToReal(mapping, joined, _name);
+                    _rewritten = !_failed;
+                }
+                FreeString(joined);
+            }
+
             POBJECT_ATTRIBUTES _source;
             OBJECT_ATTRIBUTES _attributes{};
             UNICODE_STRING _name{};
@@ -110,6 +184,16 @@ namespace ProcBridge::Hook
             bool _rewritten = false;
             bool _failed = false;
         };
+
+        /// A new handle value may equal a handle that was closed without NtClose: drop stale entries.
+        void TrackOpenedHandle(HANDLE handle, const RedirectedAttributes& redirect) noexcept
+        {
+            g_directoryNames.Remove(handle);
+            if (redirect.Matched())
+            {
+                g_handles.Add(handle, redirect.Mapping());
+            }
+        }
 
         NTSTATUS NTAPI HookNtCreateFile(PHANDLE fileHandle, ACCESS_MASK desiredAccess, POBJECT_ATTRIBUTES objectAttributes,
             PIO_STATUS_BLOCK ioStatusBlock, PLARGE_INTEGER allocationSize, ULONG fileAttributes, ULONG shareAccess,
@@ -128,9 +212,9 @@ namespace ProcBridge::Hook
             }
             const NTSTATUS status = g_ntCreateFile(fileHandle, desiredAccess, redirect.Get(), ioStatusBlock,
                 allocationSize, fileAttributes, shareAccess, createDisposition, createOptions, eaBuffer, eaLength);
-            if (redirect.Matched() && NT_SUCCESS(status))
+            if (NT_SUCCESS(status))
             {
-                g_handles.Add(*fileHandle, redirect.Mapping());
+                TrackOpenedHandle(*fileHandle, redirect);
             }
             return status;
         }
@@ -149,9 +233,9 @@ namespace ProcBridge::Hook
                 return STATUS_NO_MEMORY;
             }
             const NTSTATUS status = g_ntOpenFile(fileHandle, desiredAccess, redirect.Get(), ioStatusBlock, shareAccess, openOptions);
-            if (redirect.Matched() && NT_SUCCESS(status))
+            if (NT_SUCCESS(status))
             {
-                g_handles.Add(*fileHandle, redirect.Mapping());
+                TrackOpenedHandle(*fileHandle, redirect);
             }
             return status;
         }
@@ -348,6 +432,7 @@ namespace ProcBridge::Hook
         {
             // Remove before closing: once closed, another thread may receive the same handle value.
             g_handles.Remove(handle);
+            g_directoryNames.Remove(handle);
             return g_ntClose(handle);
         }
 

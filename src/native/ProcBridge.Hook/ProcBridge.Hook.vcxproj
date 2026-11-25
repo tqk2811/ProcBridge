@@ -70,6 +70,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="src\dllmain.cpp" />
+    <ClCompile Include="src\DirectoryNameCache.cpp" />
     <ClCompile Include="src\FileHooks.cpp" />
     <ClCompile Include="src\HandleTable.cpp" />
     <ClCompile Include="src\PathMapper.cpp" />
@@ -102,6 +103,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\external\minhook\include\MinHook.h" />
+    <ClInclude Include="src\DirectoryNameCache.h" />
     <ClInclude Include="src\FileHooks.h" />
     <ClInclude Include="src\HandleTable.h" />
     <ClInclude Include="src\NtApi.h" />

@@ -30,6 +30,16 @@ namespace ProcBridge::Hook
         virtual bool TranslateToReal(int mapping, const UNICODE_STRING& ntPath, UNICODE_STRING& realPath) const noexcept = 0;
 
         virtual const PathMapping& GetMapping(int mapping) const noexcept = 0;
+
+        /// True when a virtual root lies inside directoryDevicePath (\Device\...\dir) or contains it, i.e.
+        /// a name relative to that directory may be virtual. Cheap: decides whether joining is needed.
+        virtual bool IsNearVirtualRoot(const UNICODE_STRING& directoryDevicePath) const noexcept = 0;
+
+        /// Like FindMapping, for an NT device path (\Device\HarddiskVolume3\...).
+        virtual int FindMappingByDevicePath(const UNICODE_STRING& devicePath) const noexcept = 0;
+
+        /// Like TranslateToReal, for a device path matched by FindMappingByDevicePath.
+        virtual bool TranslateDeviceToReal(int mapping, const UNICODE_STRING& devicePath, UNICODE_STRING& realPath) const noexcept = 0;
     };
 
     /// Mappings read from the PROCBRIDGE_MAP environment variable:
@@ -48,6 +58,9 @@ namespace ProcBridge::Hook
         int FindMapping(const UNICODE_STRING& ntPath) const noexcept override;
         bool TranslateToReal(int mapping, const UNICODE_STRING& ntPath, UNICODE_STRING& realPath) const noexcept override;
         const PathMapping& GetMapping(int mapping) const noexcept override { return _mappings[mapping]; }
+        bool IsNearVirtualRoot(const UNICODE_STRING& directoryDevicePath) const noexcept override;
+        int FindMappingByDevicePath(const UNICODE_STRING& devicePath) const noexcept override;
+        bool TranslateDeviceToReal(int mapping, const UNICODE_STRING& devicePath, UNICODE_STRING& realPath) const noexcept override;
 
     private:
         DWORD AddMapping(const wchar_t* virtualDos, const wchar_t* realDos) noexcept;

@@ -64,6 +64,24 @@ public sealed class HookCommandTests
     [TestMethod]
     [DataRow("x64")]
     [DataRow("Win32")]
+    public void CmdType_RelativeToWorkingDirectoryAboveVirtualFolder(string platform)
+    {
+        // Kernelbase opens paths below the current directory relative to the current directory handle
+        // (OBJECT_ATTRIBUTES.RootDirectory), for relative and absolute DOS paths alike.
+        using HookSandbox sandbox = new(platform);
+        string virtualName = Path.GetFileName(sandbox.VirtualRoot);
+
+        ProcessResult result = sandbox.RunHooked(
+            $"cmd.exe /d /c \"type {virtualName}\\a.txt && type \"{sandbox.VirtualRoot}\\sub\\b.txt\"\"",
+            sandbox.BaseDirectory);
+
+        Assert.AreEqual(0, result.ExitCode, result.StandardError);
+        Assert.AreEqual(HookSandbox.FileAContent + "bee\r\n", result.StandardOutput);
+    }
+
+    [TestMethod]
+    [DataRow("x64")]
+    [DataRow("Win32")]
     public void DotNetFramework_ReadAllText_ReadsThroughVirtualFolder(string platform)
     {
         using HookSandbox sandbox = new(platform);

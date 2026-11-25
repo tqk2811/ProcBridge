@@ -177,4 +177,41 @@ namespace ProcBridge::Hook
         return ConcatString(realPath, entry.RealNt,
             reinterpret_cast<const wchar_t*>(reinterpret_cast<const BYTE*>(ntPath.Buffer) + entry.VirtualNt.Length), tailBytes);
     }
+
+    bool PathMapper::IsNearVirtualRoot(const UNICODE_STRING& directoryDevicePath) const noexcept
+    {
+        for (int i = 0; i < _count; ++i)
+        {
+            const UNICODE_STRING& root = _mappings[i].VirtualDevicePath;
+            if (HasPathPrefix(root.Buffer, root.Length, directoryDevicePath)
+                || HasPathPrefix(directoryDevicePath.Buffer, directoryDevicePath.Length, root))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    int PathMapper::FindMappingByDevicePath(const UNICODE_STRING& devicePath) const noexcept
+    {
+        int best = -1;
+        for (int i = 0; i < _count; ++i)
+        {
+            const UNICODE_STRING& root = _mappings[i].VirtualDevicePath;
+            if (HasPathPrefix(devicePath.Buffer, devicePath.Length, root)
+                && (best < 0 || root.Length > _mappings[best].VirtualDevicePath.Length))
+            {
+                best = i;
+            }
+        }
+        return best;
+    }
+
+    bool PathMapper::TranslateDeviceToReal(int mapping, const UNICODE_STRING& devicePath, UNICODE_STRING& realPath) const noexcept
+    {
+        const PathMapping& entry = _mappings[mapping];
+        const size_t tailBytes = static_cast<size_t>(devicePath.Length) - entry.VirtualDevicePath.Length;
+        return ConcatString(realPath, entry.RealNt,
+            reinterpret_cast<const wchar_t*>(reinterpret_cast<const BYTE*>(devicePath.Buffer) + entry.VirtualDevicePath.Length), tailBytes);
+    }
 }
