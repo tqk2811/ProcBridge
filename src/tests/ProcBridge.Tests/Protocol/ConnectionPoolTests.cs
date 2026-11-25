@@ -20,6 +20,7 @@ public sealed class ConnectionPoolTests
         private readonly TimeSpan _latency;
         private readonly CancellationTokenSource _stop = new();
         private readonly Task _acceptLoop;
+        private readonly TaskCompletionSource _requestReceived = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int _closedConnections;
 
         public FakePeer(TimeSpan latency)
@@ -32,6 +33,9 @@ public sealed class ConnectionPoolTests
         public int Port => ((IPEndPoint)_listener.LocalEndpoint).Port;
 
         public int ClosedConnections => Volatile.Read(ref _closedConnections);
+
+        /// <summary>Completes when the first request other than Hello reached the peer.</summary>
+        public Task RequestReceived => _requestReceived.Task;
 
         private async Task AcceptLoopAsync()
         {
@@ -62,9 +66,21 @@ public sealed class ConnectionPoolTests
                         {
                             Memory<byte> header = Memory<byte>.Empty;
                             if (current.MessageType == MessageType.Hello)
+                            {
                                 header = ProtocolSerializer.Serialize(new HelloResponse { ProtocolVersion = ProtocolInfo.Version, ServerName = "fake", MaxFrameSize = 1 << 20, MaxReadSize = 1 << 16 });
+                            }
                             else
-                                await Task.Delay(_latency);
+                            {
+                                _requestReceived.TrySetResult();
+                                try
+                                {
+                                    await Task.Delay(_latency, _stop.Token);
+                                }
+                                catch (OperationCanceledException)
+                                {
+                                    return;
+                                }
+                            }
                             try
                             {
                                 await channel.SendAsync(new Frame { Kind = FrameKind.Response, MessageType = current.MessageType, RequestId = current.RequestId, Header = header }, CancellationToken.None);
@@ -184,13 +200,15 @@ public sealed class ConnectionPoolTests
     public async Task DisposeWhileRequestInFlight_DoesNotReconnect()
     {
         // The dispose kills the connection under the request; the idempotent retry must not open a new one.
-        await using var peer = new FakePeer(TimeSpan.FromMilliseconds(500));
-        var options = new TransportOptions { ConnectionCount = 1, ConnectTimeout = TimeSpan.FromSeconds(10), RequestTimeout = TimeSpan.FromSeconds(10) };
+        // The peer never answers, and the dispose waits until it holds the request: a fixed delay raced the answer when
+        // the machine was busy (the request completed before the dispose and nothing was thrown).
+        await using var peer = new FakePeer(Timeout.InfiniteTimeSpan);
+        var options = new TransportOptions { ConnectionCount = 1, ConnectTimeout = TimeSpan.FromSeconds(10), RequestTimeout = TimeSpan.FromSeconds(30) };
         var factory = new ScriptedFactory(peer.Port, _ => Task.CompletedTask);
         var pool = new ConnectionPool(factory, Hello, options);
 
         Task<Frame> request = RequestAsync(pool);
-        await Task.Delay(200); // connected, request waiting for the peer
+        await peer.RequestReceived.WaitAsync(TimeSpan.FromSeconds(10)); // connected, request waiting for the peer
         await pool.DisposeAsync();
         await Assert.ThrowsAsync<ObjectDisposedException>(() => request);
 
