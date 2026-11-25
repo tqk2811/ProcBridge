@@ -410,8 +410,15 @@ người dùng cần nó để chọn thư mục máy B trước khi mở phiên
 ### 13.1 Kết quả M1 (2026-11-25)
 
 - `ProcBridge.Hook` chặn `NtCreateFile`, `NtOpenFile`, `NtQueryAttributesFile`,
-  `NtQueryFullAttributesFile`, `NtQueryInformationFile` (tên: class 9, 18, 48), `NtSetInformationFile`
-  (chỉ dịch đường dẫn đích của đổi tên/tạo link), `NtQueryObject` (`ObjectNameInformation`), `NtClose`.
+  `NtQueryFullAttributesFile`, `NtQueryInformationByName`, `NtDeleteFile`, `NtQueryInformationFile`
+  (tên: class 9, 18, 48), `NtSetInformationFile` (chỉ dịch đường dẫn đích của đổi tên/tạo link),
+  `NtQueryObject` (`ObjectNameInformation`), `NtClose`.
+- `RootDirectory` là handle thư mục thật (kernelbase dùng handle thư mục hiện hành cho mọi đường dẫn nằm
+  dưới thư mục hiện hành): Hook lấy tên thiết bị của handle đó (cache theo handle), ghép với tên tương đối,
+  thuộc gốc ảo thì viết lại thành đường dẫn thật tuyệt đối. Gốc ảo lồng nhau: gốc dài nhất thắng; `:` sau
+  gốc ảo (luồng dữ liệu phụ) cũng là ranh giới. Không nhận gốc ổ đĩa hay đường dẫn UNC làm thư mục ảo/thật.
+- Con trỏ của process gọi vào được đọc/ghi qua SEH: con trỏ hỏng thì trả `STATUS_ACCESS_VIOLATION` như
+  hệ thống, không làm sập process.
 - Theo mô hình 4.4 rút gọn: thư mục thật đóng vai "cache", mở đường dẫn ảo là mở file thật, trả handle
   thật và ghi vào bảng `handle → ánh xạ`. Đọc, map bộ nhớ, overlapped I/O và liệt kê thư mục chạy trên
   handle thật nên **không** chặn `NtReadFile`/`NtQueryDirectoryFile` ở M1 (liệt kê chỉ trả tên lá).
@@ -421,6 +428,8 @@ người dùng cần nó để chọn thư mục máy B trước khi mở phiên
 - Khởi động: `DllMain` không làm gì nặng; injector gọi export `ProcBridgeHookInitialize` bằng thread từ
   xa sau `LoadLibraryW`, trước khi resume thread chính.
 - Launcher M1 là `ProcBridge.Spawn` (native, dùng `ProcBridge.Inject`); Launcher C# dùng nó từ M2.
+  Đích khác kiến trúc với Spawn bị từ chối sớm (`ERROR_EXE_MACHINE_TYPE_MISMATCH`, inject chéo kiến trúc
+  là M4).
 - Kiểm: `cmd /c type`, `dir`, `cd` vào thư mục ảo, .NET Framework `File.ReadAllText` (qua PowerShell 5.1),
   test so sánh `NativeProbe` thật/ảo giống từng dòng, cả x64 và Win32
   (`src/tests/ProcBridge.Tests/Native`). Notepad **chưa kiểm**: Notepad trên Windows 11 là app packaged,

@@ -41,7 +41,21 @@ process nên làm sớm hơn.
   được. Cần một trình soạn thảo cổ điển (vd Notepad cũ trong `System32` trên máy chưa cài bản packaged) để
   kiểm mở/lưu, hoặc cân nhắc hỗ trợ kích hoạt app packaged (ngoài phạm vi hiện tại).
 
-## [Thấp] Review độc lập cho M1
+## [Thấp] Kiểm tra ánh xạ gốc ổ đĩa/UNC ở tầng Hook chưa có test
 
-Đợt M1 do một subagent tự làm, không được tạo subagent review nên chưa có lượt review độc lập (READ-ONLY)
-cho Hook/Inject/Spawn. Nên review trước khi merge vào `master`.
+`PathMapper::AddMapping` (`src/native/ProcBridge.Hook/src/PathMapper.cpp`) từ chối gốc ổ đĩa và UNC, nhưng
+test chỉ phủ được lớp kiểm của `ProcBridge.Spawn` (Spawn từ chối trước khi tới Hook). Cần một đường đặt
+`PROCBRIDGE_MAP` trực tiếp (vd tuỳ chọn ẩn của Spawn hoặc Launcher M2) để test lớp Hook. Ghi 2026-11-25.
+
+## [Thấp] Giới hạn tên 0xFFFC byte chưa có test
+
+`HookNtQueryObject` (`src/native/ProcBridge.Hook/src/FileHooks.cpp`) giới hạn tên viết lại ở 0xFFFC byte để
+`MaximumLength` không tràn `USHORT`. Chạm tới giới hạn cần đường dẫn gần 32767 ký tự nên chưa có test.
+Ghi 2026-11-25.
+
+## [Thấp] Cache tên thư mục gốc chỉ dọn qua NtClose và lần mở mới
+
+`DirectoryNameCache` (`src/native/ProcBridge.Hook/src/DirectoryNameCache.h`) xoá mục khi `NtClose` hoặc khi
+`NtCreateFile`/`NtOpenFile` trả lại cùng giá trị handle. Handle thư mục đóng bằng đường khác rồi giá trị được
+cấp lại qua `NtDuplicateObject` (không bị hook) có thể dùng tên cũ. Gộp vào việc theo dõi
+`NtDuplicateObject` ở mục "Handle nhân bản". Ghi 2026-11-25.
