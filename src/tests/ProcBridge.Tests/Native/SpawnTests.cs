@@ -42,6 +42,24 @@ public sealed class SpawnTests
     }
 
     [TestMethod]
+    [DataRow("x64", "SysWOW64")]
+    [DataRow("Win32", "Sysnative")]
+    public void TargetOfOtherArchitecture_IsRefusedClearly(string platform, string systemFolder)
+    {
+        // A 32-bit Spawn sees the 64-bit System32 only through Sysnative (WOW64 redirection).
+        using HookSandbox sandbox = new(platform);
+        string cmd = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), systemFolder, "cmd.exe");
+
+        ProcessResult result = sandbox.RunHooked($"\"{cmd}\" /d /c echo started");
+
+        Assert.AreEqual(SpawnFailure, result.ExitCode, result.StandardOutput + result.StandardError);
+        // ERROR_EXE_MACHINE_TYPE_MISMATCH.
+        Assert.Contains("target architecture differs", result.StandardError);
+        Assert.Contains("(error 216)", result.StandardError);
+        Assert.DoesNotContain("started", result.StandardOutput);
+    }
+
+    [TestMethod]
     [DataRow("x64")]
     [DataRow("Win32")]
     public void UncMapping_IsRefused(string platform)

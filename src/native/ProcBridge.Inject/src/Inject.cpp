@@ -102,6 +102,23 @@ namespace ProcBridge::Inject
     DWORD InjectDll(HANDLE process, const wchar_t* dllPath, const char* initExport, DWORD timeoutMs, DWORD& initResult) noexcept
     {
         initResult = ERROR_SUCCESS;
+        // The remote LoadLibraryW address and the DLL come from this process: they are only valid in a
+        // target of the same architecture (cross-architecture injection is M4).
+        USHORT selfProcess = 0;
+        USHORT selfNative = 0;
+        USHORT targetProcess = 0;
+        USHORT targetNative = 0;
+        if (!IsWow64Process2(GetCurrentProcess(), &selfProcess, &selfNative) || !IsWow64Process2(process, &targetProcess, &targetNative))
+        {
+            return GetLastError();
+        }
+        const USHORT selfMachine = selfProcess == IMAGE_FILE_MACHINE_UNKNOWN ? selfNative : selfProcess;
+        const USHORT targetMachine = targetProcess == IMAGE_FILE_MACHINE_UNKNOWN ? targetNative : targetProcess;
+        if (selfMachine != targetMachine)
+        {
+            return ERROR_EXE_MACHINE_TYPE_MISMATCH;
+        }
+
         wchar_t fullPath[MAX_PATH];
         const DWORD fullLength = GetFullPathNameW(dllPath, MAX_PATH, fullPath, nullptr);
         if (fullLength == 0 || fullLength >= MAX_PATH)

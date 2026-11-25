@@ -262,6 +262,11 @@ int wmain(int argc, wchar_t** argv)
     if (injectError != ERROR_SUCCESS || initResult != ERROR_SUCCESS)
     {
         TerminateProcess(child.Process(), SpawnFailure);
+        if (injectError == ERROR_EXE_MACHINE_TYPE_MISMATCH)
+        {
+            return Fail(L"target architecture differs from this launcher; use the ProcBridge.Spawn of the target's architecture",
+                injectError);
+        }
         return Fail(injectError != ERROR_SUCCESS ? L"inject failed" : L"hook initialization failed",
             injectError != ERROR_SUCCESS ? injectError : initResult);
     }
