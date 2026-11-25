@@ -24,6 +24,20 @@ jobs:
       - name: Build C#
         run: dotnet build ProcBridge.slnx -c Release
 
+      # Relay integration tests run on a throw-away PostgreSQL cluster (trust auth, no password) when the runner image
+      # ships PostgreSQL (PGBIN). If this step fails the Postgres tests report as skipped, the in-memory ones still run.
+      - name: Start PostgreSQL for relay tests
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          if (-not $env:PGBIN) { Write-Host "PGBIN not set: Postgres relay tests will be skipped."; exit 0 }
+          $data = Join-Path $env:RUNNER_TEMP 'pgdata'
+          & "$env:PGBIN\initdb.exe" -D $data -U postgres --auth=trust -E UTF8 | Out-Host
+          if ($LASTEXITCODE -ne 0) { exit 0 }
+          & "$env:PGBIN\pg_ctl.exe" -D $data -o "-p 55432 -c listen_addresses=localhost" -l (Join-Path $env:RUNNER_TEMP 'pg.log') -w start | Out-Host
+          if ($LASTEXITCODE -ne 0) { exit 0 }
+          "PROCBRIDGE_TEST_POSTGRES=Host=localhost;Port=55432;Username=postgres" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Test C#
         run: dotnet test ProcBridge.slnx -c Release --no-build --logger trx --results-directory TestResults
 
