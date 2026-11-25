@@ -1,8 +1,690 @@
-// NativeProbe: will exercise the full file API set for comparison tests (plan section 12).
+// NativeProbe: runs a fixed read-only scenario of file APIs against a root folder and prints one line
+// per observation (plan section 12). Every path is printed with the root replaced by <ROOT>, so a run
+// on the real folder and a run through the virtual folder must print exactly the same text.
+//
+// Usage: ProcBridge.NativeProbe.<arch>.exe <root>
+// Expected tree under <root> (created by the test): a.txt, sub\b.txt, sub\deep\c.bin, empty\,
+// ro.txt (read-only), unicode file name. Last access times are never printed (they drift).
+#define WIN32_NO_STATUS
+#include <windows.h>
+#undef WIN32_NO_STATUS
+#include <ntstatus.h>
+#include <winternl.h>
+#include <algorithm>
 #include <cstdio>
+#include <string>
+#include <vector>
 
-int wmain()
+namespace
 {
-    std::puts("ProcBridge.NativeProbe: not implemented yet (M0 skeleton).");
+    constexpr ULONG FileNameInformationClass = 9;
+    constexpr ULONG FileAllInformationClass = 18;
+    constexpr ULONG FileNamesInformationClass = 12;
+    constexpr ULONG FileNormalizedNameInformationClass = 48;
+    constexpr ULONG FileAllInfoNameOffset = 96;
+
+    // Vietnamese + Latin-1 file name, built from code points so the source stays ASCII.
+    constexpr wchar_t UnicodeName[] = { L't', 0x1EC7, L'p', L'-', 0x00FC, L'.', L't', L'x', L't', 0 };
+
+    using NtQueryInformationFileFn = NTSTATUS(NTAPI*)(HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG, ULONG);
+    using NtOpenFileFn = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK, ULONG, ULONG);
+    using NtCreateFileFn = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK,
+        PLARGE_INTEGER, ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
+    using NtQueryDirectoryFileFn = NTSTATUS(NTAPI*)(HANDLE, HANDLE, PIO_APC_ROUTINE, PVOID, PIO_STATUS_BLOCK,
+        PVOID, ULONG, ULONG, BOOLEAN, PUNICODE_STRING, BOOLEAN);
+
+    std::wstring Hex(unsigned long long value)
+    {
+        wchar_t text[32];
+        swprintf_s(text, L"0x%llX", value);
+        return text;
+    }
+
+    std::wstring Num(long long value)
+    {
+        return std::to_wstring(value);
+    }
+
+    std::wstring Time(const FILETIME& time)
+    {
+        return Num((static_cast<long long>(time.dwHighDateTime) << 32) | time.dwLowDateTime);
+    }
+
+    std::wstring Time(const LARGE_INTEGER& time)
+    {
+        return Num(time.QuadPart);
+    }
+
+    std::wstring Error(DWORD error)
+    {
+        return L"err=" + Num(error);
+    }
+
+    std::wstring Status(NTSTATUS status)
+    {
+        return L"status=" + Hex(static_cast<unsigned long>(status));
+    }
+
+    unsigned long long Fnv1a(const BYTE* data, size_t size, unsigned long long hash = 14695981039346656037ull)
+    {
+        for (size_t i = 0; i < size; ++i)
+        {
+            hash ^= data[i];
+            hash *= 1099511628211ull;
+        }
+        return hash;
+    }
+
+    /// Owns a Win32 handle.
+    class Handle final
+    {
+    public:
+        explicit Handle(HANDLE handle = INVALID_HANDLE_VALUE) noexcept : _handle(handle) {}
+        ~Handle() { Reset(); }
+        Handle(const Handle&) = delete;
+        Handle& operator=(const Handle&) = delete;
+
+        void Reset(HANDLE handle = INVALID_HANDLE_VALUE) noexcept
+        {
+            if (IsValid())
+            {
+                CloseHandle(_handle);
+            }
+            _handle = handle;
+        }
+        HANDLE Get() const noexcept { return _handle; }
+        bool IsValid() const noexcept { return _handle != nullptr && _handle != INVALID_HANDLE_VALUE; }
+
+    private:
+        HANDLE _handle;
+    };
+
+    /// Writes UTF-8 lines to stdout, replacing the root by <ROOT>.
+    class ProbeOutput final
+    {
+    public:
+        explicit ProbeOutput(std::wstring root)
+            : _root(std::move(root)), _stdout(GetStdHandle(STD_OUTPUT_HANDLE))
+        {
+            // Volume-relative form ("\dir\root") as returned by name queries without a drive.
+            if (_root.size() > 2 && _root[1] == L':')
+            {
+                _rootNoDrive = _root.substr(2);
+            }
+        }
+
+        void Line(const std::wstring& step, const std::wstring& text) const
+        {
+            std::wstring line = step + L": " + Normalize(text) + L"\n";
+            const int bytes = WideCharToMultiByte(CP_UTF8, 0, line.c_str(), static_cast<int>(line.size()), nullptr, 0, nullptr, nullptr);
+            std::string utf8(static_cast<size_t>(bytes), '\0');
+            WideCharToMultiByte(CP_UTF8, 0, line.c_str(), static_cast<int>(line.size()), utf8.data(), bytes, nullptr, nullptr);
+            DWORD written = 0;
+            WriteFile(_stdout, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
+        }
+
+        size_t RootNoDriveLength() const noexcept { return _rootNoDrive.size(); }
+        size_t RootLength() const noexcept { return _root.size(); }
+
+    private:
+        static void ReplaceAll(std::wstring& text, const std::wstring& what, const std::wstring& with)
+        {
+            if (what.empty())
+            {
+                return;
+            }
+            size_t position = 0;
+            while (true)
+            {
+                const auto found = std::search(text.begin() + static_cast<std::ptrdiff_t>(position), text.end(), what.begin(), what.end(),
+                    [](wchar_t a, wchar_t b) { return CharUpperW(reinterpret_cast<LPWSTR>(static_cast<ULONG_PTR>(a)))
+                        == CharUpperW(reinterpret_cast<LPWSTR>(static_cast<ULONG_PTR>(b))); });
+                if (found == text.end())
+                {
+                    return;
+                }
+                position = static_cast<size_t>(found - text.begin());
+                text.replace(position, what.size(), with);
+                position += with.size();
+            }
+        }
+
+        std::wstring Normalize(std::wstring text) const
+        {
+            ReplaceAll(text, L"\\\\?\\", L"");
+            ReplaceAll(text, _root, L"<ROOT>");
+            ReplaceAll(text, _rootNoDrive, L"<ROOT>");
+            return text;
+        }
+
+        std::wstring _root;
+        std::wstring _rootNoDrive;
+        HANDLE _stdout;
+    };
+
+    /// The scenario. Each method is one group of read APIs.
+    class Probe final
+    {
+    public:
+        Probe(std::wstring root, const ProbeOutput& output)
+            : _root(std::move(root)), _out(output)
+        {
+            const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+            _ntQueryInformationFile = reinterpret_cast<NtQueryInformationFileFn>(GetProcAddress(ntdll, "NtQueryInformationFile"));
+            _ntOpenFile = reinterpret_cast<NtOpenFileFn>(GetProcAddress(ntdll, "NtOpenFile"));
+            _ntCreateFile = reinterpret_cast<NtCreateFileFn>(GetProcAddress(ntdll, "NtCreateFile"));
+            _ntQueryDirectoryFile = reinterpret_cast<NtQueryDirectoryFileFn>(GetProcAddress(ntdll, "NtQueryDirectoryFile"));
+        }
+
+        void Run()
+        {
+            Attributes();
+            ReadContents();
+            HandleInformation(L"a.txt", false);
+            HandleInformation(L"sub", true);
+            HandleInformation(UnicodeName, false);
+            NameQueries(L"sub\\b.txt");
+            FinalPaths(L"sub\\deep\\c.bin", false);
+            FinalPaths(L"sub", true);
+            FindFiles();
+            DirectoryClasses();
+            NtDirectoryNames();
+            CurrentDirectory();
+            MemoryMap();
+            RelativeNtOpen();
+            OverlappedRead();
+            Errors();
+        }
+
+    private:
+        std::wstring Path(const std::wstring& relative) const
+        {
+            return relative.empty() ? _root : _root + L"\\" + relative;
+        }
+
+        void Line(const std::wstring& step, const std::wstring& text) const { _out.Line(step, text); }
+
+        HANDLE Open(const std::wstring& path, bool directory, DWORD flags = 0) const
+        {
+            return CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                OPEN_EXISTING, (directory ? FILE_FLAG_BACKUP_SEMANTICS : 0) | flags, nullptr);
+        }
+
+        std::wstring HashHandle(HANDLE handle) const
+        {
+            BYTE buffer[16384];
+            unsigned long long hash = 14695981039346656037ull;
+            unsigned long long total = 0;
+            DWORD read = 0;
+            while (ReadFile(handle, buffer, sizeof(buffer), &read, nullptr) && read > 0)
+            {
+                hash = Fnv1a(buffer, read, hash);
+                total += read;
+            }
+            return L"size=" + Num(static_cast<long long>(total)) + L" fnv=" + Hex(hash);
+        }
+
+        void Attributes() const
+        {
+            for (const wchar_t* relative : { L"", L"a.txt", L"sub", L"empty", L"ro.txt", L"missing.txt", L"missing\\x.txt",
+                     L"SUB\\..\\A.TXT", L"sub\\deep\\c.bin" })
+            {
+                const DWORD attributes = GetFileAttributesW(Path(relative).c_str());
+                Line(L"GetFileAttributes", Path(relative) + L" -> "
+                    + (attributes == INVALID_FILE_ATTRIBUTES ? Error(GetLastError()) : Hex(attributes)));
+
+                WIN32_FILE_ATTRIBUTE_DATA data{};
+                if (GetFileAttributesExW(Path(relative).c_str(), GetFileExInfoStandard, &data))
+                {
+                    Line(L"GetFileAttributesEx", Path(relative) + L" -> attr=" + Hex(data.dwFileAttributes)
+                        + L" size=" + Num((static_cast<long long>(data.nFileSizeHigh) << 32) | data.nFileSizeLow)
+                        + L" created=" + Time(data.ftCreationTime) + L" written=" + Time(data.ftLastWriteTime));
+                }
+                else
+                {
+                    Line(L"GetFileAttributesEx", Path(relative) + L" -> " + Error(GetLastError()));
+                }
+            }
+        }
+
+        void ReadContents() const
+        {
+            for (const wchar_t* relative : { L"a.txt", L"sub\\b.txt", L"sub\\deep\\c.bin", L"ro.txt", UnicodeName, L"SUB\\..\\A.TXT" })
+            {
+                Handle file(Open(Path(relative), false));
+                Line(L"ReadFile", Path(relative) + L" -> " + (file.IsValid() ? HashHandle(file.Get()) : Error(GetLastError())));
+            }
+            // Win32 long-path prefix goes through the same NT path.
+            Handle prefixed(Open(L"\\\\?\\" + Path(L"a.txt"), false));
+            Line(L"ReadFile.prefixed", prefixed.IsValid() ? HashHandle(prefixed.Get()) : Error(GetLastError()));
+        }
+
+        void HandleInformation(const std::wstring& relative, bool directory) const
+        {
+            Handle file(Open(Path(relative), directory));
+            const std::wstring step = L"Handle[" + relative + L"]";
+            if (!file.IsValid())
+            {
+                Line(step, Error(GetLastError()));
+                return;
+            }
+            BY_HANDLE_FILE_INFORMATION info{};
+            if (GetFileInformationByHandle(file.Get(), &info))
+            {
+                Line(step + L".ByHandle", L"attr=" + Hex(info.dwFileAttributes) + L" size="
+                    + Num((static_cast<long long>(info.nFileSizeHigh) << 32) | info.nFileSizeLow)
+                    + L" links=" + Num(info.nNumberOfLinks) + L" index=" + Hex((static_cast<unsigned long long>(info.nFileIndexHigh) << 32) | info.nFileIndexLow)
+                    + L" serial=" + Hex(info.dwVolumeSerialNumber) + L" created=" + Time(info.ftCreationTime)
+                    + L" written=" + Time(info.ftLastWriteTime));
+            }
+            else
+            {
+                Line(step + L".ByHandle", Error(GetLastError()));
+            }
+
+            FILE_BASIC_INFO basic{};
+            Line(step + L".Basic", GetFileInformationByHandleEx(file.Get(), FileBasicInfo, &basic, sizeof(basic))
+                ? L"attr=" + Hex(basic.FileAttributes) + L" created=" + Time(basic.CreationTime) + L" written="
+                    + Time(basic.LastWriteTime) + L" changed=" + Time(basic.ChangeTime)
+                : Error(GetLastError()));
+
+            FILE_STANDARD_INFO standard{};
+            Line(step + L".Standard", GetFileInformationByHandleEx(file.Get(), FileStandardInfo, &standard, sizeof(standard))
+                ? L"eof=" + Num(standard.EndOfFile.QuadPart) + L" alloc=" + Num(standard.AllocationSize.QuadPart) + L" links="
+                    + Num(standard.NumberOfLinks) + L" dir=" + Num(standard.Directory) + L" delete=" + Num(standard.DeletePending)
+                : Error(GetLastError()));
+
+            FILE_ATTRIBUTE_TAG_INFO tag{};
+            Line(step + L".AttributeTag", GetFileInformationByHandleEx(file.Get(), FileAttributeTagInfo, &tag, sizeof(tag))
+                ? L"attr=" + Hex(tag.FileAttributes) + L" tag=" + Hex(tag.ReparseTag)
+                : Error(GetLastError()));
+
+            FILE_ID_INFO id{};
+            if (GetFileInformationByHandleEx(file.Get(), FileIdInfo, &id, sizeof(id)))
+            {
+                unsigned long long low = 0;
+                memcpy(&low, id.FileId.Identifier, sizeof(low));
+                Line(step + L".Id", L"serial=" + Hex(id.VolumeSerialNumber) + L" id=" + Hex(low));
+            }
+            else
+            {
+                Line(step + L".Id", Error(GetLastError()));
+            }
+
+            alignas(8) BYTE nameBuffer[4096];
+            auto* name = reinterpret_cast<FILE_NAME_INFO*>(nameBuffer);
+            Line(step + L".Name", GetFileInformationByHandleEx(file.Get(), FileNameInfo, name, sizeof(nameBuffer))
+                ? std::wstring(name->FileName, name->FileNameLength / sizeof(wchar_t))
+                : Error(GetLastError()));
+
+            wchar_t fsName[MAX_PATH] = {};
+            DWORD serial = 0;
+            DWORD maxComponent = 0;
+            DWORD fsFlags = 0;
+            Line(step + L".Volume", GetVolumeInformationByHandleW(file.Get(), nullptr, 0, &serial, &maxComponent, &fsFlags, fsName, MAX_PATH)
+                ? L"serial=" + Hex(serial) + L" max=" + Num(maxComponent) + L" flags=" + Hex(fsFlags) + L" fs=" + fsName
+                : Error(GetLastError()));
+        }
+
+        void NameQueries(const std::wstring& relative) const
+        {
+            Handle file(Open(Path(relative), false));
+            const std::wstring step = L"NtName[" + relative + L"]";
+            if (!file.IsValid())
+            {
+                Line(step, Error(GetLastError()));
+                return;
+            }
+            alignas(8) BYTE buffer[8192];
+            for (const ULONG cls : { FileNameInformationClass, FileNormalizedNameInformationClass, FileAllInformationClass })
+            {
+                IO_STATUS_BLOCK io{};
+                const NTSTATUS status = _ntQueryInformationFile(file.Get(), &io, buffer, sizeof(buffer), cls);
+                const ULONG offset = cls == FileAllInformationClass ? FileAllInfoNameOffset : 0;
+                const ULONG nameLength = *reinterpret_cast<const ULONG*>(buffer + offset);
+                const auto* nameText = reinterpret_cast<const wchar_t*>(buffer + offset + sizeof(ULONG));
+                Line(step + L".class" + Num(cls), Status(status) + (NT_SUCCESS(status)
+                    ? L" info=" + Num(static_cast<long long>(io.Information) - nameLength) + L" name=" + std::wstring(nameText, nameLength / sizeof(wchar_t))
+                    : L""));
+            }
+            // Small buffer: STATUS_BUFFER_OVERFLOW with the full length (reported relative to the root length).
+            alignas(8) BYTE small[12] = {};
+            IO_STATUS_BLOCK io{};
+            const NTSTATUS status = _ntQueryInformationFile(file.Get(), &io, small, sizeof(small), FileNameInformationClass);
+            const ULONG fullLength = *reinterpret_cast<const ULONG*>(small);
+            Line(step + L".small", Status(status) + L" info=" + Num(static_cast<long long>(io.Information)) + L" lengthBeyondRoot="
+                + Num(static_cast<long long>(fullLength / sizeof(wchar_t)) - static_cast<long long>(_out.RootNoDriveLength())));
+        }
+
+        void FinalPaths(const std::wstring& relative, bool directory) const
+        {
+            Handle file(Open(Path(relative), directory));
+            const std::wstring step = L"FinalPath[" + relative + L"]";
+            if (!file.IsValid())
+            {
+                Line(step, Error(GetLastError()));
+                return;
+            }
+            const struct { const wchar_t* Name; DWORD Flags; } kinds[] = {
+                { L"dos", FILE_NAME_NORMALIZED | VOLUME_NAME_DOS },
+                { L"opened", FILE_NAME_OPENED | VOLUME_NAME_DOS },
+                { L"none", FILE_NAME_NORMALIZED | VOLUME_NAME_NONE },
+                { L"nt", FILE_NAME_NORMALIZED | VOLUME_NAME_NT },
+                { L"guid", FILE_NAME_NORMALIZED | VOLUME_NAME_GUID },
+            };
+            for (const auto& kind : kinds)
+            {
+                wchar_t path[1024];
+                const DWORD length = GetFinalPathNameByHandleW(file.Get(), path, 1024, kind.Flags);
+                Line(step + L"." + kind.Name, length == 0 || length >= 1024 ? Error(GetLastError()) : std::wstring(path, length));
+            }
+            wchar_t tiny[4];
+            const DWORD required = GetFinalPathNameByHandleW(file.Get(), tiny, 4, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+            Line(step + L".required", L"beyondRoot=" + Num(static_cast<long long>(required) - static_cast<long long>(_out.RootLength())));
+        }
+
+        void FindFiles() const
+        {
+            for (const wchar_t* pattern : { L"*", L"sub\\*.txt", L"sub\\*", L"sub", L"a.txt", L"empty\\*", L"*.none", L"missing\\*" })
+            {
+                WIN32_FIND_DATAW data{};
+                const HANDLE find = FindFirstFileExW(Path(pattern).c_str(), FindExInfoBasic, &data, FindExSearchNameMatch, nullptr,
+                    FIND_FIRST_EX_LARGE_FETCH);
+                const std::wstring step = L"FindFile[" + std::wstring(pattern) + L"]";
+                if (find == INVALID_HANDLE_VALUE)
+                {
+                    Line(step, Error(GetLastError()));
+                    continue;
+                }
+                std::vector<std::wstring> entries;
+                do
+                {
+                    entries.push_back(std::wstring(data.cFileName) + L" attr=" + Hex(data.dwFileAttributes) + L" size="
+                        + Num((static_cast<long long>(data.nFileSizeHigh) << 32) | data.nFileSizeLow)
+                        + L" written=" + Time(data.ftLastWriteTime));
+                } while (FindNextFileW(find, &data));
+                const DWORD endError = GetLastError();
+                FindClose(find);
+                std::sort(entries.begin(), entries.end());
+                for (const std::wstring& entry : entries)
+                {
+                    Line(step, entry);
+                }
+                Line(step + L".end", Error(endError));
+            }
+        }
+
+        template <typename TEntry>
+        void EnumerateClass(const wchar_t* name, FILE_INFO_BY_HANDLE_CLASS restartClass, FILE_INFO_BY_HANDLE_CLASS nextClass,
+            const std::wstring& relative) const
+        {
+            Handle directory(Open(Path(relative), true));
+            const std::wstring step = std::wstring(L"DirClass.") + name + L"[" + relative + L"]";
+            if (!directory.IsValid())
+            {
+                Line(step, Error(GetLastError()));
+                return;
+            }
+            alignas(8) BYTE buffer[65536];
+            std::vector<std::wstring> entries;
+            FILE_INFO_BY_HANDLE_CLASS cls = restartClass;
+            while (GetFileInformationByHandleEx(directory.Get(), cls, buffer, sizeof(buffer)))
+            {
+                cls = nextClass;
+                auto* entry = reinterpret_cast<const TEntry*>(buffer);
+                while (true)
+                {
+                    entries.push_back(std::wstring(entry->FileName, entry->FileNameLength / sizeof(wchar_t)) + L" attr="
+                        + Hex(entry->FileAttributes) + L" eof=" + Num(entry->EndOfFile.QuadPart) + L" created="
+                        + Time(entry->CreationTime) + L" written=" + Time(entry->LastWriteTime));
+                    if (entry->NextEntryOffset == 0)
+                    {
+                        break;
+                    }
+                    entry = reinterpret_cast<const TEntry*>(reinterpret_cast<const BYTE*>(entry) + entry->NextEntryOffset);
+                }
+            }
+            const DWORD endError = GetLastError();
+            std::sort(entries.begin(), entries.end());
+            for (const std::wstring& entry : entries)
+            {
+                Line(step, entry);
+            }
+            Line(step + L".end", Error(endError));
+        }
+
+        void DirectoryClasses() const
+        {
+            for (const wchar_t* relative : { L"", L"sub" })
+            {
+                EnumerateClass<FILE_ID_BOTH_DIR_INFO>(L"IdBoth", FileIdBothDirectoryRestartInfo, FileIdBothDirectoryInfo, relative);
+                EnumerateClass<FILE_FULL_DIR_INFO>(L"Full", FileFullDirectoryRestartInfo, FileFullDirectoryInfo, relative);
+                EnumerateClass<FILE_ID_EXTD_DIR_INFO>(L"IdExtd", FileIdExtdDirectoryRestartInfo, FileIdExtdDirectoryInfo, relative);
+            }
+        }
+
+        void NtDirectoryNames() const
+        {
+            Handle directory(Open(Path(L""), true));
+            if (!directory.IsValid())
+            {
+                Line(L"NtQueryDirectoryFile", Error(GetLastError()));
+                return;
+            }
+            UNICODE_STRING mask{};
+            RtlInitUnicodeString(&mask, L"*.txt");
+            alignas(8) BYTE buffer[8192];
+            std::vector<std::wstring> names;
+            BOOLEAN restart = TRUE;
+            NTSTATUS status;
+            while (true)
+            {
+                IO_STATUS_BLOCK io{};
+                status = _ntQueryDirectoryFile(directory.Get(), nullptr, nullptr, nullptr, &io, buffer, sizeof(buffer),
+                    FileNamesInformationClass, FALSE, restart ? &mask : nullptr, restart);
+                restart = FALSE;
+                if (!NT_SUCCESS(status))
+                {
+                    break;
+                }
+                const BYTE* entry = buffer;
+                while (true)
+                {
+                    const ULONG next = *reinterpret_cast<const ULONG*>(entry);
+                    const ULONG length = *reinterpret_cast<const ULONG*>(entry + 8);
+                    names.emplace_back(reinterpret_cast<const wchar_t*>(entry + 12), length / sizeof(wchar_t));
+                    if (next == 0)
+                    {
+                        break;
+                    }
+                    entry += next;
+                }
+            }
+            std::sort(names.begin(), names.end());
+            for (const std::wstring& name : names)
+            {
+                Line(L"NtQueryDirectoryFile.Names", name);
+            }
+            Line(L"NtQueryDirectoryFile.end", Status(status));
+        }
+
+        void CurrentDirectory() const
+        {
+            wchar_t saved[MAX_PATH];
+            GetCurrentDirectoryW(MAX_PATH, saved);
+            if (!SetCurrentDirectoryW(_root.c_str()))
+            {
+                Line(L"SetCurrentDirectory", Error(GetLastError()));
+                return;
+            }
+            wchar_t current[MAX_PATH];
+            GetCurrentDirectoryW(MAX_PATH, current);
+            Line(L"GetCurrentDirectory", current);
+            Handle file(Open(L"sub\\b.txt", false));
+            Line(L"Cwd.ReadFile", file.IsValid() ? HashHandle(file.Get()) : Error(GetLastError()));
+            const DWORD attributes = GetFileAttributesW(L"a.txt");
+            Line(L"Cwd.GetFileAttributes", attributes == INVALID_FILE_ATTRIBUTES ? Error(GetLastError()) : Hex(attributes));
+            wchar_t full[MAX_PATH];
+            GetFullPathNameW(L"sub\\..\\a.txt", MAX_PATH, full, nullptr);
+            Line(L"Cwd.GetFullPathName", full);
+            SetCurrentDirectoryW(L"sub");
+            Handle nested(Open(L"deep\\c.bin", false));
+            Line(L"Cwd.Nested.ReadFile", nested.IsValid() ? HashHandle(nested.Get()) : Error(GetLastError()));
+            SetCurrentDirectoryW(saved);
+        }
+
+        void MemoryMap() const
+        {
+            Handle file(Open(Path(L"sub\\deep\\c.bin"), false));
+            if (!file.IsValid())
+            {
+                Line(L"MapViewOfFile", Error(GetLastError()));
+                return;
+            }
+            Handle mapping(CreateFileMappingW(file.Get(), nullptr, PAGE_READONLY, 0, 0, nullptr));
+            if (!mapping.IsValid())
+            {
+                Line(L"MapViewOfFile", Error(GetLastError()));
+                return;
+            }
+            LARGE_INTEGER size{};
+            GetFileSizeEx(file.Get(), &size);
+            const void* view = MapViewOfFile(mapping.Get(), FILE_MAP_READ, 0, 0, 0);
+            if (view == nullptr)
+            {
+                Line(L"MapViewOfFile", Error(GetLastError()));
+                return;
+            }
+            Line(L"MapViewOfFile", L"size=" + Num(size.QuadPart) + L" fnv="
+                + Hex(Fnv1a(static_cast<const BYTE*>(view), static_cast<size_t>(size.QuadPart))));
+            UnmapViewOfFile(view);
+        }
+
+        void RelativeNtOpen() const
+        {
+            Handle directory(Open(Path(L"sub"), true));
+            if (!directory.IsValid())
+            {
+                Line(L"NtOpenFile.relative", Error(GetLastError()));
+                return;
+            }
+            UNICODE_STRING name{};
+            RtlInitUnicodeString(&name, L"b.txt");
+            OBJECT_ATTRIBUTES attributes{};
+            InitializeObjectAttributes(&attributes, &name, OBJ_CASE_INSENSITIVE, directory.Get(), nullptr);
+            IO_STATUS_BLOCK io{};
+            HANDLE raw = nullptr;
+            NTSTATUS status = _ntOpenFile(&raw, FILE_GENERIC_READ, &attributes, &io, FILE_SHARE_READ,
+                FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE);
+            Handle file(NT_SUCCESS(status) ? raw : INVALID_HANDLE_VALUE);
+            Line(L"NtOpenFile.relative", Status(status) + (file.IsValid() ? L" " + HashHandle(file.Get()) : L""));
+            if (file.IsValid())
+            {
+                alignas(8) BYTE buffer[4096];
+                IO_STATUS_BLOCK nameIo{};
+                status = _ntQueryInformationFile(file.Get(), &nameIo, buffer, sizeof(buffer), FileNameInformationClass);
+                Line(L"NtOpenFile.relative.name", Status(status) + (NT_SUCCESS(status)
+                    ? L" " + std::wstring(reinterpret_cast<const wchar_t*>(buffer + 4), *reinterpret_cast<const ULONG*>(buffer) / sizeof(wchar_t))
+                    : L""));
+            }
+
+            RtlInitUnicodeString(&name, L"deep\\c.bin");
+            InitializeObjectAttributes(&attributes, &name, OBJ_CASE_INSENSITIVE, directory.Get(), nullptr);
+            raw = nullptr;
+            status = _ntCreateFile(&raw, FILE_GENERIC_READ, &attributes, &io, nullptr, 0, FILE_SHARE_READ, FILE_OPEN,
+                FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE, nullptr, 0);
+            Handle deep(NT_SUCCESS(status) ? raw : INVALID_HANDLE_VALUE);
+            Line(L"NtCreateFile.relative", Status(status) + L" info=" + Num(static_cast<long long>(io.Information))
+                + (deep.IsValid() ? L" " + HashHandle(deep.Get()) : L""));
+
+            RtlInitUnicodeString(&name, L"missing.txt");
+            InitializeObjectAttributes(&attributes, &name, OBJ_CASE_INSENSITIVE, directory.Get(), nullptr);
+            raw = nullptr;
+            status = _ntOpenFile(&raw, FILE_GENERIC_READ, &attributes, &io, FILE_SHARE_READ, FILE_SYNCHRONOUS_IO_NONALERT);
+            Handle missing(NT_SUCCESS(status) ? raw : INVALID_HANDLE_VALUE);
+            Line(L"NtOpenFile.relative.missing", Status(status));
+
+            // Absolute NT path.
+            const std::wstring ntPath = L"\\??\\" + Path(L"a.txt");
+            RtlInitUnicodeString(&name, ntPath.c_str());
+            InitializeObjectAttributes(&attributes, &name, OBJ_CASE_INSENSITIVE, nullptr, nullptr);
+            raw = nullptr;
+            status = _ntOpenFile(&raw, FILE_GENERIC_READ, &attributes, &io, FILE_SHARE_READ,
+                FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE);
+            Handle absolute(NT_SUCCESS(status) ? raw : INVALID_HANDLE_VALUE);
+            Line(L"NtOpenFile.absolute", Status(status) + (absolute.IsValid() ? L" " + HashHandle(absolute.Get()) : L""));
+        }
+
+        void OverlappedRead() const
+        {
+            Handle file(Open(Path(L"sub\\deep\\c.bin"), false, FILE_FLAG_OVERLAPPED));
+            if (!file.IsValid())
+            {
+                Line(L"OverlappedRead", Error(GetLastError()));
+                return;
+            }
+            Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+            std::vector<BYTE> buffer(4096);
+            OVERLAPPED overlapped{};
+            overlapped.Offset = 1000;
+            overlapped.hEvent = event.Get();
+            DWORD read = 0;
+            if (!ReadFile(file.Get(), buffer.data(), static_cast<DWORD>(buffer.size()), nullptr, &overlapped)
+                && GetLastError() != ERROR_IO_PENDING)
+            {
+                Line(L"OverlappedRead", Error(GetLastError()));
+                return;
+            }
+            Line(L"OverlappedRead", GetOverlappedResult(file.Get(), &overlapped, &read, TRUE)
+                ? L"read=" + Num(read) + L" fnv=" + Hex(Fnv1a(buffer.data(), read))
+                : Error(GetLastError()));
+        }
+
+        void Errors() const
+        {
+            for (const wchar_t* relative : { L"missing.txt", L"missing\\x.txt", L"a.txt\\x" })
+            {
+                Handle file(Open(Path(relative), false));
+                Line(L"OpenError[" + std::wstring(relative) + L"]", file.IsValid() ? L"opened" : Error(GetLastError()));
+            }
+            // Directory opened without FILE_FLAG_BACKUP_SEMANTICS.
+            Handle directory(Open(Path(L"sub"), false));
+            Line(L"OpenError[sub-as-file]", directory.IsValid() ? L"opened" : Error(GetLastError()));
+            // Create must not succeed on an existing file.
+            Handle created(CreateFileW(Path(L"a.txt").c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, CREATE_NEW, 0, nullptr));
+            Line(L"OpenError[create-new-existing]", created.IsValid() ? L"opened" : Error(GetLastError()));
+        }
+
+        std::wstring _root;
+        const ProbeOutput& _out;
+        NtQueryInformationFileFn _ntQueryInformationFile;
+        NtOpenFileFn _ntOpenFile;
+        NtCreateFileFn _ntCreateFile;
+        NtQueryDirectoryFileFn _ntQueryDirectoryFile;
+    };
+}
+
+int wmain(int argc, wchar_t** argv)
+{
+    if (argc != 2)
+    {
+        std::fputs("Usage: ProcBridge.NativeProbe <root>\n", stderr);
+        return 2;
+    }
+    wchar_t full[MAX_PATH];
+    const DWORD length = GetFullPathNameW(argv[1], MAX_PATH, full, nullptr);
+    if (length == 0 || length >= MAX_PATH)
+    {
+        std::fputs("ProcBridge.NativeProbe: invalid root\n", stderr);
+        return 2;
+    }
+    std::wstring root(full, length);
+    while (root.size() > 3 && root.back() == L'\\')
+    {
+        root.pop_back();
+    }
+    const ProbeOutput output(root);
+    Probe probe(root, output);
+    probe.Run();
     return 0;
 }
