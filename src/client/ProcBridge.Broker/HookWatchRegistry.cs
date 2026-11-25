@@ -112,7 +112,7 @@ public sealed class HookWatchRegistry : IDisposable
         do
             id = (uint)Interlocked.Increment(ref _nextId);
         while (id == 0);
-        OwnerSignal signal = _signals.GetOrAdd(owner, static _ => new OwnerSignal());
+        OwnerSignal signal = GetSignal(owner);
         _watches[id] = new Watch(owner, remoteDirectory, subtree, signal);
         // A WaitAnyChanges of the owner in progress returns empty, so the next poll covers the new watch too.
         signal.Set();
@@ -158,10 +158,10 @@ public sealed class HookWatchRegistry : IDisposable
     /// </summary>
     public async Task<HookWaitAnyChangesReply> WaitAnyAsync(long owner, TimeSpan timeout, CancellationToken cancellationToken)
     {
-        OwnerSignal signal = _signals.GetOrAdd(owner, static _ => new OwnerSignal());
+        OwnerSignal signal = GetSignal(owner);
         // Taken before the scan: a change that arrives after the scan completes it, so nothing is missed.
         Task woken = signal.Reset();
-        List<HookWatchChanges> ready = Collect(owner);
+        List<HookWatchChanges> ready = Collect(owner, signal);
         if (ready.Count == 0 && timeout != TimeSpan.Zero)
         {
             try
@@ -171,19 +171,41 @@ public sealed class HookWatchRegistry : IDisposable
             catch (TimeoutException)
             {
             }
-            ready = Collect(owner);
+            ready = Collect(owner, signal);
         }
         return new HookWaitAnyChangesReply { Watches = ready };
     }
 
-    private List<HookWatchChanges> Collect(long owner)
+    /// <summary>
+    /// The signal of a connected owner (kept until its last connection closes); an owner with no connection gets a
+    /// throwaway one, so a call from a process that already went away leaves nothing behind.
+    /// </summary>
+    private OwnerSignal GetSignal(long owner)
+    {
+        lock (_connectionsLock)
+            return _connections.ContainsKey(owner) ? _signals.GetOrAdd(owner, static _ => new OwnerSignal()) : new OwnerSignal();
+    }
+
+    /// <summary>Owners with a stored signal; tests check that nothing is left for owners that are gone.</summary>
+    internal int SignalCount => _signals.Count;
+
+    /// <summary>
+    /// Drains the ready watches of <paramref name="owner"/> into one reply, round robin: the scan starts after the
+    /// last watch the previous reply carried, so a watch that always has changes cannot keep the others out.
+    /// </summary>
+    private List<HookWatchChanges> Collect(long owner, OwnerSignal signal)
     {
         var ready = new List<HookWatchChanges>();
         int budget = _anyReplyBudget;
-        foreach (KeyValuePair<uint, Watch> pair in _watches)
+        KeyValuePair<uint, Watch>[] owned = _watches.Where(x => x.Value.Owner == owner).OrderBy(x => x.Key).ToArray();
+        int start = Array.FindIndex(owned, x => x.Key > signal.LastCollected);
+        if (start < 0)
+            start = 0;
+        for (int n = 0; n < owned.Length; n++)
         {
+            KeyValuePair<uint, Watch> pair = owned[(start + n) % owned.Length];
             Watch watch = pair.Value;
-            if (watch.Owner != owner || !watch.HasData || ready.Count == ushort.MaxValue)
+            if (!watch.HasData || ready.Count == ushort.MaxValue)
                 continue;
             if (budget < HookWatchChanges.FixedSize + MinChangeSize)
                 break;
@@ -194,6 +216,7 @@ public sealed class HookWatchRegistry : IDisposable
             if (drained.Changes.Count == 0 && !drained.Overflow)
                 continue;
             ready.Add(new HookWatchChanges(pair.Key, drained.Changes, drained.Overflow));
+            signal.LastCollected = pair.Key;
             budget -= HookWatchChanges.FixedSize + drained.Changes.Sum(x => x.EncodedSize);
         }
         return ready;
@@ -249,6 +272,9 @@ public sealed class HookWatchRegistry : IDisposable
     {
         private readonly object _lock = new();
         private TaskCompletionSource _woken = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>Id of the last watch a reply carried (one poll at a time per owner, so no lock).</summary>
+        public uint LastCollected { get; set; }
 
         public void Set()
         {

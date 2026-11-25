@@ -316,6 +316,63 @@ public sealed class BrokerWatchTests
     }
 
     [TestMethod]
+    public async Task WaitAny_BusyWatch_DoesNotKeepOtherWatchesOut()
+    {
+        using var share = new TempFolder("bwatch");
+        Directory.CreateDirectory(share.Combine(@"proj\a"));
+        Directory.CreateDirectory(share.Combine(@"proj\b"));
+        using var cacheDir = new TempFolder("cache");
+        await using AgentServer server = StartAgent(share);
+        await using AgentClient client = CreateClient(server.Port);
+        var cache = new FileCache(client, cacheDir.Path, LongTtl);
+        await using ChangeWatcher watcher = client.CreateWatcher(TimeSpan.FromMilliseconds(200));
+        cache.AttachWatcher(watcher);
+        watcher.Start();
+        await watcher.WaitActiveAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.Delay(300); // the subscription's rescan must not overflow the watches below
+        // Room for about two changes per reply.
+        using var registry = new HookWatchRegistry(cache, replyBudget: 60);
+        registry.Attach(1);
+        uint busy = registry.Add(1, "proj/a", subtree: false);
+        uint quiet = registry.Add(1, "proj/b", subtree: false);
+        int before = registry.DispatchedCount;
+
+        for (int i = 0; i < 30; i++)
+            share.WriteFile($@"proj\a\f{i:00}.txt", [1]);
+        share.WriteFile(@"proj\b\only.txt", [1]);
+        DateTime deadline = DateTime.UtcNow.AddSeconds(10);
+        while (DateTime.UtcNow < deadline && registry.DispatchedCount == before)
+            await Task.Delay(20);
+        await Task.Delay(500); // let the remaining notifications land
+
+        var carried = new List<uint>();
+        for (int poll = 0; poll < 3; poll++)
+            carried.AddRange((await registry.WaitAnyAsync(1, TimeSpan.FromSeconds(1), CancellationToken.None)).Watches.Select(x => x.WatchId));
+        Assert.Contains(busy, carried);
+        Assert.Contains(quiet, carried, "The quiet watch waited behind the busy one.");
+    }
+
+    [TestMethod]
+    public async Task WaitAny_FromOwnerWithoutConnection_LeavesNoSignalBehind()
+    {
+        using var share = new TempFolder("bwatch");
+        using var cacheDir = new TempFolder("cache");
+        await using AgentServer server = StartAgent(share);
+        await using AgentClient client = CreateClient(server.Port);
+        var cache = new FileCache(client, cacheDir.Path, LongTtl);
+        using var registry = new HookWatchRegistry(cache);
+
+        await registry.WaitAnyAsync(42, TimeSpan.Zero, CancellationToken.None);
+        Assert.AreEqual(0, registry.SignalCount);
+
+        registry.Attach(7);
+        await registry.WaitAnyAsync(7, TimeSpan.Zero, CancellationToken.None);
+        Assert.AreEqual(1, registry.SignalCount);
+        registry.Detach(7);
+        Assert.AreEqual(0, registry.SignalCount);
+    }
+
+    [TestMethod]
     public async Task HookWatch_ChangeTooBigForOneReply_BecomesOverflow()
     {
         using var share = new TempFolder("bwatch");
