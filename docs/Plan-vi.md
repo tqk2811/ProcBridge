@@ -323,6 +323,23 @@ Broker kết nối TCP thẳng tới Agent (cổng cấu hình được). Tìm A
 - Lớp mã hoá này giống nhau ở LAN và internet, nên Relay chỉ là một đường ống. Ở LAN không cần TLS
   riêng.
 
+Đã chốt ở M5 (thư viện `ProcBridge.Crypto`, chưa gắn transport):
+
+- Khoá định danh là **X25519** (cũng là khoá tĩnh Noise), qua NSec (libsodium). Vân tay: SHA-256 có
+  nhãn, 20 byte đầu, base32 chia 8 nhóm 4 ký tự. File khoá bọc DPAPI (CurrentUser), ghi nguyên tử.
+- **Tự cài Noise** `Noise_XX_25519_ChaChaPoly_SHA256` (ghép cặp) và `Noise_IK_25519_ChaChaPoly_SHA256`
+  (phiên sau ghép cặp) trên NSec X25519 + ChaCha20-Poly1305/HMAC-SHA256 của .NET, kiểm bằng vector
+  cacophony. Lý do: gói Noise.NET duy nhất trên NuGet ngừng bảo trì từ 2018.
+- Một phiên nhiều kết nối: mỗi kết nối là một kênh có id (initiator số chẵn, responder số lẻ, mỗi id
+  dùng một lần), khoá kênh = HKDF(khoá chiều, salt = handshake hash, info = id), nên không bao giờ
+  trùng cặp khoá/nonce giữa các kết nối.
+- Khung: `[counter 8 byte][ciphertext][tag 16 byte]`, AD gồm counter + id kênh + header rõ của tầng
+  trên. Bên nhận chỉ nhận đúng counter kế tiếp (chống phát lại/đảo thứ tự, vì TCP/WebSocket có thứ tự).
+  Rekey kiểu Noise REKEY mỗi 2^20 khung, hai bên tự làm theo counter.
+- Ghép cặp: chạy trong phiên XX, kiểu commit-rồi-reveal (A cam kết nonce, B gửi nonce, A lộ nonce),
+  mã 6 chữ số = SHA-256(h, Na, Nb). Kẻ đứng giữa chỉ có 1/10^6 cơ hội mỗi lần thử. A nhập mã một lần;
+  B vẫn cần người dùng bấm chấp nhận sau khi A báo thành công, vì kênh người dùng chỉ đi một chiều B→A.
+
 ```mermaid
 sequenceDiagram
     participant BR as Broker (A)
