@@ -435,6 +435,37 @@ người dùng cần nó để chọn thư mục máy B trước khi mở phiên
   (`src/tests/ProcBridge.Tests/Native`). Notepad **chưa kiểm**: Notepad trên Windows 11 là app packaged,
   `notepad.exe` chỉ kích hoạt app nằm ngoài cây process (giới hạn đã nêu ở mục 1).
 
+### 13.2 Kết quả M2 (2026-11-25)
+
+- Hook nói chuyện với Broker qua `\\.\pipe\ProcBridge-<phiên>` (định dạng `ProcBridge/HookIpc.h`): pool instance
+  có khoá (mỗi lời gọi lấy một instance rảnh hoặc mở mới), chế độ message, `TransactNamedPipe` overlapped có
+  thời hạn (`PROCBRIDGE_IPC_TIMEOUT_MS`, mặc định 60 s; quá hạn trả `STATUS_IO_TIMEOUT`). Mỗi instance mới được
+  kiểm `GetNamedPipeServerProcessId` khớp PID Broker (`PROCBRIDGE_BROKER_PID`), mở với
+  `SECURITY_IDENTIFICATION`; sai PID thì khởi động hook thất bại. Mã `0xE000000x` còn sót cũng bị đổi sang mã chuẩn.
+- `BrokerResolver` (cùng giao diện `IPathResolver` với `PathMapper` của M1): lúc khởi động gửi `Hello`, rồi
+  `Resolve` từng gốc ảo để biết thư mục cache tương ứng; so tiền tố và viết lại tên vẫn cục bộ như M1 nhờ cache
+  giữ đúng đường dẫn tương đối. Mở file gọi `Resolve` với quyền/disposition/option thật của lời gọi (Broker từ chối
+  ghi bằng `STATUS_MEDIA_WRITE_PROTECTED`, `FILE_CREATE` trên tên đã có thì `STATUS_OBJECT_NAME_COLLISION`).
+  `NtQueryAttributesFile`/`NtQueryFullAttributesFile` và các class metadata của `NtQueryInformationByName` dùng
+  `Stat`, không tải file.
+- `RemoteHandleTable`: handle mở qua đường dẫn ảo giữ metadata của máy B; các class Basic, Standard, Internal,
+  All, NetworkOpen, AttributeTag, Id, Stat của `NtQueryInformationFile` báo thời gian, thuộc tính, dung lượng cấp
+  phát và file ID của máy B thay cho bản cache. Handle thư mục (thư mục giữ chỗ rỗng) được dựng kết quả
+  `NtQueryDirectoryFile[Ex]` từ các trang `List` (`.` và `..` thêm ở đầu): class Directory, Full, Both, Names,
+  IdBoth, IdFull, IdExtd, IdExtdBoth, Id64Extd(Both), IdAllExtd(Both); pattern (`RtlIsNameInExpression`), restart
+  scan, single entry, `STATUS_NO_SUCH_FILE`/`STATUS_NO_MORE_FILES`. Tên tương đối với handle thư mục ảo (thư mục
+  hiện hành) được ghép thành đường dẫn ảo đầy đủ rồi `Resolve`.
+- Agent đọc file ID, change time và dung lượng cấp phát thật (`GetFileInformationByHandleEx`, một lượt quét
+  `FileIdBothDirectoryInfo` cho mỗi `List`); `FsEntry` thêm `AllocationSize`.
+- Cấu hình hook: `PROCBRIDGE_SESSION` (+ `PROCBRIDGE_BROKER_PID`) thắng `PROCBRIDGE_MAP`; `ProcBridge.Spawn --broker
+  <phiên> <pid>`. Launcher C# (`ProcBridge.Launcher --agent --share --map ... -- <lệnh>`) sinh id phiên bằng
+  `HookIpcProtocol.NewSessionId`, host `BrokerHost`, chạy Spawn, dừng Broker khi process đích thoát.
+- Kiểm (`src/tests/ProcBridge.Tests/Native/RemoteHookTests.cs`, Agent trên loopback): `NativeProbe` thật và qua
+  Agent giống từng dòng (x64 và Win32), `cmd type`, `dir /s`, `cd` vào thư mục ảo, .NET Framework `ReadAllText`,
+  ghi bị từ chối, pipe của process khác bị từ chối, Broker im lặng thì lời gọi trả lỗi sau thời hạn. `NativeProbe`
+  không in thời gian của mục `..` và mở file kiểm đổi tên bằng một file tạm ngoài gốc (cần quyền `DELETE`, share
+  chỉ đọc từ chối). Bộ test M1 (`PROCBRIDGE_MAP`) vẫn xanh.
+
 ---
 
 ## 14. Duyệt tài nguyên máy B (Remote Explorer)

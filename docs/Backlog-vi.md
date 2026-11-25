@@ -60,43 +60,43 @@ Ghi 2026-11-25.
 cấp lại qua `NtDuplicateObject` (không bị hook) có thể dùng tên cũ. Gộp vào việc theo dõi
 `NtDuplicateObject` ở mục "Handle nhân bản". Ghi 2026-11-25.
 
-## [Cao] Ghép Hook.dll với Broker (phần còn lại của M2)
+## [Vừa] Gộp nhánh M2 với nhánh M4 (cây process)
 
-Phần C# của M2 (Protocol, Agent, Broker, IPC) đã xong; Hook vẫn dùng `PathMapper` cục bộ của M1. Cần:
+`feature/m2-integration` sửa `FileHooks.cpp`, `PathMapper.h` (thêm `Resolve`/`Stat`/`List` vào `IPathResolver`),
+`dllmain.cpp`, `ProcBridge.Spawn` (`--broker`) và `NativeProbe`; nhánh M4 cũng sửa các file này (bảng handle,
+hook process). Khi gộp: `RedirectedAttributes` nay nhận `OpenIntent*`, `TrackOpenedHandle` gọi thêm
+`TrackRemoteHandle`, `NtClose` dọn cả `g_remoteHandles`. Process con của M4 cần nhận cùng biến
+`PROCBRIDGE_SESSION`/`PROCBRIDGE_BROKER_PID` và chuyển các mục của `RemoteHandleTable` khi kế thừa handle.
 
-- Client named pipe trong Hook theo `src/shared/ProcBridge.HookIpc/native/ProcBridge/HookIpc.h`: mở
-  `\\.\pipe\ProcBridge-<phiên>`, đặt `PIPE_READMODE_MESSAGE`, mỗi thread một instance (hoặc pool nhỏ), gửi
-  `Hello` lúc khởi động để lấy danh sách thư mục ảo; đọc trường sau chuỗi bằng `memcpy` (không căn lề).
-- Cài `IPathResolver` dựa vào Broker: `FindMapping` vẫn so tiền tố cục bộ (từ `HelloReply`), `TranslateToReal`
-  gọi `Resolve` rồi đổi `CachePath` (DOS) sang `\??\...`. `NtQueryAttributesFile`/`NtQueryFullAttributesFile`
-  dùng `Stat`; `NtQueryDirectoryFile[Ex]` dựng kết quả từ các trang `List` thay vì đọc thư mục giữ chỗ.
-- Trả nguyên `Status` của reply làm NTSTATUS cho hàm bị hook; Broker không trả lời trong hạn thì trả
-  `STATUS_IO_TIMEOUT` (plan 4.6). Mã riêng của ProcBridge (`0xE000000x`) đổi sang mã chuẩn gần nhất trước khi
-  trả cho process.
-- Truyền tên phiên/pipe cho Hook (biến môi trường như `PROCBRIDGE_MAP` của M1, hoặc qua Launcher).
-- Đưa `HookIpc.h` vào build native (include path của `ProcBridge.Hook`); hiện mới compile thử bằng tay với
-  MSVC x86.
-- Chạy lại bộ test so sánh M1 với thư mục ảo trỏ sang Agent trên loopback (điều kiện xong M2).
+## [Vừa] Liệt kê thư mục ảo trên handle bất đồng bộ
 
-## [Cao] Hook kiểm tra server của pipe trước khi tin nó
+Hook `NtQueryDirectoryFile[Ex]` trả kết quả ngay (không `STATUS_PENDING`), chỉ báo `Event`; `ApcRoutine` và
+completion port gắn với handle không được dùng. Process mở thư mục bằng `FILE_FLAG_OVERLAPPED` rồi đợi qua
+IOCP sẽ không nhận được gói hoàn tất. Bỏ qua `SL_INDEX_SPECIFIED`; `FileIndex` luôn 0, không có tên 8.3
+(`ShortName` rỗng); class khác các class phổ biến trả `STATUS_INVALID_INFO_CLASS`.
 
-Tên pipe là `ProcBridge-<phiên>`; Broker đã tạo instance đầu bằng `FILE_FLAG_FIRST_PIPE_INSTANCE` và sinh id phiên
-ngẫu nhiên (`HookIpcProtocol.NewSessionId`), nhưng Hook (C++) vẫn phải chắc là đang nói chuyện với đúng Broker. Sau
-khi mở pipe (và trước khi gửi `Hello`) gọi `GetNamedPipeServerProcessId` và so với PID của Broker mà Launcher truyền
-qua (cùng nơi truyền tên pipe); không khớp thì đóng pipe và coi như không có thư mục ảo. Cũng nên mở pipe với
-`SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION` để server giả không mượn được token của process.
+## [Vừa] Đường dẫn ảo từ xa: các ca chưa hỗ trợ
 
-## [Cao] Host Broker trong Launcher
+- Luồng dữ liệu phụ (`a.txt:stream`, `<gốc>:stream`) gửi nguyên sang Broker nên luôn "không tìm thấy".
+- `NtQueryInformationByName` với class ngoài Basic/Standard/NetworkOpen/AttributeTag/Stat phải tải trọn
+  file vào cache để hỏi bản cache.
+- Thư mục cha của gốc ảo không có trên máy B: mục `..` khi liệt kê gốc ảo lặp lại thông tin của chính gốc.
+- Volume (serial, cờ, tên hệ thống file) vẫn là của volume chứa cache; `FileIdInformation` chỉ có 64 bit thấp
+  (file index của máy B), chưa đúng với ReFS.
 
-`ProcBridge.Broker` là thư viện (`BrokerHost.Start`). Launcher cần nhận cấu hình (địa chỉ Agent, cổng, tên chia
-sẻ, danh sách thư mục ảo ↔ thư mục máy B), sinh id phiên bằng `HookIpcProtocol.NewSessionId()` (không dùng id đoán được), khởi động `BrokerHost` trước khi tạo process cha và
-dừng nó khi Job Object báo cả cây đã thoát.
+## [Vừa] Thời hạn IPC cho file lớn
 
-## [Vừa] FileId và ChangeTime thật từ Agent
+Hook chờ Broker tối đa `PROCBRIDGE_IPC_TIMEOUT_MS` (mặc định 60 giây) cho mọi request, kể cả `Resolve` phải tải
+trọn file. File lớn qua mạng chậm sẽ quá hạn (`STATUS_IO_TIMEOUT`) dù Broker vẫn đang tải. Cần thời hạn riêng
+cho tải, hoặc Broker trả "đang tải" để Hook chờ tiếp.
 
-`FsEntry.FileId` đang là 0 và `ChangeTime` lấy bằng `LastWriteTime`. Cần mở handle (kể cả thư mục, cờ
-`FILE_FLAG_BACKUP_SEMANTICS`) và gọi `GetFileInformationByHandleEx` (`FileBasicInfo`, `FileIdInfo`) ở `Stat`;
-với `List` thì cân nhắc `NtQueryDirectoryFile` với `FileIdBothDirectoryInformation` để khỏi mở từng file.
+## [Vừa] Launcher chưa đủ cho người dùng
+
+- `ProcBridge.Spawn`/`ProcBridge.Hook` chưa được đóng gói cạnh Launcher (mặc định tìm trong thư mục của Launcher,
+  `--spawn` để chỉ chỗ khác); chưa đọc cấu hình từ file.
+- Chỉ đợi process đích; process con sống lâu hơn nó mất Broker (đợi cả cây bằng Job Object là M4).
+- Broker hay Agent không kết nối được lúc khởi động thì Spawn báo `hook initialization failed` và không chạy
+  process đích; chưa có thông báo dễ hiểu hơn.
 
 ## [Vừa] Điều khiển luồng bằng cửa sổ tín dụng
 
@@ -129,5 +129,6 @@ kết nối; chỉ chạy trong LAN tin cậy.
 
 ## [Thấp] Review độc lập cho M2
 
-Đợt M2 (phần C#) do một subagent làm, không được tạo subagent review nên chưa có lượt review độc lập
-(READ-ONLY) cho Protocol/Agent/Broker/HookIpc. Nên review trước khi merge vào `master`.
+Đợt M2 (phần C# và phần ghép Hook ↔ Broker) do subagent làm, không được tạo subagent review nên chưa có lượt
+review độc lập (READ-ONLY) cho Protocol/Agent/Broker/HookIpc và `BrokerClient`/`BrokerResolver`/`RemoteHandles`
+của Hook. Nên review trước khi merge vào `master`.
