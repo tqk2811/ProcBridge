@@ -10,19 +10,51 @@ namespace ProcBridge::Hook
 {
     namespace
     {
+        // Slot::State holds the kind in its low two bits and a generation in the rest. Every return to free bumps the
+        // generation, so a sender that claimed the slot before it was reclaimed (suspended past StuckSlotMs) fails its
+        // compare-exchange to ready instead of publishing into a slot that is free again or claimed by another sender.
         constexpr LONG SlotFree = 0;
         constexpr LONG SlotWriting = 1;
         constexpr LONG SlotReady = 2;
         constexpr LONG SlotTaking = 3; // the receiver is copying or freeing it
+        constexpr LONG SlotKindMask = 3;
+        constexpr LONG SlotGenerationStep = 4;
+
+        constexpr LONG SlotKind(LONG state) noexcept
+        {
+            return state & SlotKindMask;
+        }
+
+        constexpr LONG SlotWithKind(LONG state, LONG kind) noexcept
+        {
+            return (state & ~SlotKindMask) | kind;
+        }
+
+        /// The free state of the next generation (wraps around; only equality matters).
+        constexpr LONG SlotNextFree(LONG state) noexcept
+        {
+            return static_cast<LONG>(static_cast<ULONG>(state & ~SlotKindMask) + SlotGenerationStep);
+        }
 
         constexpr uint32_t InboxMagic = 0x58424950; // "PIBX"
-        constexpr uint32_t InboxVersion = 2;
+        constexpr uint32_t InboxVersion = 3; // 3: generation in Slot::State
         // A sender writes a slot in microseconds; one still writing after this long belongs to a dead sender.
         constexpr ULONGLONG StuckSlotMs = 5000;
 
         void InboxName(DWORD processId, wchar_t (&name)[64]) noexcept
         {
             swprintf_s(name, L"Local\\ProcBridge-HandleInbox-%lu", processId);
+        }
+
+        /// Debug output for a duplicate the receiver will not track (the copy itself still works, only untracked).
+        void LogSendFailure(const wchar_t* reason, DWORD processId, DWORD error) noexcept
+        {
+            wchar_t message[256];
+            if (swprintf_s(message, L"ProcBridge.Hook: handle inbox of process %lu not used: %s (error %lu)\n",
+                processId, reason, error) > 0)
+            {
+                OutputDebugStringW(message);
+            }
         }
 
         uint64_t CreationTime(HANDLE process) noexcept
@@ -149,18 +181,19 @@ namespace ProcBridge::Hook
     {
         Slot& slot = view->Slots[index];
         const LONG state = ReadAcquire(&slot.State);
-        if (state == SlotWriting)
+        const LONG taking = SlotWithKind(state, SlotTaking);
+        if (SlotKind(state) == SlotWriting)
         {
             const ULONGLONG claimed = slot.Claimed;
             if (claimed != 0 && GetTickCount64() - claimed > StuckSlotMs
-                && InterlockedCompareExchange(&slot.State, SlotTaking, SlotWriting) == SlotWriting)
+                && InterlockedCompareExchange(&slot.State, taking, state) == state)
             {
                 slot.Claimed = 0;
-                InterlockedExchange(&slot.State, SlotFree);
+                InterlockedExchange(&slot.State, SlotNextFree(state));
             }
             return false;
         }
-        if (state != SlotReady || InterlockedCompareExchange(&slot.State, SlotTaking, SlotReady) != SlotReady)
+        if (SlotKind(state) != SlotReady || InterlockedCompareExchange(&slot.State, taking, state) != state)
         {
             return false;
         }
@@ -170,7 +203,7 @@ namespace ProcBridge::Hook
         entry.RootHash = slot.RootHash;
         entry.RangeId = slot.RangeId;
         slot.Claimed = 0;
-        InterlockedExchange(&slot.State, SlotFree);
+        InterlockedExchange(&slot.State, SlotNextFree(state));
         return true;
     }
 
@@ -181,6 +214,7 @@ namespace ProcBridge::Hook
         const uint64_t created = CreationTime(targetProcess);
         if (processId == 0 || created == 0)
         {
+            LogSendFailure(L"cannot query the target process", processId, GetLastError());
             return false;
         }
         wchar_t name[64];
@@ -188,16 +222,28 @@ namespace ProcBridge::Hook
         const HANDLE section = OpenFileMappingW(FILE_MAP_WRITE | FILE_MAP_READ, FALSE, name);
         if (section == nullptr)
         {
+            // Not found: no inbox (not hooked, or its name was squatted). Access denied: integrity label, AppContainer.
+            LogSendFailure(L"cannot open the inbox", processId, GetLastError());
             return false;
         }
         auto* view = static_cast<Header*>(MapViewOfFile(section, FILE_MAP_WRITE | FILE_MAP_READ, 0, 0, sizeof(Header)));
         bool sent = false;
-        if (view != nullptr && view->Magic == InboxMagic && view->Version == InboxVersion && view->OwnerCreationTime == created)
+        if (view == nullptr)
+        {
+            LogSendFailure(L"cannot map the inbox", processId, GetLastError());
+        }
+        else if (view->Magic != InboxMagic || view->Version != InboxVersion || view->OwnerCreationTime != created)
+        {
+            LogSendFailure(L"inbox of another version or an earlier process with the same id", processId, ERROR_SUCCESS);
+        }
+        else
         {
             for (ULONG i = 0; i < SlotCount && !sent; ++i)
             {
                 Slot& slot = view->Slots[i];
-                if (InterlockedCompareExchange(&slot.State, SlotWriting, SlotFree) != SlotFree)
+                const LONG state = ReadAcquire(&slot.State);
+                const LONG writing = SlotWithKind(state, SlotWriting);
+                if (SlotKind(state) != SlotFree || InterlockedCompareExchange(&slot.State, writing, state) != state)
                 {
                     continue;
                 }
@@ -207,9 +253,18 @@ namespace ProcBridge::Hook
                 slot.Mapping = entry.Mapping;
                 slot.RootHash = entry.RootHash;
                 slot.RangeId = entry.RangeId;
-                InterlockedExchange(&slot.State, SlotReady);
+                // Fails when the receiver reclaimed the slot while this thread was suspended: the fields written above
+                // may then mix with another sender's, which is harmless as the receiver verifies each entry anyway.
+                if (InterlockedCompareExchange(&slot.State, SlotWithKind(state, SlotReady), writing) != writing)
+                {
+                    continue;
+                }
                 InterlockedIncrement(&view->Sequence);
                 sent = true;
+            }
+            if (!sent)
+            {
+                LogSendFailure(L"inbox full", processId, ERROR_SUCCESS);
             }
         }
         if (view != nullptr)

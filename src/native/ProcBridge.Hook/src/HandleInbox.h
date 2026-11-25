@@ -22,7 +22,8 @@ namespace ProcBridge::Hook
     /// process's own integrity level (no write up). A name that already exists (squatted, or left by a dead process with
     /// the same id) turns the feature off for the process. The header carries the owner's creation time, so a sender never
     /// writes into the section of an earlier process with the same id. Slots stuck in writing (sender died) are reclaimed
-    /// after a timeout. The section is never unmapped: hooks may drain it until the process ends.
+    /// after a timeout; each slot carries a generation next to its state, so a sender that wakes after its slot was
+    /// reclaimed cannot publish into it. The section is never unmapped: hooks may drain it until the process ends.
     class HandleInbox final
     {
     public:
@@ -45,6 +46,10 @@ namespace ProcBridge::Hook
             {
                 return;
             }
+            // Only taking the slots runs under the lock; adopt may call the Broker (Stat), so it runs after the lock is
+            // released. Each entry is taken by exactly one caller, so a concurrent Drain cannot adopt it twice.
+            DuplicatedHandle taken[SlotCount];
+            ULONG count = 0;
             AcquireSRWLockExclusive(&_lock);
             const LONG sequence = ReadSequence(view);
             if (sequence != _seen)
@@ -52,14 +57,17 @@ namespace ProcBridge::Hook
                 _seen = sequence;
                 for (ULONG i = 0; i < SlotCount; ++i)
                 {
-                    DuplicatedHandle entry;
-                    if (Take(view, i, entry))
+                    if (Take(view, i, taken[count]))
                     {
-                        adopt(static_cast<const DuplicatedHandle&>(entry));
+                        ++count;
                     }
                 }
             }
             ReleaseSRWLockExclusive(&_lock);
+            for (ULONG i = 0; i < count; ++i)
+            {
+                adopt(static_cast<const DuplicatedHandle&>(taken[i]));
+            }
         }
 
         /// Writes entry into the inbox of targetProcess. False when that process has no inbox, its inbox belongs to an
