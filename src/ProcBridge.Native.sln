@@ -7,6 +7,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "ProcBridge.Hook", "native\P
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "ProcBridge.Inject", "native\ProcBridge.Inject\ProcBridge.Inject.vcxproj", "{FF3F52D5-0A28-5C8C-B0F4-F8F5CE92E50A}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "ProcBridge.Spawn", "native\ProcBridge.Spawn\ProcBridge.Spawn.vcxproj", "{BE43E6E8-61FC-4387-83C9-5E76CB6FCFA7}"
+EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "ProcBridge.NativeProbe", "native\tests\ProcBridge.NativeProbe\ProcBridge.NativeProbe.vcxproj", "{FC5E314D-BC7E-5AA4-9783-C4EA41341762}"
 EndProject
 Global
@@ -41,6 +43,14 @@ Global
 		{FC5E314D-BC7E-5AA4-9783-C4EA41341762}.Release|x64.Build.0 = Release|x64
 		{FC5E314D-BC7E-5AA4-9783-C4EA41341762}.Release|x86.ActiveCfg = Release|Win32
 		{FC5E314D-BC7E-5AA4-9783-C4EA41341762}.Release|x86.Build.0 = Release|Win32
+		{BE43E6E8-61FC-4387-83C9-5E76CB6FCFA7}.Debug|x64.ActiveCfg = Debug|x64
+		{BE43E6E8-61FC-4387-83C9-5E76CB6FCFA7}.Debug|x64.Build.0 = Debug|x64
+		{BE43E6E8-61FC-4387-83C9-5E76CB6FCFA7}.Debug|x86.ActiveCfg = Debug|Win32
+		{BE43E6E8-61FC-4387-83C9-5E76CB6FCFA7}.Debug|x86.Build.0 = Debug|Win32
+		{BE43E6E8-61FC-4387-83C9-5E76CB6FCFA7}.Release|x64.ActiveCfg = Release|x64
+		{BE43E6E8-61FC-4387-83C9-5E76CB6FCFA7}.Release|x64.Build.0 = Release|x64
+		{BE43E6E8-61FC-4387-83C9-5E76CB6FCFA7}.Release|x86.ActiveCfg = Release|Win32
+		{BE43E6E8-61FC-4387-83C9-5E76CB6FCFA7}.Release|x86.Build.0 = Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
