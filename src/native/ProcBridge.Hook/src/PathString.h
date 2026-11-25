@@ -15,7 +15,7 @@ namespace ProcBridge::Hook
     bool ConcatString(UNICODE_STRING& value, const UNICODE_STRING& head, const wchar_t* tail, size_t tailBytes) noexcept;
 
     /// True when text starts with prefix (case-insensitive) on a path boundary: the next character
-    /// after prefix is '\' or the end of text.
+    /// after prefix is '\', ':' (alternate data stream of the prefix itself) or the end of text.
     bool HasPathPrefix(const wchar_t* text, size_t textBytes, const UNICODE_STRING& prefix) noexcept;
 
     /// Writes "to" + text[from.Length..] into destination when text has the path prefix "from".

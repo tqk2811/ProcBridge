@@ -61,7 +61,8 @@ namespace ProcBridge::Hook
                 return false;
             }
         }
-        return textBytes == prefix.Length || text[count] == L'\\';
+        // ':' starts a stream name of the prefix itself ("<root>:stream", "<root>::$INDEX_ALLOCATION").
+        return textBytes == prefix.Length || text[count] == L'\\' || text[count] == L':';
     }
 
     bool ReplacePathPrefix(const wchar_t* text, size_t textBytes, const UNICODE_STRING& from, const UNICODE_STRING& to,

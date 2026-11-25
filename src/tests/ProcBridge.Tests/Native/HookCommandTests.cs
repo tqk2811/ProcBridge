@@ -99,6 +99,21 @@ public sealed class HookCommandTests
     [TestMethod]
     [DataRow("x64")]
     [DataRow("Win32")]
+    public void CmdRedirect_ReadsAlternateStreamOfVirtualRoot(string platform)
+    {
+        // "<root>:stream" names a stream of the root folder itself, so ':' is a path boundary too.
+        using HookSandbox sandbox = new(platform);
+        File.WriteAllText(sandbox.RealRoot + ":notes.txt", "stream text\r\n");
+
+        ProcessResult result = sandbox.RunHooked($"cmd.exe /d /c \"more < \"{sandbox.VirtualRoot}:notes.txt\"\"");
+
+        Assert.AreEqual(0, result.ExitCode, result.StandardError);
+        Assert.AreEqual("stream text\r\n", result.StandardOutput);
+    }
+
+    [TestMethod]
+    [DataRow("x64")]
+    [DataRow("Win32")]
     public void PathOutsideVirtualFolder_IsNotRedirected(string platform)
     {
         using HookSandbox sandbox = new(platform);
