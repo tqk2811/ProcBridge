@@ -178,6 +178,14 @@ chờ đủ `RequestTimeout`. Nên có ping/keepalive và đánh dấu kết n�
 lúc khởi động có lẽ quá hạn khi máy CI chậm. Nên tách thời hạn khởi động khỏi thời hạn request, hoặc để test
 chỉ hạ thời hạn sau khi hook đã khởi động. Ghi 2026-11-25.
 
+## [Thấp] Probe_ThroughAgent_MatchesRealFolder chập chờn trên CI
+
+`Probe_ThroughAgent_MatchesRealFolder ("x64")` một lần trên CI (run 45626967765, chạy lại thì xanh) lệch ở dòng
+`GetFileAttributesEx` của thư mục `sub`: `written` của thư mục thật lớn hơn khoảng 0,5 ms so với bản qua Agent
+(bằng `created`). Nghi do NTFS cập nhật chậm giờ ghi trong mục của thư mục cha so với giờ đọc qua handle, nên hai
+đường đọc thấy hai giá trị khi test vừa tạo file trong `sub`. Nên so sánh `written` của thư mục có dung sai hoặc
+bỏ trường này khỏi phép so. Ghi 2026-11-25.
+
 ## [Thấp] Review độc lập cho M2
 
 Đợt M2 (phần C# và phần ghép Hook ↔ Broker) do subagent làm, không được tạo subagent review nên chưa có lượt
