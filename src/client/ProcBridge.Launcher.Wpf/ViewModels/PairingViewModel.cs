@@ -1,11 +1,13 @@
 using ProcBridge.Launcher.Wpf.Interfaces;
 using ProcBridge.Launcher.Wpf.Mvvm;
+using ProcBridge.Relay.Shared.Tunnel;
 using ProcBridge.Transport.Secure.Models;
 
 namespace ProcBridge.Launcher.Wpf.ViewModels;
 
 /// <summary>
-/// Pairing a new machine B (plan section 9): the user types the Agent address, compares fingerprints (this machine's
+/// Pairing a new machine B (plan section 9): the user types the Agent address, or (machine B only reachable through a
+/// relay) the relay URL and the 8-digit relay pairing code machine B shows; then compares fingerprints (this machine's
 /// is shown all along, the Agent's once the handshake ran) and types the 6 digit code machine B shows.
 /// </summary>
 public sealed class PairingViewModel : ObservableObject
@@ -19,6 +21,9 @@ public sealed class PairingViewModel : ObservableObject
     private string? _statusText;
     private bool _isBusy;
     private bool _isWaitingForCode;
+    private bool _useRelay;
+    private string _relayUrl = string.Empty;
+    private string _relayCode = string.Empty;
 
     public PairingViewModel(IPairedMachineRegistry registry)
     {
@@ -44,6 +49,27 @@ public sealed class PairingViewModel : ObservableObject
     {
         get => _address;
         set => SetProperty(ref _address, value);
+    }
+
+    /// <summary>Find machine B through a relay by its relay pairing code instead of a LAN address.</summary>
+    public bool UseRelay
+    {
+        get => _useRelay;
+        set => SetProperty(ref _useRelay, value);
+    }
+
+    /// <summary>Relay URL (<c>https://relay.example/</c>), used with <see cref="UseRelay"/>.</summary>
+    public string RelayUrl
+    {
+        get => _relayUrl;
+        set => SetProperty(ref _relayUrl, value);
+    }
+
+    /// <summary>The 8-digit relay pairing code machine B shows (<c>1234-5678</c>), used with <see cref="UseRelay"/>.</summary>
+    public string RelayCode
+    {
+        get => _relayCode;
+        set => SetProperty(ref _relayCode, value);
     }
 
     public string Code
@@ -90,20 +116,42 @@ public sealed class PairingViewModel : ObservableObject
 
     private async Task StartAsync()
     {
-        if (string.IsNullOrWhiteSpace(Address))
+        Func<CancellationToken, Task<PairedMachine>> pair;
+        string target;
+        if (UseRelay)
         {
-            StatusText = "Nhập địa chỉ máy B (host hoặc host:port).";
-            return;
+            if (!Uri.TryCreate(RelayUrl.Trim(), UriKind.Absolute, out Uri? relayUrl) || relayUrl.Scheme is not ("https" or "http"))
+            {
+                StatusText = "Nhập địa chỉ relay (vd https://relay.example.com/).";
+                return;
+            }
+            if (!RelayPairingCode.TryNormalize(RelayCode, out string relayCode))
+            {
+                StatusText = $"Mã ghép cặp qua relay gồm {RelayPairingCode.Length} chữ số (máy B hiển thị khi bật ghép cặp).";
+                return;
+            }
+            pair = token => _registry.PairThroughRelayAsync(relayUrl, relayCode, AskCodeAsync, token);
+            target = $"máy B qua relay {relayUrl.Host}";
         }
-        (string host, int port) = LauncherCommandLine.ParseAgent(Address.Trim());
+        else
+        {
+            if (string.IsNullOrWhiteSpace(Address))
+            {
+                StatusText = "Nhập địa chỉ máy B (host hoặc host:port).";
+                return;
+            }
+            (string host, int port) = LauncherCommandLine.ParseAgent(Address.Trim());
+            pair = token => _registry.PairAsync(host, port, AskCodeAsync, token);
+            target = $"{host}:{port}";
+        }
         AgentFingerprint = null;
         Code = string.Empty;
         IsBusy = true;
-        StatusText = $"Đang kết nối {host}:{port}…";
+        StatusText = $"Đang kết nối {target}…";
         _cancel = new CancellationTokenSource();
         try
         {
-            PairedMachine machine = await _registry.PairAsync(host, port, AskCodeAsync, _cancel.Token);
+            PairedMachine machine = await pair(_cancel.Token);
             StatusText = $"Đã ghép cặp với {machine.Name} ({machine.Fingerprint}). Máy B cần bấm chấp nhận nếu chưa.";
             Paired?.Invoke(machine);
         }

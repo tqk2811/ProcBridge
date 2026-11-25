@@ -14,7 +14,27 @@ internal sealed class TunnelControlChannel
     private readonly WebSocket _socket;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
 
+    private DateTime _slotWindowStart;
+    private int _slotRequests;
+
     public TunnelControlChannel(WebSocket socket) => _socket = socket;
+
+    /// <summary>
+    /// Counts one <c>pairingSlot</c> request in a one-minute fixed window; false once <paramref name="max"/> is reached.
+    /// Only the channel's own read loop calls it, so no lock.
+    /// </summary>
+    public bool TryCountSlotRequest(DateTime now, int max)
+    {
+        if (now - _slotWindowStart >= TimeSpan.FromMinutes(1))
+        {
+            _slotWindowStart = now;
+            _slotRequests = 0;
+        }
+        if (_slotRequests >= max)
+            return false;
+        _slotRequests++;
+        return true;
+    }
 
     /// <summary>
     /// Runs the Noise XX handshake as responder (the host is the initiator) and returns the host's static key, which
@@ -73,18 +93,37 @@ internal sealed class TunnelControlChannel
         }
     }
 
-    /// <summary>Reads (and ignores) incoming frames until the host closes; answers the close handshake.</summary>
-    public async Task RunAsync(CancellationToken cancellationToken)
+    /// <summary>Most bytes of one text message from the host: its messages are tiny JSON lines.</summary>
+    public const int MaxHostMessageBytes = 4096;
+
+    /// <summary>
+    /// Reads incoming frames until the host closes and answers the close handshake. Each whole text message goes to
+    /// <paramref name="onText"/> (binary frames are ignored); a message over <see cref="MaxHostMessageBytes"/> closes the
+    /// channel.
+    /// </summary>
+    public async Task RunAsync(Func<string, Task> onText, CancellationToken cancellationToken)
     {
-        var buffer = new byte[4096];
+        var buffer = new byte[MaxHostMessageBytes];
+        int length = 0;
         while (_socket.State == WebSocketState.Open)
         {
-            var result = await _socket.ReceiveAsync(buffer, cancellationToken);
+            if (length == buffer.Length)
+            {
+                await _socket.CloseOutputAsync(WebSocketCloseStatus.MessageTooBig, "control message too large", cancellationToken);
+                return;
+            }
+            var result = await _socket.ReceiveAsync(buffer.AsMemory(length), cancellationToken);
             if (result.MessageType == WebSocketMessageType.Close)
             {
                 await _socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, null, cancellationToken);
                 return;
             }
+            length += result.Count;
+            if (!result.EndOfMessage)
+                continue;
+            if (result.MessageType == WebSocketMessageType.Text)
+                await onText(Encoding.UTF8.GetString(buffer, 0, length));
+            length = 0;
         }
     }
 

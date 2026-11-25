@@ -8,6 +8,8 @@
 //        ProcBridge.NativeProbe.<arch>.exe --notify <watched> <real> (M7 change notifications, see NotifyScenario)
 //        ProcBridge.NativeProbe.<arch>.exe --notify-many <watched> <real> <count> (many watched handles, see NotifyMany)
 //        ProcBridge.NativeProbe.<arch>.exe --read-at|--map-hash|--load|--symbols|--lock|--lock-async ... (M8, see ReadAt and below)
+//        ProcBridge.NativeProbe.<arch>.exe --image [dll]            (started from a virtual folder, see ImageNames)
+//        ProcBridge.NativeProbe.<arch>.exe --image-wait <started> <go> | --run <command line>
 // Expected tree under <root> (created by the test): a.txt, sub\b.txt, sub\deep\c.bin, empty\,
 // ro.txt (read-only), unicode file name. Last access times are never printed (they drift), nor the times
 // of ".." entries (the parent of a virtual root is not part of the virtual folder).
@@ -2497,6 +2499,73 @@ namespace
         return 0;
     }
 
+    /// --image [dll] (run from a virtual folder): prints the file name of this image and of dbghelp.dll (a static import,
+    /// taken from next to the image when a copy lies there), then loads dll by bare name (searched next to the image)
+    /// and prints its file name.
+    int ImageNames(const wchar_t* dll)
+    {
+        wchar_t name[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, name, MAX_PATH);
+        WriteLine(L"image " + std::wstring(name));
+        name[0] = L'\0';
+        GetModuleFileNameW(GetModuleHandleW(L"dbghelp.dll"), name, MAX_PATH);
+        WriteLine(L"dbghelp " + std::wstring(name));
+        if (dll == nullptr)
+        {
+            return 0;
+        }
+        const HMODULE module = LoadLibraryW(dll);
+        if (module == nullptr)
+        {
+            WriteLine(L"dynamic: " + Error(GetLastError()));
+            return 1;
+        }
+        name[0] = L'\0';
+        GetModuleFileNameW(module, name, MAX_PATH);
+        WriteLine(L"dynamic " + std::wstring(name));
+        FreeLibrary(module);
+        return 0;
+    }
+
+    /// --image-wait <started> <go>: like --image, then creates the file started and waits (up to 60 s) for the file go,
+    /// so the image stays mapped while the test changes it on machine B.
+    int ImageWait(const wchar_t* started, const wchar_t* go)
+    {
+        const int result = ImageNames(nullptr);
+        const HANDLE marker = CreateFileW(started, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (marker != INVALID_HANDLE_VALUE)
+        {
+            CloseHandle(marker);
+        }
+        for (int i = 0; i < 1200 && GetFileAttributesW(go) == INVALID_FILE_ATTRIBUTES; ++i)
+        {
+            Sleep(50);
+        }
+        return result;
+    }
+
+    /// --run <command line>: CreateProcessW without an application name (the image is found as the shell would),
+    /// waits for it and returns its exit code (the child's output goes to the same console/pipes).
+    /// --run-image <image> <command line>: the same with an application name (no search before the creation).
+    int RunCommandLine(const wchar_t* image, const wchar_t* commandLine)
+    {
+        std::wstring text = commandLine;
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION info{};
+        if (!CreateProcessW(image, text.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &startup, &info))
+        {
+            WriteLine(L"run: " + Error(GetLastError()));
+            return 1;
+        }
+        WaitForSingleObject(info.hProcess, INFINITE);
+        DWORD code = 1;
+        GetExitCodeProcess(info.hProcess, &code);
+        CloseHandle(info.hThread);
+        CloseHandle(info.hProcess);
+        return static_cast<int>(code);
+    }
+
     /// --symbols <exe> (M8, debugging): DbgHelp loads the exe's pdb from the exe's folder (the CodeView path is
     /// ignored) and resolves wmain; prints the symbol type, the pdb DbgHelp read and the lookup result.
     int Symbols(const wchar_t* exe)
@@ -2738,6 +2807,22 @@ namespace
         if (command == L"--load" && argc == 3)
         {
             return LoadDll(argv[2]);
+        }
+        if (command == L"--image" && (argc == 2 || argc == 3))
+        {
+            return ImageNames(argc == 3 ? argv[2] : nullptr);
+        }
+        if (command == L"--image-wait" && argc == 4)
+        {
+            return ImageWait(argv[2], argv[3]);
+        }
+        if (command == L"--run" && argc == 3)
+        {
+            return RunCommandLine(nullptr, argv[2]);
+        }
+        if (command == L"--run-image" && argc == 4)
+        {
+            return RunCommandLine(argv[2], argv[3]);
         }
         if (command == L"--symbols" && argc == 3)
         {

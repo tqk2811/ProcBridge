@@ -63,8 +63,21 @@ Chạy cùng một kịch bản trên hai môi trường (thư mục thật và 
 Một kết nối WebSocket dữ liệu trong một phiên tunnel qua Relay. Mỗi phiên có nhiều lane song song; lane cùng
 số của máy A và máy B được Relay ghép cặp và chép nguyên khung giữa hai đầu.
 
+## Mã mời và chỗ ghép cặp (relay)
+
+Khi máy A chỉ thấy máy B qua Relay, máy B mở một **chỗ ghép cặp** (pairing slot) tạm trên Relay và hiện **mã mời**
+8 chữ số (`1234-5678`). Máy A nhập mã mời để Relay chỉ đường tới máy B; Relay chỉ nhận một khoá tra cứu dẫn xuất (hash)
+từ mã. Chỗ dùng một lần và hết hạn sau vài phút. Mã mời chỉ để tìm máy, không thay mã ghép cặp 6 số và việc so vân tay.
+
 ## HostId (relay)
 
 Tên máy B trên Relay: vân tay khoá định danh Noise của nó. Máy B chứng minh sở hữu khoá bằng một bắt tay Noise
 ngắn với Relay trên kênh điều khiển, nên không ai đăng ký được HostId của máy khác; máy A mở phiên theo HostId lấy
 từ máy đã ghép cặp.
+
+## Image và loader
+
+*Image* là file PE (exe, DLL) được ánh xạ vào bộ nhớ để chạy. *Loader* là phần của `ntdll` nạp image vào process:
+với exe, kernel mở và ánh xạ file ngay trong `NtCreateUserProcess`, rồi loader của process mới nạp các DLL mà exe
+import (tìm trước tiên trong thư mục của exe) và ghi tên mỗi module vào danh sách module của PEB, nơi
+`GetModuleFileName` đọc ra.

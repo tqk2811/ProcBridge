@@ -35,11 +35,28 @@
                 </DockPanel>
                 <GroupBox Grid.Column="2" Header="Ghép cặp máy B mới" DataContext="{Binding Machines.Pairing}" VerticalAlignment="Top">
                     <StackPanel Margin="8">
-                        <TextBlock Text="Địa chỉ máy B (host hoặc host:port):" />
-                        <DockPanel Margin="0,2,0,8">
-                            <Button DockPanel.Dock="Right" Content="Kết nối" Command="{Binding StartCommand}" Margin="6,0,0,0" />
-                            <TextBox Text="{Binding Address, UpdateSourceTrigger=PropertyChanged}" />
-                        </DockPanel>
+                        <CheckBox Content="Máy B chỉ thấy qua relay" IsChecked="{Binding UseRelay}" Margin="0,0,0,6"
+                                  ToolTip="Không cùng LAN và máy B không mở cổng: tìm máy B trên relay bằng mã ghép cặp qua relay (8 số) máy B hiển thị khi bật ghép cặp." />
+                        <StackPanel>
+                            <StackPanel.Style>
+                                <Style TargetType="StackPanel">
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding UseRelay}" Value="True">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </StackPanel.Style>
+                            <TextBlock Text="Địa chỉ máy B (host hoặc host:port):" />
+                            <TextBox Text="{Binding Address, UpdateSourceTrigger=PropertyChanged}" Margin="0,2,0,8" />
+                        </StackPanel>
+                        <StackPanel Visibility="{Binding UseRelay, Converter={StaticResource BoolToVisibility}}">
+                            <TextBlock Text="Địa chỉ relay:" />
+                            <TextBox Text="{Binding RelayUrl, UpdateSourceTrigger=PropertyChanged}" Margin="0,2,0,6" />
+                            <TextBlock Text="Mã ghép cặp qua relay (8 số máy B hiển thị):" />
+                            <TextBox Text="{Binding RelayCode, UpdateSourceTrigger=PropertyChanged}" MaxLength="9" FontFamily="Consolas" Margin="0,2,0,8" />
+                        </StackPanel>
+                        <Button Content="Kết nối" Command="{Binding StartCommand}" HorizontalAlignment="Right" Margin="0,0,0,8" />
                         <TextBlock TextWrapping="Wrap">
                             <Run Text="Vân tay máy này (đọc cho máy B so):" />
                             <LineBreak />

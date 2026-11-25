@@ -36,6 +36,49 @@ public sealed class MachinesTests
     }
 
     [TestMethod]
+    public async Task Pairing_ThroughTheRelay_SendsTheRelayCode_ThenTheSixDigitCode()
+    {
+        var registry = new FakeRegistry();
+        var machines = new MachinesViewModel(registry, new FakeDialogs());
+        PairingViewModel pairing = machines.Pairing;
+        pairing.UseRelay = true;
+        pairing.RelayUrl = "https://relay.example/";
+
+        pairing.RelayCode = "1234-567";
+        await pairing.StartCommand.ExecuteAsync();
+        Assert.IsFalse(pairing.IsBusy, "a relay code that is not 8 digits is not sent");
+        StringAssert.Contains(pairing.StatusText, "8");
+
+        pairing.RelayCode = "1234 5678";
+        Task started = pairing.StartCommand.ExecuteAsync();
+        Assert.IsTrue(pairing.IsWaitingForCode);
+        Assert.AreEqual(FakeRegistry.AgentFingerprint, pairing.AgentFingerprint);
+        pairing.Code = "123456";
+        pairing.ConfirmCodeCommand.Execute(null);
+        await started;
+
+        Assert.AreEqual(new Uri("https://relay.example/"), registry.LastRelayUrl);
+        Assert.AreEqual("12345678", registry.LastRelayCode);
+        Assert.IsNull(registry.LastHost, "the LAN address is not used");
+        Assert.AreEqual("B-relay", machines.Machines.Single().Name);
+    }
+
+    [TestMethod]
+    public async Task Pairing_ThroughTheRelay_NeedsAnHttpUrl()
+    {
+        var registry = new FakeRegistry();
+        var machines = new MachinesViewModel(registry, new FakeDialogs());
+        machines.Pairing.UseRelay = true;
+        machines.Pairing.RelayUrl = "relay.example";
+        machines.Pairing.RelayCode = "12345678";
+
+        await machines.Pairing.StartCommand.ExecuteAsync();
+
+        Assert.IsNull(registry.LastRelayUrl);
+        StringAssert.Contains(machines.Pairing.StatusText, "relay");
+    }
+
+    [TestMethod]
     public async Task Pairing_Cancel_StopsWaitingForTheCode()
     {
         var registry = new FakeRegistry();

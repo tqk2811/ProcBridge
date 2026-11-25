@@ -220,7 +220,7 @@ public sealed class RemotePurposeTests
     }
 
     /// <summary>Build output of ProcBridge.Launcher (same configuration as the tests).</summary>
-    private static string LauncherOutput()
+    internal static string LauncherOutput()
     {
         string configuration = AppContext.BaseDirectory.Contains($"{Path.DirectorySeparatorChar}Debug{Path.DirectorySeparatorChar}") ? "Debug" : "Release";
         for (DirectoryInfo? dir = new(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
@@ -232,7 +232,7 @@ public sealed class RemotePurposeTests
         throw new DirectoryNotFoundException("ProcBridge.Launcher build output not found.");
     }
 
-    private static void CopyFolder(string source, string target)
+    internal static void CopyFolder(string source, string target)
     {
         foreach (string file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
         {

@@ -1,5 +1,7 @@
 using ProcBridge.Crypto.Identity;
 using ProcBridge.Launcher.Wpf.Interfaces;
+using ProcBridge.Transport.Relay;
+using ProcBridge.Transport.Relay.Models;
 using ProcBridge.Transport.Secure;
 using ProcBridge.Transport.Secure.Models;
 
@@ -25,4 +27,10 @@ public sealed class PairedMachineRegistry : IPairedMachineRegistry
 
     public Task<PairedMachine> PairAsync(string host, int port, Func<string, CancellationToken, Task<string>> askCode, CancellationToken cancellationToken)
         => new PairingClient(_identity, _store).PairAsync(new TcpStreamConnector(host, port), askCode, cancellationToken);
+
+    public async Task<PairedMachine> PairThroughRelayAsync(Uri relayUrl, string relayCode, Func<string, CancellationToken, Task<string>> askCode, CancellationToken cancellationToken)
+    {
+        using var connector = new RelayPairingConnector(new RelayEndpoint(relayUrl), relayCode);
+        return await new PairingClient(_identity, _store).PairAsync(connector, askCode, cancellationToken);
+    }
 }

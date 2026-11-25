@@ -14,6 +14,8 @@
 // right away (its thread would have run before any registration anyway).
 #include "ProcessHooks.h"
 #include "HookGuard.h"
+#include "ImageRedirect.h"
+#include "PsAttributes.h"
 #include <MinHook.h>
 #include <algorithm>
 #include <atomic>
@@ -35,27 +37,6 @@ namespace ProcBridge::Hook
         constexpr ULONG ProcessCreateFlagsInheritHandles = 0x00000004;
         constexpr ULONG ThreadCreateFlagsCreateSuspended = 0x00000001;
 
-        // PS_ATTRIBUTE_LIST of NtCreateUserProcess (built by kernelbase from PROC_THREAD_ATTRIBUTE_*).
-        // The attribute number is the low 16 bits; the high bits are thread/input/additive flags.
-        constexpr ULONG_PTR PsAttributeNumberMask = 0x0000FFFF;
-        constexpr ULONG_PTR PsAttributeThreadFlag = 0x00010000;
-        constexpr ULONG_PTR PsAttributeParentProcess = 0; // PS_ATTRIBUTE_PARENT_PROCESS (0x60000)
-        constexpr ULONG_PTR PsAttributeHandleList = 11;   // PS_ATTRIBUTE_HANDLE_LIST (0x2000B)
-
-        struct PsAttribute
-        {
-            ULONG_PTR Attribute;
-            SIZE_T Size;
-            ULONG_PTR Value;
-            PSIZE_T ReturnLength;
-        };
-
-        struct PsAttributeList
-        {
-            SIZE_T TotalLength;
-            PsAttribute Attributes[1];
-        };
-
         constexpr DWORD InjectTimeoutMs = 30000;
         // A resume that finds another thread injecting the same child waits for it: the injection runs
         // two remote threads, each bounded by InjectTimeoutMs (the helper adds a little more).
@@ -71,6 +52,7 @@ namespace ProcBridge::Hook
         Inject::HookPaths g_hooks;
         std::wstring g_environment;
         const IHandleInheritance* g_inheritance = nullptr;
+        const IPathResolver* g_resolver = nullptr;
 
         class ExclusiveLock final
         {
@@ -298,27 +280,27 @@ namespace ProcBridge::Hook
             }
             __try
             {
-                const auto* list = static_cast<const PsAttributeList*>(attributeList);
+                const auto* list = static_cast<const Ps::AttributeList*>(attributeList);
                 const SIZE_T total = list->TotalLength;
-                if (total < offsetof(PsAttributeList, Attributes))
+                if (total < offsetof(Ps::AttributeList, Attributes))
                 {
                     return false;
                 }
-                const SIZE_T count = (total - offsetof(PsAttributeList, Attributes)) / sizeof(PsAttribute);
+                const SIZE_T count = (total - offsetof(Ps::AttributeList, Attributes)) / sizeof(Ps::Attribute);
                 for (SIZE_T i = 0; i < count; ++i)
                 {
-                    const PsAttribute& attribute = list->Attributes[i];
-                    if ((attribute.Attribute & PsAttributeThreadFlag) != 0)
+                    const Ps::Attribute& attribute = list->Attributes[i];
+                    if ((attribute.Attribute & Ps::AttributeThreadFlag) != 0)
                     {
                         continue;
                     }
-                    const ULONG_PTR number = attribute.Attribute & PsAttributeNumberMask;
-                    if (number == PsAttributeParentProcess)
+                    const ULONG_PTR number = attribute.Attribute & Ps::AttributeNumberMask;
+                    if (number == Ps::AttributeParentProcess)
                     {
                         result.HasParentProcess = true;
                         result.ParentProcess = reinterpret_cast<HANDLE>(attribute.Value);
                     }
-                    else if (number == PsAttributeHandleList)
+                    else if (number == Ps::AttributeHandleList)
                     {
                         result.HasHandleList = true;
                         result.HandleList = reinterpret_cast<const HANDLE*>(attribute.Value);
@@ -399,12 +381,16 @@ namespace ProcBridge::Hook
                     attributeList);
             }
             const bool callerSuspended = (threadFlags & ThreadCreateFlagsCreateSuspended) != 0;
+            // An image in a virtual folder is started from its backing copy (the kernel opens it unhooked).
+            ImageRedirect image(*g_resolver, attributeList, processParameters);
+            image.Prepare(); // on failure the original arguments go through unchanged
             const NTSTATUS status = g_ntCreateUserProcess(processHandle, threadHandle, processDesiredAccess, threadDesiredAccess,
                 processObjectAttributes, threadObjectAttributes, processFlags & ~ProcessCreateFlagsBreakaway,
-                threadFlags | ThreadCreateFlagsCreateSuspended, processParameters, createInfo, attributeList);
+                threadFlags | ThreadCreateFlagsCreateSuspended, processParameters, createInfo, image.AttributeList());
+            image.Restore();
             if (!NT_SUCCESS(status))
             {
-                return status;
+                return image.FinalStatus(status);
             }
             HANDLE process = nullptr;
             HANDLE thread = nullptr;
@@ -428,7 +414,7 @@ namespace ProcBridge::Hook
                 child->ThreadId = GetThreadId(thread);
                 std::vector<BYTE> extra;
                 const std::vector<Inject::InheritedHandle> inherited = CaptureInheritedHandles(processFlags, attributeList, extra);
-                child->InitBlock = Inject::BuildInitBlock(g_environment, inherited, extra);
+                child->InitBlock = Inject::BuildInitBlock(g_environment + image.ChildEnvironment(), inherited, extra);
             }
             catch (...)
             {
@@ -518,7 +504,7 @@ namespace ProcBridge::Hook
     }
 
     DWORD InstallProcessHooks(const Inject::HookPaths& hooks, const std::wstring& environment,
-        const IHandleInheritance& inheritance) noexcept
+        const IHandleInheritance& inheritance, const IPathResolver& resolver) noexcept
     {
         try
         {
@@ -530,6 +516,7 @@ namespace ProcBridge::Hook
             return ERROR_NOT_ENOUGH_MEMORY;
         }
         g_inheritance = &inheritance;
+        g_resolver = &resolver;
         const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
         if (ntdll == nullptr)
         {

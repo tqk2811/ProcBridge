@@ -13,4 +13,5 @@ public static class RelayErrors
     public const string TunnelLaneInvalid = "TUNNEL_LANE_INVALID";
     public const string TunnelLaneBusy = "TUNNEL_LANE_BUSY";
     public const string TooManyRequests = "TOO_MANY_REQUESTS";
+    public const string PairingSlotNotFound = "PAIRING_SLOT_NOT_FOUND";
 }

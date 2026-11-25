@@ -25,4 +25,10 @@ public sealed class TunnelController : ControllerBase, IRelayTunnelController
     [EnableRateLimiting(RelayRateLimitOptions.TunnelSessionPolicyName)]
     public Task<TunnelSessionVM> OpenSessionAsync([FromBody] OpenTunnelSessionRequestVM request, CancellationToken cancellationToken = default)
         => _sessions.OpenAsync(request.HostId, HttpContext.ClientAddress(), cancellationToken);
+
+    /// <summary>Finds the host whose pairing slot matches the lookup key (single use) and opens a session to it.</summary>
+    [HttpPost("pairing-sessions")]
+    [EnableRateLimiting(RelayRateLimitOptions.PairingPolicyName)]
+    public Task<TunnelPairingSessionVM> OpenPairingSessionAsync([FromBody] OpenPairingSessionRequestVM request, CancellationToken cancellationToken = default)
+        => _sessions.OpenPairingAsync(request.LookupKey, HttpContext.ClientAddress(), cancellationToken);
 }

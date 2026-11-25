@@ -549,6 +549,9 @@ public sealed class FileCache
                 ApplyMetadata(temp, entry);
                 if (IsPinned(remotePath) && File.Exists(localPath))
                     return new CachedItem(entry, localPath); // a writer opened it meanwhile: keep its copy
+                // The old copy may be mapped as an image (a process started from the virtual folder runs from it): it cannot
+                // be overwritten, but it can be renamed away, so the new copy takes the name and the running process keeps the old.
+                RemoveLocal(localPath);
                 if (File.Exists(localPath))
                     File.SetAttributes(localPath, FileAttributes.Normal);
                 File.Move(temp, localPath, overwrite: true);

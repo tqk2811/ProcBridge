@@ -15,6 +15,7 @@ public static class LauncherCommandLine
         @"                           [--relay <url>]" + "\n" +
         @"                           -- <program> [arguments]" + "\n" +
         @"       ProcBridge.Launcher --pair --agent <host>[:port] [--data <dir>]" + "\n" +
+        @"       ProcBridge.Launcher --pair --relay <url> [--code <relay pairing code>] [--data <dir>]" + "\n" +
         @"       ProcBridge.Launcher --list-paired [--data <dir>] | --revoke <fingerprint> [--data <dir>]" + "\n" +
         @"  <remote dir> is relative to the share, '/' separated ("""" for the share root)." + "\n" +
         @"  The Agent must be paired first (--pair); --plaintext talks to an unencrypted Agent (development only)." + "\n" +
@@ -22,7 +23,9 @@ public static class LauncherCommandLine
         @"  --write-through sends every write to machine B at once (default: on close or flush)." + "\n" +
         @"  --conflict: when machine B changed a file meanwhile, keep both (default) or let this machine win." + "\n" +
         @"  --relay reaches the Agent through a relay instead of --agent (which is then not needed); --agent-fingerprint" + "\n" +
-        @"  picks the paired Agent, whose fingerprint is also its HostId on the relay (no relay account).";
+        @"  picks the paired Agent, whose fingerprint is also its HostId on the relay (no relay account)." + "\n" +
+        @"  --pair --relay finds the Agent by the 8-digit relay pairing code it shows (asked when --code is missing), then" + "\n" +
+        @"  pairs as on the LAN: compare fingerprints and type the 6-digit code.";
 
     /// <summary>Throws <see cref="ArgumentException"/> with a message for the user when the line is wrong.</summary>
     public static LauncherOptions Parse(IReadOnlyList<string> args)

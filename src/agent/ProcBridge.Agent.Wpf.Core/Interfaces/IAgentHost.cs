@@ -25,6 +25,13 @@ public interface IAgentHost : IAsyncDisposable
     /// <summary>State of the relay link while running: null without relay, else a short text for the status bar.</summary>
     string? RelayState { get; }
 
+    /// <summary>
+    /// Invite code machines A type to pair through the relay (<c>1234-5678</c>) while running with a relay and
+    /// <see cref="AllowPairing"/> on; null otherwise or until the relay opened the slot. It changes after each use and
+    /// expiry, so poll it with <see cref="RelayState"/>.
+    /// </summary>
+    string? RelayPairingCode { get; }
+
     /// <param name="relay">Also serve through this relay (plan 8.2); null for the LAN only.</param>
     /// <exception cref="InvalidOperationException">Already running.</exception>
     /// <exception cref="DirectoryNotFoundException">A share folder does not exist.</exception>

@@ -36,4 +36,29 @@ public static class TunnelProtocol
 
     /// <summary>Control message type pushed to the host when a client lane waits for the host end of that lane.</summary>
     public const string LaneRequestedMessage = "laneRequested";
+
+    /// <summary>
+    /// Control message type sent BY the host: open (or replace) its pairing slot under a lookup key derived from the
+    /// pairing invite code (<see cref="RelayPairingCode.DeriveLookupKey"/>). One slot per host; it lives
+    /// <c>Relay:Tunnel:PairingSlotLifetime</c>, is single use and dies with the control channel.
+    /// </summary>
+    public const string PairingSlotMessage = "pairingSlot";
+
+    /// <summary>Control message type sent by the host: close its pairing slot (pairing turned off).</summary>
+    public const string PairingSlotCancelMessage = "pairingSlotCancel";
+
+    /// <summary>Control message type pushed to the host when its slot is open, with the lookup key and the expiry.</summary>
+    public const string PairingSlotRegisteredMessage = "pairingSlotRegistered";
+
+    /// <summary>
+    /// Control message type pushed to the host when the slot was refused (malformed key, or another host holds the same
+    /// key): the host picks a new code.
+    /// </summary>
+    public const string PairingSlotRejectedMessage = "pairingSlotRejected";
+
+    /// <summary>
+    /// Control message type pushed to the host when a client used its slot: the slot is gone (single use) and a pairing
+    /// session was opened to the host (its <see cref="SessionOpenedMessage"/> comes first).
+    /// </summary>
+    public const string PairingSlotClaimedMessage = "pairingSlotClaimed";
 }

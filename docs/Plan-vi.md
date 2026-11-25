@@ -172,7 +172,7 @@ Hook ở tầng Win32 thì hở nhiều đường đi vòng nên không chọn.
 | Tên handle | `NtQueryObject` (`ObjectNameInformation`), `NtQueryInformationFile` (`FileNameInformation`, `FileNormalizedNameInformation`) | Để `GetFinalPathNameByHandle` trả đường dẫn ảo chứ không lộ đường dẫn cache |
 | Volume | `NtQueryVolumeInformationFile` | Tên ổ, serial, hệ thống file, dung lượng trống của thư mục ảo |
 | Khoá | `NtLockFile`, `NtUnlockFile` | Chuyển sang máy B ở mốc sau; ban đầu khoá cục bộ trên file cache |
-| Tạo process | `NtCreateUserProcess` | Mục 5 |
+| Tạo process | `NtCreateUserProcess` | Mục 5; exe nằm trong thư mục ảo chạy từ bản sao (mục 13.7) |
 
 ### 4.3 Nhận diện đường dẫn ảo
 
@@ -339,8 +339,14 @@ Broker kết nối TCP thẳng tới Agent (cổng cấu hình được). Tìm A
   - Cấu hình chỉ còn URL relay: Agent console `--relay <url>`, app WPF của Agent có ô relay; Launcher console
     `--relay <url> --agent-fingerprint <fp>` (HostId chính là vân tay đó), Launcher WPF có mục "Kết nối qua relay"
     trong hồ sơ, HostId lấy từ máy đã ghép cặp của hồ sơ.
+  - **Ghép cặp qua relay** (khi máy A chỉ thấy máy B qua relay, chưa biết khoá hay HostId của B): xem mục 9, phần
+    "Ghép cặp qua relay". Relay chỉ giữ một **chỗ ghép cặp** mỗi máy B, tra theo khoá dẫn xuất từ mã mời 8 số; tra cứu
+    `POST api/tunnel/pairing-sessions {lookupKey}` mở một phiên tunnel thường tới B và trả kèm HostId.
   - Chống lạm dụng: giới hạn tần suất theo địa chỉ cho mở phiên, kênh điều khiển và lane (`Relay:RateLimit`,
-    mặc định 60/20/600 mỗi phút, quá thì 429); trần số phiên sống mỗi HostId và mỗi địa chỉ (`MaxSessionsPerHost`,
+    mặc định 60/20/600 mỗi phút, quá thì 429), tra cứu chỗ ghép cặp `PairingPermitLimit` (mặc định 10 mỗi phút **theo dải
+    mạng** IPv4 /24 hoặc IPv6 /64, mỗi lần là một lần đoán mã) cộng trần số lần tra sai toàn relay
+    `Relay:Tunnel:MaxFailedPairingLookupsPerMinute` (mặc định 1000/phút) và số lần xin chỗ mỗi kênh điều khiển
+    `MaxPairingSlotRequestsPerMinute` (30/phút); trần số phiên sống mỗi HostId và mỗi địa chỉ (`MaxSessionsPerHost`,
     `MaxSessionsPerAddress`, mặc định 64), số kênh điều khiển mỗi địa chỉ (16), số lane mỗi địa chỉ (256); trần kích
     thước message điều khiển; vé lane ngẫu nhiên 256 bit qua header. Relay chỉ tin `X-Forwarded-For` từ proxy khai
     trong `Relay:ForwardedHeaders:KnownProxies`/`KnownNetworks` (mặc định rỗng: không tin header nào).
@@ -355,9 +361,9 @@ Broker kết nối TCP thẳng tới Agent (cổng cấu hình được). Tìm A
 
 - Mỗi máy (Broker phía A, Agent phía B) có **cặp khoá định danh lâu dài** (Ed25519 hoặc X25519), sinh
   khi cài, lưu bằng DPAPI.
-- **Ghép cặp** lần đầu: máy B hiển thị mã ngắn hoặc QR, người dùng nhập ở máy A (LAN), hoặc duyệt
-  trên Relay (internet). Kết quả: mỗi bên lưu khoá công khai của bên kia. Relay chỉ chuyển khoá công
-  khai, nhưng người dùng xác nhận vân tay khoá để chống Relay tráo khoá.
+- **Ghép cặp** lần đầu: máy B hiển thị mã ngắn, người dùng nhập ở máy A, nối thẳng (LAN) hoặc qua Relay
+  (internet, tìm máy B bằng mã mời, xem "Ghép cặp qua relay" bên dưới). Kết quả: mỗi bên lưu khoá công khai của bên
+  kia. Relay chỉ chuyển byte đã mã hoá; người dùng so vân tay khoá để chống Relay tráo khoá.
 - **Mỗi phiên**: bắt tay theo mẫu Noise IK (hoặc XX) trên nền X25519, ra khoá phiên, mã hoá khung bằng
   ChaCha20-Poly1305 hoặc AES-GCM, có số thứ tự chống phát lại.
 - Lớp mã hoá này giống nhau ở LAN và internet, nên Relay chỉ là một đường ống. Ở LAN không cần TLS
@@ -404,6 +410,48 @@ Broker kết nối TCP thẳng tới Agent (cổng cấu hình được). Tìm A
   vượt thì đóng ngay; chỉ một phiên ghép cặp chờ người dùng tại một thời điểm; tắt `AllowPairing` huỷ phiên đang chờ.
   Phía A bắt tay và join bị chặn bởi `TransportOptions.HandshakeTimeout`.
 - Agent và Broker mặc định bắt buộc mã hoá; `AllowPlaintextTransport` (`--plaintext`) chỉ cho phát triển và test cũ.
+
+Ghép cặp qua relay (nhánh `feature/relay-pairing`, quyết định 2026-11-26):
+
+- Vấn đề: máy A chỉ tới được máy B qua relay mà chưa biết khoá hay HostId của B, nên chưa mở được phiên theo HostId.
+  Không thêm tài khoản: máy B mở một **chỗ ghép cặp** (pairing slot) tạm trên relay, máy A tìm nó bằng **mã mời**.
+- Máy B (Agent bật `AllowPairing` và có relay): `RelayHostLink` sinh mã mời ngẫu nhiên 8 chữ số (`RelayPairingCode`,
+  hiện dạng `1234-5678`; cố ý khác độ dài mã 6 số để khỏi nhầm), gửi trên kênh điều khiển đã chứng minh khoá
+  `pairingSlot {lookupKey}` với `lookupKey` = hex SHA-256(nhãn `ProcBridge relay pairing v1` | mã). Relay trả
+  `pairingSlotRegistered {lookupKey, expiresAt, expiresInSeconds}`, lúc đó Agent mới hiện mã (console in ra, app WPF hiện
+  cạnh trạng thái relay). Mỗi máy B một chỗ; chỗ sống `Relay:Tunnel:PairingSlotLifetime` (mặc định 5 phút), dùng một lần,
+  mất theo kênh điều khiển; khoá trùng với chỗ của máy khác thì relay trả `pairingSlotRejected` và B chọn mã khác. B tự
+  mở chỗ mới với mã mới khi chỗ sắp hết hạn, bị dùng (`pairingSlotClaimed`, kể cả khi relay lấy chỗ ra mà không mở được
+  phiên, lúc đó `sessionId` rỗng) hoặc kênh điều khiển nối lại; tắt ghép cặp thì gửi `pairingSlotCancel`.
+- Thứ tự và đồng hồ ở máy B: chỉ một vòng gửi duy nhất trong `RelayHostLink`, mỗi lần được đánh thức nó gửi trạng thái
+  **mong muốn hiện tại** (chỗ với khoá đang chờ, hoặc huỷ) nếu khác lần gửi trước, nên thông điệp không thể tới sai thứ
+  tự. Relay báo đã giữ một khoá cũ (trả lời đến muộn) thì vòng gửi đặt lại chỗ đúng hoặc huỷ. Hạn của chỗ tính bằng
+  `expiresInSeconds` cộng giờ nhận trên đồng hồ của B (không so `expiresAt` của relay với đồng hồ B), xin mã mới sớm
+  `PairingRenewMargin` (5 giây, tối đa một phần tư thời gian sống). Relay từ chối quá `MaxPairingRejections` (5) mã liên
+  tiếp thì B hiện lỗi (`PairingError`, console in ra, app WPF ghép vào trạng thái relay) và thử lại với độ trễ tăng dần
+  (2 giây tới 60 giây).
+- Máy A (`RelayPairingConnector`): tính lại `lookupKey` từ mã người dùng nhập, gọi `POST api/tunnel/pairing-sessions`
+  (ẩn danh, giới hạn tần suất). Relay lấy chỗ ra (dùng một lần, đoán sai không làm mất chỗ của B), mở phiên tunnel
+  thường tới B và trả `{sessionId, ticket, expiresAt, hostId}`; không có chỗ thì 404 `PAIRING_SLOT_NOT_FOUND`. A mở lane
+  0 và chạy `PairingClient` y như ở LAN (Noise XX, mã 6 số, B bấm chấp nhận sau khi so vân tay A). Trước khi hỏi mã,
+  `PairingClient` so vân tay khoá tĩnh trong tin nhắn 2 của bắt tay với HostId relay đã nêu (`IPeerHintConnector`) ngay
+  sau khi đọc tin nhắn 2, trước khi gửi tin nhắn 3; lệch hoặc không có khoá thì dừng, không gửi gì thêm.
+  Máy đã ghép cặp kiểu này lưu địa chỉ `relay <url>`; các lần sau đi qua relay theo HostId như mục 8.2.
+- Vì sao an toàn: relay chỉ thấy `lookupKey`. Mã mời 8 số **không phải bí mật đối với relay** (đoán ngược từ hash rất
+  nhanh), nó chỉ để tìm máy B. Chống kẻ đứng giữa vẫn là mã 6 số dẫn xuất từ handshake hash cộng việc hai người dùng so
+  vân tay; relay tráo máy thì vân tay lệch HostId hoặc lệch màn hình.
+- **Rủi ro chấp nhận** (đoán mã mời): không gian mã là 10^8. Một người đoán bị chặn 10 lần/phút mỗi dải /24 hoặc /64 và
+  cả relay chỉ nhận tối đa 1000 lần tra sai mỗi phút; với N máy B đang mở chỗ, mỗi lần đoán trúng một chỗ nào đó với xác
+  suất N/10^8 (vd 1000 chỗ: 10^-5, tức tối đa khoảng 0,01 lần trúng mỗi phút khi đã chạm trần toàn relay). Trúng cũng
+  chỉ mở được một phiên ghép cặp: kẻ đoán không có mã 6 số mà máy B hiển thị (mã đó sinh từ handshake hash), và người
+  dùng B vẫn phải so vân tay của kẻ đó rồi bấm chấp nhận. Cái giá chấp nhận được: kẻ đoán trúng làm hỏng một mã của máy
+  B (máy B đổi mã) và có thể bật hộp thoại ghép cặp trên máy B; trần toàn relay cũng có nghĩa một đợt đoán ồ ạt làm người
+  dùng thật phải chờ tới phút sau mới tra được. Không dùng hàm băm chậm vì relay vẫn đoán ngược được 10^8 mã, và bảo
+  mật thật nằm ở mã 6 số với việc so vân tay.
+- Giao diện: Agent console `--relay <url> --allow-pairing` in mã; Launcher console
+  `--pair --relay <url> [--code <mã>]`; app WPF của Launcher có ô "Máy B chỉ thấy qua relay" (URL relay + mã 8 số) và
+  Remote Explorer đi qua relay cho máy ghép cặp kiểu này. Test: `PairingSlotTests` (relay e2e), `RelayPairingTests`
+  (ghép cặp qua relay đầu cuối rồi mở phiên theo HostId).
 
 ```mermaid
 sequenceDiagram
@@ -711,8 +759,47 @@ Làm song song với M2, chưa có Broker: cấu hình là `PROCBRIDGE_MAP` cụ
   `SEC_IMAGE`); `dotnet <ảo>\app\ProcBridge.Launcher.dll` chạy được (assembly lớn là bản sparse); DbgHelp
   (`SymLoadModuleExW`) đọc pdb qua thư mục ảo và tìm được `wmain`; khoá vùng và share mode thấy được hai chiều giữa máy A
   và máy B, ghi ngược tại chỗ khi đang khoá; `git status`/`git log` trên repo nằm ở máy B. Chưa chạy: `cdb`/`dotnet-dump`
-  (máy không cài), SQLite (chưa có gói `Microsoft.Data.Sqlite`), debug bằng VS/VS Code, chạy exe nằm trong thư mục ảo
-  (xem Backlog).
+  (máy không cài), SQLite (chưa có gói `Microsoft.Data.Sqlite`), debug bằng VS/VS Code. Chạy exe nằm trong thư mục ảo:
+  mục 13.7.
+
+### 13.7 Chạy exe nằm trong thư mục ảo (2026-11-26)
+
+Kernel mở và ánh xạ file image ngay trong `NtCreateUserProcess` theo thuộc tính `PS_ATTRIBUTE_IMAGE_NAME`, không qua hook
+mở file nào; loader của con lại nạp các DLL import tĩnh trước khi Hook được inject vào con (thread inject chạy phần khởi
+tạo process trước `LoadLibraryW`). Nên exe nằm trong thư mục ảo được chạy từ **bản sao** của nó:
+
+- **Đưa vào bản sao** (`ImageMaterializer`, chạy trong hook `NtCreateUserProcess` của cha): `Resolve` exe như một lần mở
+  chỉ đọc; bản sparse (M8) được `FetchRange` trọn trước (kernel ánh xạ không qua hook). Cùng cách cho `<exe>.manifest` và
+  các DLL trong bảng import của exe (đệ quy theo import của chúng, tối đa 128 module, bỏ tên API set) **có mặt cạnh exe**
+  trong thư mục ảo (tên import không có phần mở rộng được thêm `.dll` như loader; optional header ngắn hơn cấu trúc vẫn đọc
+  được). Chế độ cục bộ (`PROCBRIDGE_MAP`) chỉ là dịch đường dẫn và kiểm file có thật. Exe không đưa vào được (IPC, mạng, bộ
+  nhớ) thì **không dịch gì**, hàm gốc chạy với tham số của bên gọi; chỉ khi hàm gốc cũng lỗi vì không thấy đường dẫn ảo thì
+  trả lỗi của `Resolve` (vd lỗi mạng) thay cho `STATUS_OBJECT_NAME_NOT_FOUND`. DLL thiếu thì bỏ qua để loader báo lỗi như
+  khi chạy cục bộ.
+- **Dịch đường dẫn** (`ImageRedirect`): gọi hàm gốc với một bản chép của `PS_ATTRIBUTE_LIST` có tên image là đường dẫn NT
+  của bản sao, và tạm trỏ `ImagePathName` của process parameters (dạng normalized) sang đường dẫn DOS của bản sao, để loader
+  của con lấy thư mục của bản sao làm thư mục ứng dụng và thấy các DLL vừa đưa vào. Dòng lệnh giữ nguyên tên ảo. Gọi xong
+  thì trả lại `ImagePathName` cho bên gọi. Khối parameters là của riêng lời gọi đó (kernelbase dựng cho mỗi lần
+  `CreateProcess`), nên đổi tại chỗ không ảnh hưởng thread khác. Parameters không ở dạng normalized (chỉ bên gọi thẳng
+  `NtCreateUserProcess`) thì bỏ hẳn việc dịch. Danh sách thuộc tính lớn hơn 64 KB không được chép.
+- **Trả lại tên ảo** (`LoaderNames`): khối khởi tạo của con mang `PROCBRIDGE_IMAGE=<thư mục bản sao>*<thư mục ảo>` (rỗng với
+  con thường; Spawn cũng gửi rỗng). Initializer của con đọc rồi xoá biến này (cháu không thừa kế), bật hook xong thì dưới
+  loader lock đổi `FullDllName`/`BaseDllName` của mọi module nằm trong thư mục bản sao và `ImagePathName` sang thư mục ảo.
+  Buffer tên mới lấy từ process heap, còn loader giải phóng tên module từ heap riêng của nó lúc gỡ DLL, nên các DLL được đổi
+  tên bị **ghim** trước (`LdrAddRefDll` cờ PIN): không bao giờ bị gỡ nên tên không bị giải phóng (exe vốn không bị gỡ).
+- **Bản cache thay mới khi exe đang chạy**: file đang được ánh xạ làm image không ghi đè được, nên Broker đổi tên bản cũ đi
+  (rồi thử xoá) trước khi đặt bản mới vào tên đó; process đang chạy giữ bản cũ, lần chạy sau dùng bản mới.
+  Từ đó `GetModuleFileName` trả tên ảo, và thứ process tìm cạnh chính nó (apphost .NET tìm `app.dll`, `LoadLibrary` theo tên
+  trần) đi qua thư mục ảo có hook.
+- Kiểm (`src/tests/ProcBridge.Tests/Native/VirtualImageTests.cs`, x64 và Win32): `cmd` chạy bản sao của NativeProbe
+  (`--image`) nằm trong thư mục ảo, cạnh nó là bản sao `dbghelp.dll` (import tĩnh) và `pbdyn.dll` (bản sao `version.dll`, nạp
+  sau theo tên trần): tên image, `dbghelp.dll` và `pbdyn.dll` đều là tên ảo trong thư mục ảo, ở chế độ cục bộ và qua Agent
+  với ngưỡng tải theo vùng 16 KB (bản cache của exe trùng từng byte với máy B); apphost `ProcBridge.Launcher.exe` chạy từ
+  máy B. Cả năm bài đỏ khi bỏ bước dịch. Thêm: exe không có trên máy B nhưng có file thật đúng đường dẫn ảo thì vẫn chạy
+  (đỏ khi trả lỗi thay vì gọi hàm gốc); file trên máy B đổi khi một instance còn chạy từ bản cache thì lần chạy sau dùng bản
+  mới (đỏ khi Broker ghi đè thẳng); exe hỏng (chỉ có `MZ`, cắt cụt) báo lỗi mà bên tạo không chết; bốn lần chạy song song cùng
+  exe; file `.bat` trong thư mục ảo chạy qua `CreateProcess`; cháu của exe ảo không thừa kế `PROCBRIDGE_IMAGE`. Phần chưa
+  phủ ở Backlog.
 
 ### 13.7 Số đo với độ trễ mạng giả lập (2026-11-26)
 

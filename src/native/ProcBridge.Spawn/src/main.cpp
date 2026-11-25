@@ -448,6 +448,8 @@ int wmain(int argc, wchar_t** argv)
     environment += L"PROCBRIDGE_IPC_TIMEOUT_MS=" + timeout + L'\0';
     environment += L"PROCBRIDGE_HOOK_X64=" + hooks.X64 + L'\0';
     environment += L"PROCBRIDGE_HOOK_X86=" + hooks.X86 + L'\0';
+    // Only the hook sets it, for a child started from the backing copy of a virtual image.
+    environment += std::wstring(L"PROCBRIDGE_IMAGE=") + L'\0';
     const std::vector<BYTE> initBlock = ProcBridge::Inject::BuildInitBlock(environment, {});
 
     TreeJob job;

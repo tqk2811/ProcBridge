@@ -94,6 +94,18 @@ internal sealed class ScriptedRelaySockets : IRelaySocketFactory
 
         public WebSocketCloseStatus? ClosedWith { get; private set; }
 
+        private readonly List<string> _sentTexts = [];
+
+        /// <summary>Text messages the host sent after the handshake (pairing slot requests), in order.</summary>
+        public IReadOnlyList<string> SentTexts
+        {
+            get
+            {
+                lock (_sentTexts)
+                    return [.. _sentTexts];
+            }
+        }
+
         public bool Aborted { get; private set; }
 
         public override WebSocketCloseStatus? CloseStatus => null;
@@ -167,6 +179,11 @@ internal sealed class ScriptedRelaySockets : IRelaySocketFactory
                     PushText($$"""{"type":"{{TunnelProtocol.HostRegisteredMessage}}","hostId":"{{HostId}}"}""");
                     Registered = true;
                 }
+            }
+            else if (messageType == WebSocketMessageType.Text)
+            {
+                lock (_sentTexts)
+                    _sentTexts.Add(Encoding.UTF8.GetString(buffer.AsSpan()));
             }
             return Task.CompletedTask;
         }

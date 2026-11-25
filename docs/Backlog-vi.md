@@ -145,12 +145,26 @@ IOCP sẽ không nhận được gói hoàn tất. Bỏ qua `SL_INDEX_SPECIFIED`
   flush/đóng. Chưa có cấu hình ghi xuyên theo thư mục (Plan 10).
 - Remote Explorer (Plan 14) chưa có thao tác file.
 
-## [Vừa] Chạy exe nằm trong thư mục ảo
+## [Thấp] Chạy exe nằm trong thư mục ảo: phần còn thiếu
 
-`NtCreateUserProcess` mở file image trong kernel theo `ImagePathName`, không qua hook mở file, nên exe nằm trong thư mục
-ảo không chạy được (M8 chỉ phủ DLL nạp bằng `LoadLibrary` và app .NET chạy bằng `dotnet <ảo>\app.dll`). Cần dịch đường
-dẫn image sang bản cache (tải trọn trước) trong hook `NtCreateUserProcess`, giữ tên ảo cho `GetModuleFileName`, và lo các
-DLL cạnh exe mà loader tìm theo thư mục của image.
+Plan 13.7. Ghi 2026-11-26.
+
+- Chỉ DLL import tĩnh nằm **cạnh** exe được đưa sẵn vào bản sao. DLL import tĩnh mà loader tìm ở thư mục khác thuộc thư
+  mục ảo (một mục `PATH` trỏ vào thư mục ảo, private assembly SxS ở thư mục con, chuyển hướng `.local`) bị tìm trước khi
+  Hook có mặt trong con nên không thấy.
+- Tên do kernel giữ vẫn là bản sao: `NtQueryInformationProcess(ProcessImageFileName)`, `QueryFullProcessImageName`,
+  `GetMappedFileName` trên vùng image. Tên trong danh sách module của PEB (và `GetModuleFileNameEx` từ process khác) đã là
+  tên ảo.
+- Chi phí mỗi lần tạo process từ exe ảo: mỗi tên DLL import (trừ API set) hỏi Broker một `Resolve`, tên DLL hệ thống
+  (kernel32...) thành một lần hỏi máy B không thấy; exe và DLL lớn hơn ngưỡng tải theo vùng thêm một `FetchRange` trọn file
+  (lần đầu tải hết, các lần sau Broker trả ngay vì đã đủ khối). Tất cả chạy tuần tự trên thread tạo process. Có thể nhớ kết
+  quả theo exe (theo version máy B) hoặc bỏ qua tên trong `KnownDLLs`.
+- Chưa có test cho: parameters dạng offset (bỏ dịch), tên import không phần mở rộng, optional header ngắn (cần PE dựng tay).
+- Bản cache cũ bị đổi tên khi exe còn chạy để lại file `*.pbdl-*.tmp` tới khi Broker dọn; chưa có bước dọn các file này
+  lúc process đó thoát.
+- Process đầu tiên (Spawn, Launcher) không chạy được exe nằm trong thư mục ảo: chỉ process đã có Hook mới dịch được.
+- Bên gọi thẳng `NtCreateUserProcess` với parameters dạng offset (không normalized) không được dịch: exe ảo không chạy.
+  Có thể dựng một bản parameters normalized thay vì bỏ.
 
 ## [Vừa] Tải theo vùng (M8): phần còn thiếu
 
@@ -269,9 +283,18 @@ theo đường dẫn trên Agent cho commit, set-info, rename, delete.
   20 lần xanh, chạy 4 tiến trình song song 40 lần xanh. Probe mặc định chỉ đọc gốc thật (lượt ghi duy nhất ra file tạm
   ngoài gốc), nên nghi phần preload/cache thư mục của Broker chụp mtime trước khi NTFS cập nhật xong sau `CreateTree`.
   Lần đỏ sau: giữ nguyên dòng khác nhau và thời điểm tạo cây để so.
+  Đỏ lại trên CI 2026-11-26 (run 45672199926, nhánh `feature/relay-pairing`, bản Win32): dòng
+  `FindFile[sub\*]: deep attr=0x10 size=0 written=...` lệch 1,5 ms (thật `134401038844902208`, qua relay
+  `134401038844917314`): thời gian ghi của thư mục con `sub\deep` nhích lên sau lượt probe thật, khớp giả thuyết NTFS
+  cập nhật mtime thư mục muộn (vd khi file tạm trong `deep` được đóng/xoá) chứ không phải lỗi dịch đường dẫn.
   Đỏ lại 2026-11-26 trên CI (x64, nhánh `feature/watch-perf`): `FindFile[sub\*]: deep attr=0x10 size=0`, thật
   `written=134401048804569152`, qua relay `written=134401048804586061` (lệch 1,7 ms, đúng thư mục con `sub\deep`
   vừa được tạo cùng cây). Code của nhánh không đụng tới listing hay preload.
+- `ConnectionPoolTests.BusyConnection_IsNotBlockedByAnotherRequestOpeningASlot`: đỏ một lần khi chạy cả bộ test
+  local (2026-11-26, nhánh `feature/relay-pairing`, không đụng tới pool): 9/10 request xong đúng mốc 2000 ms thay vì
+  dưới 2000 ms, tức các request xếp hàng trên một kết nối 300 ms/lượt chạm sát ngưỡng khi máy đang tải nặng. Chạy riêng
+  3 lần đều xanh. Ngưỡng 2000 ms quá sát (10 request × 300 ms chia trên một kết nối sống); nên đo theo số request phải
+  chờ kết nối chậm thay vì theo thời gian tuyệt đối.
 
 ## [Thấp] Review độc lập cho M2
 
@@ -447,11 +470,17 @@ Cố ý làm gọn ở M6, nên bù khi relay lớn lên:
 
 Ghi 2026-11-25 (M6).
 
-## [Vừa] Relay: ghép cặp vẫn phải làm trong LAN
+## [Thấp] Ghép cặp qua relay: phần còn thiếu
 
-Agent và Launcher đi qua relay chỉ cần URL relay và máy đã ghép cặp (HostId = vân tay), nhưng ghép cặp vẫn chỉ chạy
-trong LAN (`--pair --agent host`). Nên có ghép cặp qua relay: relay chuyển bắt tay XX của ghép cặp theo HostId, người
-dùng so mã SAS như ở LAN. Ghi 2026-11-25, sửa 2026-11-26 (bỏ tài khoản relay).
+Ghép cặp qua relay bằng mã mời đã chạy (Plan 9, "Ghép cặp qua relay"). Còn lại:
+
+- Hồ sơ chạy của app WPF Launcher không tự điền URL relay và bật "Kết nối qua relay" cho máy ghép cặp qua relay
+  (địa chỉ lưu dạng `relay <url>`); hiện chỉ báo lỗi để người dùng tự bật.
+- Chưa chạy thử giao diện thật (UIA) của ô mã mời ở hai app WPF, chỉ test tầng ViewModel; chưa thử với relay thật trên
+  internet.
+- Mã mời đổi sau mỗi lần dùng và mỗi 5 phút; app WPF của Agent chỉ thấy mã mới ở lượt làm mới định kỳ của cửa sổ.
+
+Ghi 2026-11-26.
 
 ## [Thấp] Relay: HostId lộ máy B đang online
 

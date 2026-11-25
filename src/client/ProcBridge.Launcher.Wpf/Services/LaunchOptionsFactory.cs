@@ -2,6 +2,7 @@ using ProcBridge.Broker.Models;
 using ProcBridge.Launcher.Models;
 using ProcBridge.Launcher.Wpf.Helpers;
 using ProcBridge.Launcher.Wpf.Models;
+using ProcBridge.Transport.Relay;
 using ProcBridge.Protocol.Enums;
 using ProcBridge.Transport.Secure.Models;
 
@@ -46,6 +47,8 @@ public sealed class LaunchOptionsFactory
             else
                 errors.Add("Địa chỉ relay phải là URL http(s), vd https://relay.example.com/.");
         }
+        else if (RelayPairingConnector.TryParseRelayAddress(machine?.Address) is not null)
+            errors.Add("Máy B này được ghép cặp qua relay (không có địa chỉ LAN): bật \"Kết nối qua relay\" trong hồ sơ.");
 
         var mappings = new List<VirtualMapping>();
         foreach (FolderMapping mapping in profile.Mappings)

@@ -8,4 +8,8 @@ public interface ITunnelSessionService
     /// <param name="hostId">Fingerprint of the host's identity key.</param>
     /// <param name="clientAddress">Address of the caller, for the per-address session limit.</param>
     Task<TunnelSessionVM> OpenAsync(string hostId, string clientAddress, CancellationToken cancellationToken = default);
+
+    /// <summary>Opens a session to the host whose pairing slot has this lookup key; the slot is used up.</summary>
+    /// <param name="lookupKey">Derived from the invite code (<c>RelayPairingCode.DeriveLookupKey</c>).</param>
+    Task<TunnelPairingSessionVM> OpenPairingAsync(string lookupKey, string clientAddress, CancellationToken cancellationToken = default);
 }
