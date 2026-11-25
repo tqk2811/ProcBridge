@@ -28,13 +28,16 @@ public sealed class FileCache
     private readonly ConcurrentDictionary<string, Timed<IReadOnlyList<FsEntry>>> _lists = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, FsVersion> _versions = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, Lazy<Task<CachedItem>>> _downloads = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, Lazy<Task<FsEntry>>> _pendingStats = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, PendingStat> _pendingStats = new(StringComparer.OrdinalIgnoreCase);
     // Bumped by every invalidation; a fetch that started under an older value may hold stale data and gets the short TTL.
     private long _epoch;
     private volatile bool _watchActive;
     private readonly ConcurrentDictionary<string, byte> _readAheadDirectories = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<Task, byte> _readAheadTasks = new();
     private int _readAheadDownloads;
+
+    /// <summary>Test hook, called after a fetch computed its expiry and before it stores the result; lets a test invalidate in that gap.</summary>
+    internal Action? BeforeMetadataStore { get; set; }
 
     public FileCache(AgentClient client, string cacheRoot, TimeSpan metadataTtl)
         : this(client, cacheRoot, new FileCacheOptions { MetadataTtl = metadataTtl })
@@ -65,16 +68,28 @@ public sealed class FileCache
         if (_stats.TryGetValue(remotePath, out Timed<FsEntry>? cached) && !cached.IsExpired)
             return cached.Value;
 
-        // Build tools stat the same file from many threads at once: share one request per path.
-        Lazy<Task<FsEntry>> pending = _pendingStats.GetOrAdd(remotePath, key => new Lazy<Task<FsEntry>>(() => FetchStatAsync(key)));
+        // Build tools stat the same file from many threads at once: share one request per path. A request that
+        // started before an invalidation may return the old state, so it is only shared with callers of the same epoch.
+        long epoch = Volatile.Read(ref _epoch);
+        PendingStat pending = _pendingStats.GetOrAdd(remotePath, key => new PendingStat(epoch, new Lazy<Task<FsEntry>>(() => FetchStatAsync(key))));
+        while (pending.Epoch != epoch)
+        {
+            var fresh = new PendingStat(epoch, new Lazy<Task<FsEntry>>(() => FetchStatAsync(remotePath)));
+            if (_pendingStats.TryUpdate(remotePath, fresh, pending))
+            {
+                pending = fresh;
+                break;
+            }
+            pending = _pendingStats.GetOrAdd(remotePath, fresh);
+        }
         try
         {
-            return await pending.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
+            return await pending.Fetch.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
         }
         finally
         {
-            if (pending.Value.IsCompleted)
-                _pendingStats.TryRemove(new KeyValuePair<string, Lazy<Task<FsEntry>>>(remotePath, pending));
+            if (pending.Fetch.IsValueCreated && pending.Fetch.Value.IsCompleted)
+                _pendingStats.TryRemove(new KeyValuePair<string, PendingStat>(remotePath, pending));
         }
     }
 
@@ -83,7 +98,9 @@ public sealed class FileCache
         await Task.Yield();
         long epoch = Volatile.Read(ref _epoch);
         FsEntry entry = await _client.StatAsync(remotePath, CancellationToken.None).ConfigureAwait(false);
-        _stats[remotePath] = new Timed<FsEntry>(entry, ExpiryFor(epoch));
+        long expires = ExpiryFor(epoch);
+        BeforeMetadataStore?.Invoke();
+        StoreStat(remotePath, entry, expires, epoch);
         return entry;
     }
 
@@ -94,12 +111,33 @@ public sealed class FileCache
         long epoch = Volatile.Read(ref _epoch);
         IReadOnlyList<FsEntry> entries = await _client.ListAsync(remotePath, cancellationToken).ConfigureAwait(false);
         long expires = ExpiryFor(epoch);
-        _lists[remotePath] = new Timed<IReadOnlyList<FsEntry>>(entries, expires);
+        BeforeMetadataStore?.Invoke();
+        var list = new Timed<IReadOnlyList<FsEntry>>(entries, expires);
+        _lists[remotePath] = list;
         // A listing also refreshes the children's metadata, saving one stat per file for build tools.
         string prefix = remotePath.Length == 0 ? string.Empty : remotePath + "/";
         foreach (FsEntry entry in entries)
             _stats[prefix + entry.Name] = new Timed<FsEntry>(entry, expires);
+        if (Volatile.Read(ref _epoch) != epoch)
+        {
+            // An invalidation ran while the data was in flight and may have missed it: take it back out.
+            _lists.TryRemove(new KeyValuePair<string, Timed<IReadOnlyList<FsEntry>>>(remotePath, list));
+            foreach (FsEntry entry in entries)
+                _stats.TryRemove(new KeyValuePair<string, Timed<FsEntry>>(prefix + entry.Name, new Timed<FsEntry>(entry, expires)));
+        }
         return entries;
+    }
+
+    /// <summary>
+    /// Stores a fetched stat. Invalidation bumps the epoch before it removes keys, so re-reading the epoch after the
+    /// write catches an invalidation that ran in between and missed this entry (it is then removed again).
+    /// </summary>
+    private void StoreStat(string remotePath, FsEntry entry, long expires, long epochAtStart)
+    {
+        var timed = new Timed<FsEntry>(entry, expires);
+        _stats[remotePath] = timed;
+        if (Volatile.Read(ref _epoch) != epochAtStart)
+            _stats.TryRemove(new KeyValuePair<string, Timed<FsEntry>>(remotePath, timed));
     }
 
     /// <summary>True while a change watcher is subscribed: metadata then lives until a notification invalidates it.</summary>
@@ -211,23 +249,47 @@ public sealed class FileCache
         long epoch = Volatile.Read(ref _epoch);
         var partial = new Dictionary<string, List<FsEntry>>(StringComparer.OrdinalIgnoreCase);
         int count = 0;
+        bool stale = false;
         await _client.WalkTreeAsync(remotePath, maxDepth, page =>
         {
+            // Once an invalidation ran, the rest of the walk may be older than it: stop caching, the data is read on demand.
+            if (stale)
+                return;
             long expires = ExpiryFor(epoch);
+            BeforeMetadataStore?.Invoke();
             foreach (FsTreeDirectory directory in page.Directories)
             {
                 string prefix = directory.Path.Length == 0 ? string.Empty : directory.Path + "/";
+                int stored = 0;
                 foreach (FsEntry entry in directory.Entries)
+                {
+                    if (Volatile.Read(ref _epoch) != epoch)
+                        break;
                     _stats[prefix + entry.Name] = new Timed<FsEntry>(entry, expires);
-                count += directory.Entries.Length;
+                    stored++;
+                }
+                count += stored;
 
                 if (!partial.TryGetValue(directory.Path, out List<FsEntry>? list))
                     partial[directory.Path] = list = [];
                 list.AddRange(directory.Entries);
-                if (directory.Complete)
+                Timed<IReadOnlyList<FsEntry>>? storedList = null;
+                if (directory.Complete && stored == directory.Entries.Length)
                 {
-                    _lists[directory.Path] = new Timed<IReadOnlyList<FsEntry>>(list.ToArray(), expires);
+                    storedList = new Timed<IReadOnlyList<FsEntry>>(list.ToArray(), expires);
+                    _lists[directory.Path] = storedList;
                     partial.Remove(directory.Path);
+                }
+
+                // An invalidation after the last check would have missed what was just written: take it back out.
+                if (stored < directory.Entries.Length || Volatile.Read(ref _epoch) != epoch)
+                {
+                    stale = true;
+                    for (int i = 0; i < stored; i++)
+                        _stats.TryRemove(new KeyValuePair<string, Timed<FsEntry>>(prefix + directory.Entries[i].Name, new Timed<FsEntry>(directory.Entries[i], expires)));
+                    if (storedList is not null)
+                        _lists.TryRemove(new KeyValuePair<string, Timed<IReadOnlyList<FsEntry>>>(directory.Path, storedList));
+                    return;
                 }
             }
         }, cancellationToken).ConfigureAwait(false);
@@ -389,6 +451,14 @@ public sealed class FileCache
         catch (UnauthorizedAccessException)
         {
         }
+    }
+
+    /// <summary>A stat request in flight and the epoch its callers saw when they started it.</summary>
+    private sealed class PendingStat(long epoch, Lazy<Task<FsEntry>> fetch)
+    {
+        public long Epoch { get; } = epoch;
+
+        public Lazy<Task<FsEntry>> Fetch { get; } = fetch;
     }
 
     private sealed record Timed<T>(T Value, long ExpiresAt)

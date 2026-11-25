@@ -171,6 +171,121 @@ public sealed class BrokerWatchTests
         await WaitUntilAsync(async () => (await cache.StatAsync("a.txt", CancellationToken.None)).Size == 3, TimeSpan.FromSeconds(1));
     }
 
+    private static async Task<(FileCache Cache, ChangeWatcher Watcher)> WatchedCacheAsync(AgentClient client, string cacheDir)
+    {
+        var cache = new FileCache(client, cacheDir, LongTtl);
+        ChangeWatcher watcher = client.CreateWatcher(TimeSpan.FromMilliseconds(200));
+        cache.AttachWatcher(watcher);
+        watcher.Start();
+        await watcher.WaitActiveAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+        return (cache, watcher);
+    }
+
+    [TestMethod]
+    public async Task InvalidationDuringStatFetch_DoesNotLeaveTheStaleResultCached()
+    {
+        using var share = new TempFolder("bwatch");
+        share.WriteFile("a.txt", [1]);
+        using var cacheDir = new TempFolder("cache");
+        await using AgentServer server = StartAgent(share);
+        await using AgentClient client = CreateClient(server.Port);
+        (FileCache cache, ChangeWatcher watcher) = await WatchedCacheAsync(client, cacheDir.Path);
+        await using ChangeWatcher _ = watcher;
+        int calls = 0;
+        // The first fetch is invalidated after its expiry was computed and before it is stored.
+        cache.BeforeMetadataStore = () =>
+        {
+            if (Interlocked.Increment(ref calls) == 1)
+                cache.ClearMetadata();
+        };
+
+        await cache.StatAsync("a.txt", CancellationToken.None);
+        long before = Requests(client);
+        await cache.StatAsync("a.txt", CancellationToken.None);
+
+        Assert.AreEqual(before + 1, Requests(client), "The result of a fetch that raced an invalidation must not be served from the cache.");
+    }
+
+    [TestMethod]
+    public async Task InvalidationDuringListFetch_DoesNotLeaveTheStaleListingCached()
+    {
+        using var share = new TempFolder("bwatch");
+        share.WriteFile(@"d\a.txt", [1]);
+        using var cacheDir = new TempFolder("cache");
+        await using AgentServer server = StartAgent(share);
+        await using AgentClient client = CreateClient(server.Port);
+        (FileCache cache, ChangeWatcher watcher) = await WatchedCacheAsync(client, cacheDir.Path);
+        await using ChangeWatcher _ = watcher;
+        int calls = 0;
+        cache.BeforeMetadataStore = () =>
+        {
+            if (Interlocked.Increment(ref calls) == 1)
+                cache.ClearMetadata();
+        };
+
+        await cache.ListAsync("d", CancellationToken.None);
+        long before = Requests(client);
+        await cache.ListAsync("d", CancellationToken.None);
+        Assert.AreEqual(before + 1, Requests(client), "The listing must be fetched again.");
+        await cache.StatAsync("d/a.txt", CancellationToken.None);
+        Assert.AreEqual(before + 1, Requests(client), "The second listing was not raced, so it fills the child's stat.");
+    }
+
+    [TestMethod]
+    public async Task InvalidationDuringPreload_DoesNotLeaveTheWalkCached()
+    {
+        using var share = new TempFolder("bwatch");
+        for (int f = 0; f < 5; f++)
+            share.WriteFile($@"src\f{f}.cs", [1]);
+        using var cacheDir = new TempFolder("cache");
+        await using AgentServer server = StartAgent(share);
+        await using AgentClient client = CreateClient(server.Port);
+        (FileCache cache, ChangeWatcher watcher) = await WatchedCacheAsync(client, cacheDir.Path);
+        await using ChangeWatcher _ = watcher;
+        cache.BeforeMetadataStore = cache.ClearMetadata;
+
+        await cache.PreloadTreeAsync("src", 0, CancellationToken.None);
+        cache.BeforeMetadataStore = null;
+
+        long before = Requests(client);
+        await cache.StatAsync("src/f1.cs", CancellationToken.None);
+        await cache.ListAsync("src", CancellationToken.None);
+        Assert.AreEqual(before + 2, Requests(client), "Nothing of a walk that raced an invalidation may be cached.");
+    }
+
+    [TestMethod]
+    public async Task StatAfterInvalidation_DoesNotJoinTheFetchStartedBefore()
+    {
+        using var share = new TempFolder("bwatch");
+        share.WriteFile("a.txt", [1]);
+        using var cacheDir = new TempFolder("cache");
+        await using AgentServer server = StartAgent(share);
+        await using AgentClient client = CreateClient(server.Port);
+        (FileCache cache, ChangeWatcher watcher) = await WatchedCacheAsync(client, cacheDir.Path);
+        await using ChangeWatcher _ = watcher;
+        using var held = new ManualResetEventSlim();
+        using var reached = new ManualResetEventSlim();
+        int calls = 0;
+        cache.BeforeMetadataStore = () =>
+        {
+            if (Interlocked.Increment(ref calls) == 1)
+            {
+                reached.Set();
+                held.Wait(TimeSpan.FromSeconds(10));
+            }
+        };
+
+        Task<FsEntry> first = cache.StatAsync("a.txt", CancellationToken.None);
+        Assert.IsTrue(reached.Wait(TimeSpan.FromSeconds(5)));
+        cache.ClearMetadata();
+        Task<FsEntry> second = cache.StatAsync("a.txt", CancellationToken.None);
+        await second.WaitAsync(TimeSpan.FromSeconds(5));
+        held.Set();
+        await first;
+
+        Assert.AreEqual(2, Volatile.Read(ref calls), "A stat requested after an invalidation needs a fetch of its own.");
+    }
+
     [TestMethod]
     public async Task HookWatch_ChangeTooBigForOneReply_BecomesOverflow()
     {
