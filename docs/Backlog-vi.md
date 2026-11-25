@@ -20,6 +20,12 @@ Việc còn treo và việc nên làm của ProcBridge. Mỗi mục: vấn đề
 - Vấn đề: Plan mục 14 liệt kê dòng lệnh, user, CPU, module đã nạp; hiện chỉ có PID, PID cha, tên, đường dẫn image, session, RAM, giờ bắt đầu. Cần đọc PEB (`NtQueryInformationProcess` class 60 cho command line), token user, thời gian CPU.
 - Ghi ngày: 2026-11-25.
 
+### [Thấp] Explorer: hard link trong gốc trỏ tới file ngoài gốc vẫn đọc được
+
+- Vị trí: `src/agent/ProcBridge.Agent.Explorer/PathScopeGuard.cs` (`Checked`).
+- Vấn đề: `GetFinalPathNameByHandle` trả tên đã dùng để mở, nên hard link nằm trong gốc tới một file ngoài gốc qua được kiểm phạm vi. Tạo hard link cần quyền ghi thuộc tính trên file đích nên rủi ro thấp, nhưng nếu Agent chạy quyền cao hơn user tạo link thì vẫn đọc được file user đó không đọc được. Hướng: với file có `NumberOfLinks > 1`, liệt kê mọi tên (`FindFirstFileNameW`) và đòi tất cả nằm trong gốc, hoặc từ chối.
+- Ghi ngày: 2026-11-25.
+
 ### [Thấp] Explorer: registry chưa chặn symbolic link của registry, chưa hỗ trợ view 32/64-bit
 
 - Vị trí: `src/agent/ProcBridge.Agent.Explorer/RegistryScopeGuard.cs:44`.
