@@ -63,7 +63,6 @@ public sealed class ProfileViewModel : ObservableObject
         PickShareRootCommand = new RelayCommand(PickShareRoot);
         PickWorkingDirectoryCommand = new RelayCommand(() => WorkingDirectory = _dialogs.PickLocalFolder(WorkingDirectory) ?? WorkingDirectory);
         LoadSharesCommand = new AsyncRelayCommand(LoadSharesAsync, () => _explorers is not null);
-        ApplyRelayOfMachine();
     }
 
     /// <summary>Shares machine B serves (name and folder), filled by <see cref="LoadSharesCommand"/>.</summary>
@@ -88,8 +87,15 @@ public sealed class ProfileViewModel : ObservableObject
             if (value is null)
                 return;
             ShareName = value.Name;
-            ShareRoot = value.RootPath;
+            UseRootOf(value);
         }
+    }
+
+    /// <summary>The folder of <paramref name="share"/>, when machine B gave it (its Explorer profile may hide it).</summary>
+    private void UseRootOf(ShareEntry share)
+    {
+        if (share.RootPath.Length > 0)
+            ShareRoot = share.RootPath;
     }
 
     public static IReadOnlyList<string> Architectures { get; } = ["x64", "x86"];
@@ -119,8 +125,14 @@ public sealed class ProfileViewModel : ObservableObject
         get => _machineFingerprint;
         set
         {
-            if (SetProperty(ref _machineFingerprint, value ?? string.Empty))
-                ApplyRelayOfMachine();
+            if (!SetProperty(ref _machineFingerprint, value ?? string.Empty))
+                return;
+            // The shares listed belong to the previous machine.
+            Shares.Clear();
+            ShareStatusText = null;
+            OnPropertyChanged(nameof(SelectedShare));
+            // Only on a change by the user: loading a saved profile must not edit it.
+            ApplyRelayOfMachine();
         }
     }
 
@@ -134,7 +146,7 @@ public sealed class ProfileViewModel : ObservableObject
             OnPropertyChanged(nameof(SelectedShare));
             // A share machine B reported: its folder is known, the user does not type it.
             if (SelectedShare is { } share)
-                ShareRoot = share.RootPath;
+                UseRootOf(share);
         }
     }
 
@@ -261,11 +273,11 @@ public sealed class ProfileViewModel : ObservableObject
         {
             // No share yet: the share of machine B holding the folder, else the folder itself as the root.
             ShareEntry? holder = Shares
-                .Where(x => RemotePathHelper.ToShareRelative(x.RootPath, path) is not null)
+                .Where(x => x.RootPath.Length > 0 && RemotePathHelper.ToShareRelative(x.RootPath, path) is not null)
                 .MaxBy(x => x.RootPath.Length);
             if (holder is not null)
                 SelectedShare = holder;
-            else if (Shares.Count == 0)
+            else if (!Shares.Any(x => x.RootPath.Length > 0))
                 ShareRoot = path;
         }
         if (RemotePathHelper.ToShareRelative(ShareRoot, path) is null)
@@ -286,16 +298,20 @@ public sealed class ProfileViewModel : ObservableObject
         if (_explorers is null || RequireMachine() is not { } machine)
             return;
         ShareStatusText = $"Đang lấy danh sách chia sẻ của {machine.Name}…";
+        string fingerprint = MachineFingerprint;
         IRemoteExplorer explorer = _explorers.Create(machine);
         try
         {
             ShareListResponse response = await explorer.ListSharesAsync(CancellationToken.None);
+            // The user picked another machine meanwhile: this list is not its.
+            if (MachineFingerprint != fingerprint)
+                return;
             Shares.Clear();
             foreach (ShareEntry share in response.Shares.OrderBy(x => x.Name, StringComparer.CurrentCultureIgnoreCase))
                 Shares.Add(share);
             OnPropertyChanged(nameof(SelectedShare));
             if (SelectedShare is { } current)
-                ShareRoot = current.RootPath;
+                UseRootOf(current);
             else if (Shares.Count == 1 && string.IsNullOrWhiteSpace(ShareName))
                 SelectedShare = Shares[0];
             ShareStatusText = Shares.Count == 0
@@ -306,7 +322,8 @@ public sealed class ProfileViewModel : ObservableObject
         }
         catch (Exception e) when (e is not OutOfMemoryException)
         {
-            ShareStatusText = $"Không lấy được danh sách chia sẻ ({e.Message}). Nhập tên chia sẻ và chọn thư mục gốc bằng tay.";
+            if (MachineFingerprint == fingerprint)
+                ShareStatusText = $"Không lấy được danh sách chia sẻ ({e.Message}). Nhập tên chia sẻ và chọn thư mục gốc bằng tay.";
         }
         finally
         {

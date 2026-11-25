@@ -81,7 +81,7 @@ internal sealed class ExplorerDispatcher
                 });
             case MessageType.ExplorerSysShares:
                 Read<ShareListRequest>(request);
-                return Reply(new ShareListResponse { Shares = _shares });
+                return Reply(_session.ListShares(_shares));
             default:
                 throw new ProtocolStatusException(NtStatus.NotImplemented, $"Message {request.MessageType} is not supported.");
         }

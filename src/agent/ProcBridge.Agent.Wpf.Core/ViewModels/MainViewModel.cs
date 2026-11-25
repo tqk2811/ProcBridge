@@ -75,6 +75,8 @@ public sealed class MainViewModel : ObservableObject
 
         _host.PairingRequested += OnPairingRequested;
         _host.RelayStatusChanged += OnRelayStatusChanged;
+        // A change raised before the subscription would otherwise wait for the next one.
+        OnRelayStatusChanged();
         _pairedMachines.Revoked += OnRevoked;
         ReloadPairedMachines();
     }

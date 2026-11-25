@@ -23,7 +23,7 @@ internal static class Program
         LauncherOptions options;
         try
         {
-            options = LauncherCommandLine.Parse(args);
+            options = LauncherCommandLine.Parse(args, Console.Error.WriteLine);
         }
         catch (ArgumentException e)
         {

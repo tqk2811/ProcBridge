@@ -487,6 +487,14 @@ int wmain(int argc, wchar_t** argv)
         {
             return Fail(L"no hook DLL for the target architecture (use --hook-x64 / --hook-x86)", injectError);
         }
+        if (!workingDirectory.empty() && (injectError == ERROR_PATH_NOT_FOUND || injectError == ERROR_FILE_NOT_FOUND
+            || injectError == ERROR_DIRECTORY || injectError == ERROR_ACCESS_DENIED || injectError == ERROR_INVALID_NAME))
+        {
+            // The hook sets the --cwd folder last: these errors are most likely that folder.
+            std::fwprintf(stderr, L"ProcBridge.Spawn: cannot enter the working directory (--cwd) %ls (error %lu)\n",
+                workingDirectory.c_str(), injectError);
+            return SpawnFailure;
+        }
         return Fail(L"inject failed", injectError);
     }
 

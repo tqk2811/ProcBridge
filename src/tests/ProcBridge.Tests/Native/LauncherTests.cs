@@ -5,6 +5,7 @@ using ProcBridge.Launcher;
 using ProcBridge.Launcher.Enums;
 using ProcBridge.Launcher.Models;
 using ProcBridge.Protocol.Enums;
+using ProcBridge.Tests.Secure;
 
 namespace ProcBridge.Tests.Native;
 
@@ -109,6 +110,81 @@ public sealed class LauncherTests
         {
             File.Delete(file);
         }
+    }
+
+    [TestMethod]
+    public void CommandLine_ConfigFile_FalseFlagsAndNegations_AndWarnings()
+    {
+        string folder = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), $"pb-config-{Guid.NewGuid():N}")).FullName;
+        try
+        {
+            string first = Path.Combine(folder, "a.json");
+            string second = Path.Combine(folder, "b.json");
+            File.WriteAllText(first, """{ "agent": "h", "share": "s", "maps": [{ "virtual": "V", "remote": "" }], "plaintext": true, "writeThrough": true, "noBuildServers": true, "command": ["one.exe"] }""");
+            File.WriteAllText(second, """{ "writeThrough": false, "command": ["two.exe"] }""");
+            var warnings = new List<string>();
+
+            LauncherOptions options = LauncherCommandLine.Parse(["--config", first, "--config", second, "--no-plaintext", "--build-servers"], warnings.Add);
+
+            Assert.IsFalse(options.AllowPlaintextTransport);
+            Assert.IsFalse(options.WriteThrough, "false in the later file undoes true of the first");
+            Assert.IsFalse(options.DisableBuildServers);
+            Assert.AreEqual("two.exe", options.CommandLine);
+            Assert.HasCount(2, warnings);
+            Assert.IsTrue(warnings.Any(x => x.Contains("plaintext")));
+            Assert.IsTrue(warnings.Any(x => x.Contains("several")));
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    [TestMethod]
+    [DataRow("../secret")]
+    [DataRow("proj/../../x")]
+    [DataRow(@"C:\Windows")]
+    [DataRow("V:Proj")]
+    [DataRow(@"\root")]
+    public void CommandLine_RemoteOutsideTheShare_IsRefused(string remote)
+    {
+        string file = Path.Combine(Path.GetTempPath(), $"pb-config-{Guid.NewGuid():N}.json");
+        File.WriteAllText(file, System.Text.Json.JsonSerializer.Serialize(new { agent = "h", share = "s", maps = new[] { new { @virtual = @"V:\a", remote } } }));
+        try
+        {
+            Assert.ThrowsExactly<ArgumentException>(() => LauncherCommandLine.Parse(["--config", file, "--", "cmd.exe"]));
+            Assert.ThrowsExactly<ArgumentException>(() => LauncherCommandLine.Parse(["--agent", "h", "--share", "s", "--map", @"V:\a", remote, "--", "cmd.exe"]));
+        }
+        finally
+        {
+            File.Delete(file);
+        }
+    }
+
+    /// <summary>Machine B revoked this machine: the run says to pair again, not that the Agent is unreachable.</summary>
+    [TestMethod]
+    public async Task Run_RevokedOnMachineB_FailsAsNotPaired()
+    {
+        using HookSandbox sandbox = new("x64");
+        using var peers = new SecurePeers(paired: false);
+        peers.BrokerTrust.Add(peers.AgentKey.PublicKey, "machine-b", "127.0.0.1");
+        await using var agent = new AgentServer([new AgentShare("share", sandbox.RealRoot)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 }, peers.Agent());
+        agent.Start();
+        var options = new LauncherOptions
+        {
+            AgentHost = "127.0.0.1",
+            AgentPort = agent.Port,
+            ShareName = "share",
+            Security = peers.Broker,
+            Mappings = [new Broker.Models.VirtualMapping(sandbox.VirtualRoot, "")],
+            CacheRoot = Path.Combine(sandbox.BaseDirectory, "cache"),
+            SpawnPath = sandbox.Binaries.Spawn,
+            CommandLine = "cmd.exe /d /c exit 0",
+        };
+
+        var e = await Assert.ThrowsExactlyAsync<LaunchFailedException>(() => new LaunchSession(options).RunAsync());
+
+        Assert.AreEqual(LaunchFailureReason.NotPaired, e.Reason, e.Message);
     }
 
     [TestMethod]
@@ -236,14 +312,15 @@ public sealed class LauncherTests
             SpawnPath = sandbox.Binaries.Spawn,
             WorkingDirectory = workingDirectory,
             // A relative name resolves against the virtual folder; the child cmd inherits the folder.
-            CommandLine = "cmd.exe /d /c cd & type b.txt & cmd.exe /d /c cd",
+            CommandLine = "cmd.exe /d /c cd & type b.txt & cmd.exe /d /c cd & cmd.exe /d /c \"if defined PROCBRIDGE_CWD (echo inherited) else (echo clear)\"",
         };
         var lines = new System.Collections.Concurrent.ConcurrentQueue<string>();
 
         int exitCode = await new LaunchSession(options, lines.Enqueue).RunAsync();
 
         Assert.AreEqual(0, exitCode, string.Join(Environment.NewLine, lines));
-        CollectionAssert.AreEqual(new[] { workingDirectory, "bee", workingDirectory }, lines.ToArray());
+        // The variable carrying the folder is for the target only: its child must not enter the folder again.
+        CollectionAssert.AreEqual(new[] { workingDirectory, "bee", workingDirectory, "clear" }, lines.ToArray());
     }
 
     [TestMethod]

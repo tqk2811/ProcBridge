@@ -29,15 +29,15 @@ public sealed record LauncherConfigFile
 
     public string? Spawn { get; init; }
 
-    public bool NoBuildServers { get; init; }
+    public bool? NoBuildServers { get; init; }
 
     public string? Cwd { get; init; }
 
     public string? Data { get; init; }
 
-    public bool Plaintext { get; init; }
+    public bool? Plaintext { get; init; }
 
-    public bool WriteThrough { get; init; }
+    public bool? WriteThrough { get; init; }
 
     /// <summary>keep or overwrite (<c>--conflict</c>).</summary>
     public string? Conflict { get; init; }

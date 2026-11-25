@@ -139,6 +139,49 @@ public sealed class ShareListTests
     }
 
     [TestMethod]
+    public async Task ChangingTheMachine_ClearsTheSharesOfThePreviousOne()
+    {
+        (ProfileViewModel profile, _, _) = Create(Empty());
+        await profile.LoadSharesCommand.ExecuteAsync();
+        profile.ShareName = "src";
+        Assert.IsNotNull(profile.SelectedShare);
+
+        profile.MachineFingerprint = "OTHE-RMAC-HINE";
+
+        Assert.IsEmpty(profile.Shares);
+        Assert.IsNull(profile.ShareStatusText);
+        Assert.IsNull(profile.SelectedShare);
+    }
+
+    [TestMethod]
+    public async Task LoadShares_AnswerArrivingAfterTheMachineChanged_IsDropped()
+    {
+        (ProfileViewModel profile, FakeRemoteExplorer explorer, _) = Create(Empty());
+        explorer.SharesGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task loading = profile.LoadSharesAsync();
+
+        profile.MachineFingerprint = "OTHE-RMAC-HINE";
+        explorer.SharesGate.SetResult();
+        await loading;
+
+        Assert.IsEmpty(profile.Shares);
+        Assert.IsNull(profile.ShareStatusText);
+        Assert.AreEqual(string.Empty, profile.ShareRoot);
+    }
+
+    [TestMethod]
+    public async Task ShareWithoutFolder_KeepsTheRootTypedByTheUser()
+    {
+        (ProfileViewModel profile, FakeRemoteExplorer explorer, _) = Create(Empty() with { ShareRoot = @"D:\typed" });
+        explorer.Shares = [new ShareEntry { Name = "src", RootPath = string.Empty }];
+
+        await profile.LoadSharesCommand.ExecuteAsync();
+
+        Assert.AreEqual("src", profile.ShareName);
+        Assert.AreEqual(@"D:\typed", profile.ShareRoot);
+    }
+
+    [TestMethod]
     public void LoadShares_WithoutExplorer_IsDisabled()
     {
         var profile = new ProfileViewModel(Empty(), new FakeDialogs(), _ => MachineB);

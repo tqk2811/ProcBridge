@@ -117,6 +117,8 @@ public sealed class RunViewModel : ObservableObject
     {
         LaunchFailureReason.AgentUnreachable =>
             $"Không kết nối được máy B ({failure.Target}): {failure.Detail} Kiểm tra Agent đang chạy trên máy B, địa chỉ hoặc relay, và máy này vẫn còn được ghép cặp.",
+        LaunchFailureReason.NotPaired =>
+            $"Máy B ({failure.Target}) từ chối máy này: có thể đã bị thu hồi ghép cặp. Ghép cặp lại ở tab Máy B rồi chạy lại.",
         LaunchFailureReason.ShareUnknown =>
             $"Máy B không có chia sẻ '{failure.Target}'. Chọn lại chia sẻ trong hồ sơ.",
         LaunchFailureReason.WorkingDirectoryMissing =>

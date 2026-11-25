@@ -87,17 +87,32 @@ public sealed class RelayProfileTests
     }
 
     [TestMethod]
-    public void ProfileViewModel_SavedProfileOfARelayMachine_IsFixedOnLoad_ButAnOwnRelayIsKept()
+    public void ProfileViewModel_LoadingAProfileOfARelayMachine_DoesNotChangeIt()
     {
         PairedMachine relayPaired = FakeRegistry.Machine("R", "RELA-YPAI-RED0", "relay https://paired.example/");
+        LaunchProfile saved = Sample() with { MachineFingerprint = relayPaired.Fingerprint, UseRelay = false, RelayUrl = string.Empty };
+        var changes = new List<string?>();
 
-        var fixedOnLoad = new ProfileViewModel(Sample() with { MachineFingerprint = relayPaired.Fingerprint, UseRelay = false, RelayUrl = string.Empty },
-            new FakeDialogs(), _ => relayPaired);
-        var ownRelay = new ProfileViewModel(Sample() with { MachineFingerprint = relayPaired.Fingerprint }, new FakeDialogs(), _ => relayPaired);
+        var loaded = new ProfileViewModel(saved, new FakeDialogs(), _ => relayPaired);
+        loaded.PropertyChanged += (_, e) => changes.Add(e.PropertyName);
 
-        Assert.IsTrue(fixedOnLoad.UseRelay);
-        Assert.AreEqual("https://paired.example/", fixedOnLoad.RelayUrl);
-        Assert.AreEqual("https://relay.example/", ownRelay.RelayUrl);
+        Assert.IsFalse(loaded.ToModel().UseRelay);
+        Assert.AreEqual(string.Empty, loaded.ToModel().RelayUrl);
+        Assert.IsEmpty(changes);
+        // The run still goes through the machine's relay.
+        Assert.AreEqual(new Uri("https://paired.example/"), new LaunchOptionsFactory(@"C:\pb").Create(loaded.ToModel(), relayPaired).Relay!.Url);
+    }
+
+    [TestMethod]
+    public void ProfileViewModel_PickingTheRelayMachine_KeepsAnOwnRelay()
+    {
+        PairedMachine relayPaired = FakeRegistry.Machine("R", "RELA-YPAI-RED0", "relay https://paired.example/");
+        PairedMachine[] machines = [MachineB, relayPaired];
+        var viewModel = new ProfileViewModel(Sample(), new FakeDialogs(), fingerprint => machines.FirstOrDefault(x => x.Fingerprint == fingerprint));
+
+        viewModel.MachineFingerprint = relayPaired.Fingerprint;
+
+        Assert.AreEqual("https://relay.example/", viewModel.RelayUrl);
     }
 
     [TestMethod]

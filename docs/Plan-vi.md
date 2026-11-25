@@ -670,7 +670,10 @@ Làm song song với M2, chưa có Broker: cấu hình là `PROCBRIDGE_MAP` cụ
   tuỳ chọn gõ sau `--config` đè lên file, `--map` thêm ánh xạ, đường dẫn tương đối tính từ thư mục của file. Trước khi
   chạy Spawn, `LaunchSession` mở một kết nối của pool Broker (Hello kèm share): Agent không kết nối được hoặc không có
   share thì dừng bằng `LaunchFailedException` (`LaunchFailureReason`) với lý do rõ ràng, thay cho `inject failed` của
-  Spawn; app WPF hiện lý do bằng tiếng Việt.
+  Spawn; app WPF hiện lý do bằng tiếng Việt. Agent từ chối bắt tay (máy này bị thu hồi) là lý do riêng `NotPaired`
+  để gợi ý ghép cặp lại. Khoá bool trong file là `bool?` (`false` ghi đè `true` của file trước) và có cờ phủ định
+  `--build-servers`, `--no-plaintext`, `--no-write-through`; file bật `plaintext` thì in cảnh báo ra stderr, nhiều file
+  cùng ghi `command` cũng cảnh báo. `remote` (cả `--map`) không được tuyệt đối, có ổ đĩa (`V:Proj`) hay bước `..`.
 - **Thư mục làm việc trong thư mục ảo**: Spawn không bị hook nên không vào được thư mục ảo. `LaunchSession` thấy
   `--cwd` nằm trong một ánh xạ thì kiểm thư mục đó trên máy B (`FsStat`, thiếu thì `WorkingDirectoryMissing`) rồi
   truyền `Spawn --cwd <dir>`; Spawn chuyển nó vào khối init (`PROCBRIDGE_CWD`), Hook gỡ biến ngay (con không đổi thư mục
@@ -893,9 +896,13 @@ số), hồ sơ chạy (ánh xạ thư mục chọn trong cây Remote Explorer t
 qua `LaunchSession` dùng chung với CLI, log trực tiếp, Dừng kill cả cây) và tab Remote Explorer. A đọc hồ sơ quyền
 của mình bằng `ExplorerSysPolicy` (0x1405) để chỉ hiện thao tác ghi được cấp; mọi thao tác ghi hỏi xác nhận.
 A lấy danh sách chia sẻ của Agent (tên, thư mục gốc trên B, có cho ghi không) bằng `ExplorerSysShares` (0x1406,
-`ShareListResponse`), không cần quyền nào trong hồ sơ Explorer vì chia sẻ vốn mở được bằng `Hello`. Hồ sơ chạy chọn
-chia sẻ trong ComboBox ("Lấy từ máy B") và gốc chia sẻ được điền theo; thư mục đích chọn ngoài chia sẻ bị từ chối ngay
-lúc chọn. Agent cũ trả `NotImplemented` thì hồ sơ quay về nhập tay tên chia sẻ và gốc.
+`ShareListResponse`). Quyết định (2026-11-26, sau review): tên và cờ ghi luôn trả (chia sẻ vốn mở được bằng `Hello`),
+nhưng thư mục gốc tuyệt đối trên B chỉ trả khi hồ sơ Explorer của máy A có `FileRead` và gốc nằm trong một `FileRoots`,
+tức máy A vốn đã duyệt được thư mục đó; ngoài ra `RootPath` rỗng để không lộ cấu trúc ổ đĩa của B. Mỗi lần hỏi ghi một
+mục audit `ListShares`. Vẫn giữ `RootPath` vì ánh xạ WPF chọn thư mục bằng Remote Explorer (đường dẫn tuyệt đối) rồi đổi
+sang tương đối theo gốc. Hồ sơ chạy chọn chia sẻ trong ComboBox ("Lấy từ máy B"), gốc được điền khi B có trả; thư mục
+đích chọn ngoài chia sẻ bị từ chối ngay lúc chọn. Đổi máy B thì danh sách cũ bị xoá, câu trả lời về muộn của máy cũ bị
+bỏ. Agent cũ trả `NotImplemented` thì hồ sơ quay về nhập tay tên chia sẻ và gốc.
 
 Lộ trình: duyệt file và ổ đĩa đi kèm M2 và M3; process, registry, service, thông tin hệ thống là M9.
 

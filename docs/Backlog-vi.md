@@ -261,6 +261,9 @@ theo đường dẫn trên Agent cho commit, set-info, rename, delete.
   dưới 2000 ms, tức các request xếp hàng trên một kết nối 300 ms/lượt chạm sát ngưỡng khi máy đang tải nặng. Chạy riêng
   3 lần đều xanh. Ngưỡng 2000 ms quá sát (10 request × 300 ms chia trên một kết nối sống); nên đo theo số request phải
   chờ kết nối chậm thay vì theo thời gian tuyệt đối.
+- `RemoteWriteTests.WriteScenario_ThroughAgent_MatchesRealFolder` (x64): đỏ một lần trên CI (2026-11-26, nhánh
+  `feature/launcher-ux`, không đụng tới đường ghi của Hook): ở bước "share writer denied" mong `err=32` (sharing
+  violation) nhưng nhận `err=5` (access denied). Chạy lại job thì xanh, local đều xanh.
 
 ## [Thấp] Review độc lập cho M2
 

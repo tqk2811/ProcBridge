@@ -170,6 +170,11 @@ public sealed class LaunchSession
             throw new LaunchFailedException(LaunchFailureReason.ShareUnknown, _options.ShareName, e.Message,
                 $"The Agent at {AgentDescription} has no share '{_options.ShareName}'.", e);
         }
+        catch (ProtocolStatusException e) when (e.Status == NtStatus.AccessDenied && !e.IsConnectionFailure)
+        {
+            throw new LaunchFailedException(LaunchFailureReason.NotPaired, AgentDescription, e.Message,
+                $"The Agent at {AgentDescription} refused this machine: {e.Message} Pair again (--pair).", e);
+        }
         catch (Exception e) when (e is not OutOfMemoryException && !(e is OperationCanceledException && cancellationToken.IsCancellationRequested))
         {
             throw new LaunchFailedException(LaunchFailureReason.AgentUnreachable, AgentDescription, e.Message,

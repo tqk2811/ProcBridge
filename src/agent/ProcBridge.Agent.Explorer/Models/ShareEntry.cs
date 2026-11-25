@@ -9,7 +9,7 @@ public sealed record ShareEntry
     [Key(0)]
     public required string Name { get; init; }
 
-    /// <summary>Absolute folder on machine B; paths of the <c>Fs.*</c> messages are relative to it.</summary>
+    /// <summary>Absolute folder on machine B, empty when the Explorer profile does not let machine A browse it; paths of the <c>Fs.*</c> messages are relative to it.</summary>
     [Key(1)]
     public required string RootPath { get; init; }
 

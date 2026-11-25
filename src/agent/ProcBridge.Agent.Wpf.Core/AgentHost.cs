@@ -98,6 +98,7 @@ public sealed class AgentHost : IAgentHost
             throw;
         }
         _server = server;
+        OnRelayStatusChanged();
     }
 
     public async Task StopAsync()
