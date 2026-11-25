@@ -8,8 +8,10 @@ public static class LauncherCommandLine
 {
     public const string Usage =
         @"Usage: ProcBridge.Launcher --agent <host>[:port] --share <name> --map <virtual dir> <remote dir> [--map ...]" + "\n" +
-        @"                           [--cache <dir>] [--arch x64|x86] [--spawn <ProcBridge.Spawn.exe>] -- <program> [arguments]" + "\n" +
-        @"  <remote dir> is relative to the share, '/' separated ("""" for the share root).";
+        @"                           [--cache <dir>] [--arch x64|x86] [--spawn <ProcBridge.Spawn.exe>]" + "\n" +
+        @"                           [--no-build-servers] -- <program> [arguments]" + "\n" +
+        @"  <remote dir> is relative to the share, '/' separated ("""" for the share root)." + "\n" +
+        @"  --no-build-servers keeps MSBuild/Roslyn/dotnet build servers out of the run (they would outlive it).";
 
     /// <summary>Throws <see cref="ArgumentException"/> with a message for the user when the line is wrong.</summary>
     public static LauncherOptions Parse(IReadOnlyList<string> args)
@@ -19,6 +21,7 @@ public static class LauncherCommandLine
         string? share = null;
         string? cache = null;
         string? spawn = null;
+        bool noBuildServers = false;
         string architecture = Environment.Is64BitOperatingSystem ? "x64" : "x86";
         var mappings = new List<VirtualMapping>();
         int index = 0;
@@ -58,6 +61,9 @@ public static class LauncherCommandLine
                 case "--spawn":
                     spawn = Next(option);
                     break;
+                case "--no-build-servers":
+                    noBuildServers = true;
+                    break;
                 default:
                     throw new ArgumentException($"Unknown argument {option}.");
             }
@@ -75,6 +81,7 @@ public static class LauncherCommandLine
             Mappings = mappings,
             CacheRoot = cache,
             SpawnPath = spawn ?? Path.Combine(AppContext.BaseDirectory, $"ProcBridge.Spawn.{architecture}.exe"),
+            DisableBuildServers = noBuildServers,
             CommandLine = string.Join(' ', args.Skip(index + 1).Select(Quote)),
         };
     }

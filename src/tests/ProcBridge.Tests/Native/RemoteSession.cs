@@ -54,6 +54,10 @@ internal sealed class RemoteSession : IAsyncDisposable
     public ProcessResult Run(string commandLine, string? workingDirectory = null)
         => RunWithBrokerProcess(Environment.ProcessId, commandLine, workingDirectory);
 
+    /// <summary>Like <see cref="Run"/>, with extra environment variables for the tree.</summary>
+    public ProcessResult Run(string commandLine, IReadOnlyDictionary<string, string> environment)
+        => _sandbox.RunSpawn($"--broker {SessionId} {Environment.ProcessId} -- {commandLine}", environment);
+
     /// <summary>Like <see cref="Run"/>, claiming that another process owns the pipe (the hook must refuse it).</summary>
     public ProcessResult RunWithBrokerProcess(int brokerProcessId, string commandLine, string? workingDirectory = null)
         => _sandbox.RunSpawn($"--broker {SessionId} {brokerProcessId} -- {commandLine}", workingDirectory);
