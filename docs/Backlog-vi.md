@@ -36,6 +36,21 @@ qua (cùng nơi truyền tên pipe); không khớp thì đóng pipe và coi như
 sẻ, danh sách thư mục ảo ↔ thư mục máy B), sinh id phiên bằng `HookIpcProtocol.NewSessionId()` (không dùng id đoán được), khởi động `BrokerHost` trước khi tạo process cha và
 dừng nó khi Job Object báo cả cây đã thoát.
 
+## [Cao] Hook: NtNotifyChangeDirectoryFile[Ex] qua Broker (phần hook của M7)
+
+Phần C# của M7 đã có message IPC `WatchDirectory` / `WaitChanges` / `Unwatch` (xem `HookIpc.h`, `HookWatchRegistry`).
+Hook C++ cần:
+
+- Hook `NtNotifyChangeDirectoryFile` và `NtNotifyChangeDirectoryFileEx` cho handle thư mục ảo: lần đầu trên một
+  handle gửi `WatchDirectory` (mapping, `WatchTree`, `CompletionFilter`, đường dẫn tương đối) rồi nhớ `WatchId` theo
+  handle; `NtClose` handle đó thì gửi `Unwatch`.
+- `WaitChanges` là long poll: chạy trên một pipe instance riêng (thread riêng hoặc thread pool), không giữ instance
+  mà các request khác đang dùng. Gọi đồng bộ thì chờ rồi trả; gọi bất đồng bộ (có `Event`/`ApcRoutine`/IOCP) thì
+  trả `STATUS_PENDING` và hoàn tất sau, đúng ngữ nghĩa của kernel.
+- Dựng `FILE_NOTIFY_INFORMATION` (hoặc `FILE_NOTIFY_EXTENDED_INFORMATION` cho bản Ex) từ danh sách thay đổi;
+  buffer của process không đủ chỗ hoặc reply có cờ `ChangesFlagOverflow` thì trả `STATUS_NOTIFY_ENUM_DIR`.
+- Trả nguyên `Status` lỗi của reply (vd `STATUS_INVALID_HANDLE` khi watch đã bị gỡ, `STATUS_NOT_A_DIRECTORY`).
+
 ## [Vừa] FileId và ChangeTime thật từ Agent
 
 `FsEntry.FileId` đang là 0 và `ChangeTime` lấy bằng `LastWriteTime`. Cần mở handle (kể cả thư mục, cờ
@@ -65,6 +80,26 @@ liệt kê theo kết nối hoặc cache danh sách ngắn hạn phía Agent.
 
 Request quá hạn trả `STATUS_IO_TIMEOUT` nhưng kết nối vẫn được coi là sống; Agent treo hẳn thì request nào cũng
 chờ đủ `RequestTimeout`. Nên có ping/keepalive và đánh dấu kết nối chết sau vài lần quá hạn liên tiếp.
+
+## [Vừa] Theo dõi thay đổi: phần còn thiếu sau M7 (C#)
+
+- `CompletionFilter` chưa được áp đúng: Agent dùng `FileSystemWatcher` nên không biết thuộc tính nào đổi, Broker
+  báo mọi thay đổi trong thư mục. Cân nhắc P/Invoke `ReadDirectoryChangesExW` với
+  `ReadDirectoryNotifyExtendedInformation` để gửi kèm loại thay đổi.
+- `FsWatchRequest.Path` mới để dành: Agent luôn theo dõi cả share. Share rất lớn thì nên theo dõi đúng các thư mục
+  được map.
+- Watcher kết nối lại thì cache bị xoá metadata; chưa nạp lại cây (`PreloadTreeAsync`) sau khi kết nối lại.
+- `FileCache.Invalidate` quét toàn bộ khoá theo tiền tố cho mỗi thay đổi xoá/đổi tên (O(số mục cache)); cache rất
+  lớn và lô thay đổi lớn thì nên dùng cây theo thư mục.
+- Walk `FsTree` bỏ dở giữa chừng giữ trạng thái trên Agent tới khi kết nối đóng (giới hạn bởi
+  `MaxTreeWalksPerConnection`); Broker hiện mở kết nối riêng cho mỗi walk nên không bị ảnh hưởng.
+
+## [Vừa] Đo hiệu năng M7 với độ trễ thật
+
+`src/tools/ProcBridge.Bench` mới đo trên loopback. Điều kiện xong M7 là đo thời gian build so với chạy cục bộ: cần
+một `IConnectionFactory` chèn độ trễ/băng thông giả lập (hoặc chạy qua LAN/relay thật), và chạy build thật (vd
+`dotnet build` một solution mẫu) qua Hook khi Hook đã nối Broker. Read-ahead hiện tranh connection pool với request
+tiền cảnh (chưa có ưu tiên, liên quan mục cửa sổ tín dụng) và không bị huỷ khi `BrokerHost` dừng.
 
 ## [Thấp] Agent chưa xác thực, chưa mã hoá
 
