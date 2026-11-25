@@ -21,10 +21,16 @@ namespace ProcBridge.Launcher;
 public sealed class LaunchSession
 {
     private readonly LauncherOptions _options;
+    private readonly Action<string>? _outputLine;
 
-    public LaunchSession(LauncherOptions options)
+    /// <param name="outputLine">
+    /// Null: the tree inherits this process' standard streams (console Launcher). Otherwise the tree gets hidden
+    /// redirected streams and every stdout/stderr line is handed here (WPF Launcher), on a thread pool thread.
+    /// </param>
+    public LaunchSession(LauncherOptions options, Action<string>? outputLine = null)
     {
         _options = options;
+        _outputLine = outputLine;
         SessionId = HookIpcProtocol.NewSessionId();
     }
 
@@ -63,12 +69,36 @@ public sealed class LaunchSession
         {
             UseShellExecute = false,
         };
+        if (_options.WorkingDirectory is not null)
+        {
+            if (!Directory.Exists(_options.WorkingDirectory))
+                throw new DirectoryNotFoundException($"Working directory {_options.WorkingDirectory} does not exist on this machine.");
+            startInfo.WorkingDirectory = _options.WorkingDirectory;
+        }
+        if (_outputLine is not null)
+        {
+            startInfo.RedirectStandardOutput = true;
+            startInfo.RedirectStandardError = true;
+            startInfo.CreateNoWindow = true;
+        }
         if (_options.DisableBuildServers)
         {
             foreach ((string name, string value) in BuildServerVariables)
                 startInfo.Environment[name] = value;
         }
-        using Process spawn = Process.Start(startInfo) ?? throw new InvalidOperationException("Cannot start ProcBridge.Spawn.");
+        using Process spawn = new() { StartInfo = startInfo };
+        if (_outputLine is not null)
+        {
+            spawn.OutputDataReceived += (_, e) => { if (e.Data is not null) _outputLine(e.Data); };
+            spawn.ErrorDataReceived += (_, e) => { if (e.Data is not null) _outputLine(e.Data); };
+        }
+        if (!spawn.Start())
+            throw new InvalidOperationException("Cannot start ProcBridge.Spawn.");
+        if (_outputLine is not null)
+        {
+            spawn.BeginOutputReadLine();
+            spawn.BeginErrorReadLine();
+        }
         try
         {
             await spawn.WaitForExitAsync(cancellationToken).ConfigureAwait(false);

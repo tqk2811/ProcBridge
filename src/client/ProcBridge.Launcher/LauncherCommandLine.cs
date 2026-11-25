@@ -9,7 +9,8 @@ public static class LauncherCommandLine
     public const string Usage =
         @"Usage: ProcBridge.Launcher --agent <host>[:port] --share <name> --map <virtual dir> <remote dir> [--map ...]" + "\n" +
         @"                           [--cache <dir>] [--arch x64|x86] [--spawn <ProcBridge.Spawn.exe>]" + "\n" +
-        @"                           [--no-build-servers] [--agent-fingerprint <fp>] [--data <dir>] [--plaintext]" + "\n" +
+        @"                           [--no-build-servers] [--cwd <dir>] [--agent-fingerprint <fp>] [--data <dir>]" + "\n" +
+        @"                           [--plaintext]" + "\n" +
         @"                           -- <program> [arguments]" + "\n" +
         @"       ProcBridge.Launcher --pair --agent <host>[:port] [--data <dir>]" + "\n" +
         @"       ProcBridge.Launcher --list-paired [--data <dir>] | --revoke <fingerprint> [--data <dir>]" + "\n" +
@@ -29,6 +30,7 @@ public static class LauncherCommandLine
         bool plaintext = false;
         string? agentFingerprint = null;
         string? dataDirectory = null;
+        string? workingDirectory = null;
         string architecture = Environment.Is64BitOperatingSystem ? "x64" : "x86";
         var mappings = new List<VirtualMapping>();
         int index = 0;
@@ -40,17 +42,9 @@ public static class LauncherCommandLine
             switch (option)
             {
                 case "--agent":
-                    string agent = Next(option);
-                    int colon = agent.LastIndexOf(':');
-                    if (colon > 0 && int.TryParse(agent[(colon + 1)..], out int parsedPort))
-                    {
-                        host = agent[..colon];
-                        port = parsedPort;
-                    }
-                    else
-                    {
-                        host = agent;
-                    }
+                    (string agentHost, int agentPort) = ParseAgent(Next(option));
+                    host = agentHost;
+                    port = agentPort;
                     break;
                 case "--share":
                     share = Next(option);
@@ -80,6 +74,9 @@ public static class LauncherCommandLine
                 case "--data":
                     dataDirectory = Next(option);
                     break;
+                case "--cwd":
+                    workingDirectory = Next(option);
+                    break;
                 default:
                     throw new ArgumentException($"Unknown argument {option}.");
             }
@@ -101,12 +98,22 @@ public static class LauncherCommandLine
             AllowPlaintextTransport = plaintext,
             AgentFingerprint = agentFingerprint,
             DataDirectory = dataDirectory,
+            WorkingDirectory = workingDirectory,
             CommandLine = string.Join(' ', args.Skip(index + 1).Select(Quote)),
         };
     }
 
+    /// <summary>Splits <c>host[:port]</c>; the port defaults to <see cref="Protocol.ProtocolInfo.DefaultPort"/>.</summary>
+    public static (string Host, int Port) ParseAgent(string agent)
+    {
+        int colon = agent.LastIndexOf(':');
+        return colon > 0 && int.TryParse(agent[(colon + 1)..], out int port)
+            ? (agent[..colon], port)
+            : (agent, Protocol.ProtocolInfo.DefaultPort);
+    }
+
     /// <summary>Quotes one argument for the usual (CommandLineToArgvW) parsing rules.</summary>
-    private static string Quote(string argument)
+    public static string Quote(string argument)
     {
         if (argument.Length > 0 && argument.IndexOfAny([' ', '\t', '"']) < 0)
             return argument;

@@ -41,4 +41,7 @@ public sealed record LauncherOptions
 
     /// <summary>Target command line, passed to CreateProcess as is (cmd.exe has its own quoting rules).</summary>
     public required string CommandLine { get; init; }
+
+    /// <summary><c>--cwd</c>: starting folder of the target (it must exist on machine A); null to inherit the Launcher's.</summary>
+    public string? WorkingDirectory { get; init; }
 }
