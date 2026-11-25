@@ -184,6 +184,13 @@ public sealed class NoiseHandshake : IDisposable
     }
 
     /// <summary>Processes a peer message and returns its decrypted payload.</summary>
+    /// <remarks>
+    /// The payload of IK message 1 (and XX message 1, which is not even encrypted to a known key) has
+    /// no forward secrecy and is replayable: an attacker can resend a captured message 1 and the
+    /// responder will decrypt the same payload again. Upper layers must not treat a handshake payload
+    /// as a command or anything with side effects; act only after the handshake completes and data
+    /// arrives on a <see cref="SecureChannel"/>.
+    /// </remarks>
     /// <exception cref="CryptoProtocolException">Malformed, forged, or untrusted message.</exception>
     public byte[] ReadMessage(ReadOnlySpan<byte> message)
     {

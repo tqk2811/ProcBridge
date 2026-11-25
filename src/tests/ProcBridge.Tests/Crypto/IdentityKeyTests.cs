@@ -91,6 +91,42 @@ public sealed class IdentityKeyTests
     }
 
     [TestMethod]
+    public void Store_LoadOrCreate_ConcurrentProcesses_AgreeOnOneKey()
+    {
+        var path = NewPath();
+        try
+        {
+            for (var round = 0; round < 5; round++)
+            {
+                if (File.Exists(path))
+                    File.Delete(path);
+                const int racers = 4;
+                // Both "processes" pass the Exists check and generate a key before either writes.
+                var protector = new BarrierProtector(racers);
+                var keys = new IdentityKey[racers];
+                Parallel.For(0, racers, new ParallelOptions { MaxDegreeOfParallelism = racers },
+                    i => keys[i] = new IdentityKeyStore(path, protector).LoadOrCreate());
+                try
+                {
+                    using var stored = new IdentityKeyStore(path, new XorProtector()).Load();
+                    foreach (var key in keys)
+                        Assert.IsTrue(stored.PublicKey.SequenceEqual(key.PublicKey), "a racer returned a key that is not on disk");
+                    Assert.AreEqual(1, Directory.GetFiles(Path.GetDirectoryName(path)!).Length, "temp files left behind");
+                }
+                finally
+                {
+                    foreach (var key in keys)
+                        key?.Dispose();
+                }
+            }
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(path)!, recursive: true);
+        }
+    }
+
+    [TestMethod]
     public void PrivateKey_RoundTrips()
     {
         using var key = IdentityKey.Generate();
@@ -104,5 +140,20 @@ public sealed class IdentityKeyTests
         public byte[] Protect(byte[] plaintext) => plaintext.Select(x => (byte)(x ^ 0x5A)).ToArray();
 
         public byte[] Unprotect(byte[] protectedData) => Protect(protectedData);
+    }
+
+    /// <summary>Like <see cref="XorProtector"/>, but Protect waits until every racer reaches it.</summary>
+    private sealed class BarrierProtector(int participants) : IKeyProtector
+    {
+        private readonly Barrier _barrier = new(participants);
+        private readonly XorProtector _inner = new();
+
+        public byte[] Protect(byte[] plaintext)
+        {
+            _barrier.SignalAndWait(TimeSpan.FromSeconds(10));
+            return _inner.Protect(plaintext);
+        }
+
+        public byte[] Unprotect(byte[] protectedData) => _inner.Unprotect(protectedData);
     }
 }

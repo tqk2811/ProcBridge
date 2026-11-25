@@ -24,22 +24,41 @@ public sealed class IdentityKeyStore
 
     public bool Exists => File.Exists(_path);
 
-    /// <summary>Loads the stored key, or generates and saves a new one on first run.</summary>
+    /// <summary>
+    /// Loads the stored key, or generates and saves a new one on first run. Safe when several
+    /// processes start at once: the new file is published with a no-overwrite move, so exactly one
+    /// key wins and the losers load it instead of replacing it.
+    /// </summary>
     public IdentityKey LoadOrCreate()
     {
         if (Exists)
             return Load();
         var key = IdentityKey.Generate();
+        bool created;
         try
         {
-            Save(key);
+            var tempPath = WriteTempFile(key);
+            try
+            {
+                File.Move(tempPath, _path, overwrite: false);
+                created = true;
+            }
+            catch (IOException) when (File.Exists(_path))
+            {
+                // Another process created the key first; keep theirs.
+                File.Delete(tempPath);
+                created = false;
+            }
         }
         catch
         {
             key.Dispose();
             throw;
         }
-        return key;
+        if (created)
+            return key;
+        key.Dispose();
+        return Load();
     }
 
     /// <exception cref="InvalidDataException">File is not a ProcBridge identity file.</exception>
@@ -65,6 +84,12 @@ public sealed class IdentityKeyStore
     /// <summary>Writes atomically (temp file then replace) so a crash never leaves a half-written key.</summary>
     public void Save(IdentityKey key)
     {
+        File.Move(WriteTempFile(key), _path, overwrite: true);
+    }
+
+    /// <summary>Writes the protected key to a unique temp file next to the target and returns its path.</summary>
+    private string WriteTempFile(IdentityKey key)
+    {
         var privateKey = key.ExportPrivateKey();
         byte[] blob;
         try
@@ -79,14 +104,20 @@ public sealed class IdentityKeyStore
         var directory = Path.GetDirectoryName(Path.GetFullPath(_path));
         if (!string.IsNullOrEmpty(directory))
             Directory.CreateDirectory(directory);
-        var tempPath = _path + ".tmp";
-        using (var stream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+        var tempPath = $"{_path}.{Guid.NewGuid():N}.tmp";
+        try
         {
+            using var stream = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
             stream.Write(_magic);
             stream.WriteByte(FormatVersion);
             stream.Write(blob);
             stream.Flush(flushToDisk: true);
         }
-        File.Move(tempPath, _path, overwrite: true);
+        catch
+        {
+            File.Delete(tempPath);
+            throw;
+        }
+        return tempPath;
     }
 }
