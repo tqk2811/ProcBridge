@@ -217,7 +217,8 @@ Kho `PairedMachineStore` (file bọc DPAPI, liệt kê, thu hồi) đã có cho 
 ## [Thấp] Giới hạn thử ghép cặp
 
 Mỗi phiên ghép cặp chỉ được nhập mã một lần, nhưng chưa có giới hạn số phiên ghép cặp liên tiếp
-(chống đoán mã bằng cách mở lại nhiều lần). Agent nên khoá tạm sau vài lần sai.
+(chống đoán mã bằng cách mở lại nhiều lần). Agent nên khoá tạm sau vài lần sai. Đã có: chỉ một phiên chờ
+người dùng tại một thời điểm và giới hạn kết nối đang bắt tay theo IP; chưa có khoá tạm theo số lần sai.
 
 ## [Thấp] Xoay khoá định danh
 

@@ -45,6 +45,8 @@ public sealed class AgentServer : IAsyncDisposable
             _secure = new SecureServer(security.Identity, security.PairedMachines, new SecureServerOptions
             {
                 HandshakeTimeout = options.HandshakeTimeout,
+                MaxPendingHandshakes = options.MaxPendingHandshakes,
+                MaxPendingHandshakesPerAddress = options.MaxPendingHandshakesPerAddress,
                 AllowPairing = security.AllowPairing,
                 PairingTimeout = options.PairingTimeout,
                 MaxFrameSize = options.MaxFrameSize,

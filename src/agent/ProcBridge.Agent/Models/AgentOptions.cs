@@ -39,6 +39,12 @@ public sealed record AgentOptions
     /// </summary>
     public TimeSpan TrustRefreshInterval { get; init; } = TimeSpan.FromSeconds(2);
 
+    /// <summary>Connections of a secure Agent that may be in their handshake at once; more are closed at once.</summary>
+    public int MaxPendingHandshakes { get; init; } = 64;
+
+    /// <summary>Connections of one remote address that may be in their handshake at once; more are closed at once.</summary>
+    public int MaxPendingHandshakesPerAddress { get; init; } = 8;
+
     /// <summary>Time the users have to compare the pairing code and decide.</summary>
     public TimeSpan PairingTimeout { get; init; } = TimeSpan.FromMinutes(5);
 

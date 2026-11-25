@@ -24,6 +24,9 @@ public sealed class SecureServer : IDisposable
     private readonly SecureServerOptions _options;
     private readonly Lock _lock = new();
     private readonly Dictionary<string, SessionEntry> _sessions = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, int> _pendingByAddress = new(StringComparer.Ordinal);
+    private int _pending;
+    private CancellationTokenSource? _pairingCts;
     private volatile bool _allowPairing;
     private int _disposed;
 
@@ -46,11 +49,29 @@ public sealed class SecureServer : IDisposable
     /// <summary>Raised when a paired machine was revoked; its open sessions are already dropped.</summary>
     public event Action<string>? PeerRevoked;
 
-    /// <summary>Accept pairing requests; the UI turns it on while the user pairs a new machine.</summary>
+    /// <summary>
+    /// Accept pairing requests; the UI turns it on while the user pairs a new machine. Turning it off also cancels the
+    /// pairing that is waiting for the user's decision.
+    /// </summary>
     public bool AllowPairing
     {
         get => _allowPairing;
-        set => _allowPairing = value;
+        set
+        {
+            _allowPairing = value;
+            if (value)
+                return;
+            CancellationTokenSource? pairing;
+            lock (_lock)
+                pairing = _pairingCts;
+            try
+            {
+                pairing?.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        }
     }
 
     public PairedMachineStore PairedMachines => _pairedMachines;
@@ -76,6 +97,13 @@ public sealed class SecureServer : IDisposable
     public async Task<SecureFrameChannel?> AcceptAsync(Stream stream, string remoteAddress, CancellationToken cancellationToken)
     {
         SecureFrameChannel? channel = null;
+        string? slotKey = TryTakeHandshakeSlot(remoteAddress);
+        if (slotKey is null)
+        {
+            // Too many connections are still in their preamble or handshake (global or from this address): drop it at once.
+            await stream.DisposeAsync().ConfigureAwait(false);
+            return null;
+        }
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -90,6 +118,9 @@ public sealed class SecureServer : IDisposable
                     channel = await JoinAsync(stream, timeout.Token).ConfigureAwait(false);
                     break;
                 case SecureConnectionOp.Pairing when _allowPairing:
+                    // A pairing waits for the user for minutes, so it no longer counts as a connection in its handshake;
+                    // one pairing at a time is allowed instead.
+                    ReleaseHandshakeSlot(ref slotKey);
                     await PairAsync(stream, remoteAddress, cancellationToken).ConfigureAwait(false);
                     break;
             }
@@ -99,10 +130,50 @@ public sealed class SecureServer : IDisposable
         {
             // Untrusted key, bad message, timeout or a peer that went away: the connection is just closed.
         }
+        finally
+        {
+            ReleaseHandshakeSlot(ref slotKey);
+        }
         if (channel is null)
             await stream.DisposeAsync().ConfigureAwait(false);
         return channel;
     }
+
+    /// <summary>Counts a connection in its handshake against the global and the per-address limits; null when over a limit.</summary>
+    private string? TryTakeHandshakeSlot(string remoteAddress)
+    {
+        string key = AddressKey(remoteAddress);
+        lock (_lock)
+        {
+            if (_pending >= _options.MaxPendingHandshakes)
+                return null;
+            _pendingByAddress.TryGetValue(key, out int perAddress);
+            if (perAddress >= _options.MaxPendingHandshakesPerAddress)
+                return null;
+            _pendingByAddress[key] = perAddress + 1;
+            _pending++;
+            return key;
+        }
+    }
+
+    private void ReleaseHandshakeSlot(ref string? key)
+    {
+        if (key is null)
+            return;
+        lock (_lock)
+        {
+            _pending--;
+            if (_pendingByAddress[key] <= 1)
+                _pendingByAddress.Remove(key);
+            else
+                _pendingByAddress[key]--;
+        }
+        key = null;
+    }
+
+    /// <summary>The host part of <c>host:port</c> (port dropped so a client cannot dodge the limit with new source ports).</summary>
+    private static string AddressKey(string remoteAddress)
+        => System.Net.IPEndPoint.TryParse(remoteAddress, out System.Net.IPEndPoint? endPoint) ? endPoint.Address.ToString() : remoteAddress;
 
     private async Task<SecureFrameChannel?> HandshakeAsync(Stream stream, CancellationToken cancellationToken)
     {
@@ -208,7 +279,28 @@ public sealed class SecureServer : IDisposable
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(_options.PairingTimeout);
         CancellationToken token = timeout.Token;
+        lock (_lock)
+        {
+            // Only one pairing waits for the user at a time: a second one would just stack prompts and codes.
+            if (_pairingCts is not null)
+                return;
+            _pairingCts = timeout;
+        }
+        try
+        {
+            if (!_allowPairing)
+                return;
+            await RunPairingAsync(stream, remoteAddress, token).ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (_lock)
+                _pairingCts = null;
+        }
+    }
 
+    private async Task RunPairingAsync(Stream stream, string remoteAddress, CancellationToken token)
+    {
         using var handshake = NoiseHandshake.CreatePairing(isInitiator: false, _identity, SecureWire.Prologue);
         handshake.ReadMessage(await SecureWire.ReadMessageAsync(stream, token).ConfigureAwait(false));
         await SecureWire.WriteMessageAsync(stream, handshake.WriteMessage(default), token).ConfigureAwait(false);
@@ -242,6 +334,9 @@ public sealed class SecureServer : IDisposable
 
             responder.ReceiveConfirm(await confirm.ConfigureAwait(false));
             bool accepted = await request.Decision.WaitAsync(token).ConfigureAwait(false);
+            // The user may have turned pairing off while deciding: nothing is stored then.
+            if (accepted && !_allowPairing)
+                accepted = false;
             if (accepted)
             {
                 responder.Accept();

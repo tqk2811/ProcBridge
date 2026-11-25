@@ -30,6 +30,7 @@ public sealed class SecureConnectionFactory : IConnectionFactory, IDisposable
     private readonly byte[] _agentPublicKey;
     private readonly string _agentFingerprint;
     private readonly int _maxFrameSize;
+    private readonly TimeSpan _handshakeTimeout;
     private readonly SemaphoreSlim _handshakeLock = new(1, 1);
     private SecureSession? _session;
 
@@ -42,6 +43,7 @@ public sealed class SecureConnectionFactory : IConnectionFactory, IDisposable
         _agentPublicKey = agentPublicKey.ToArray();
         _agentFingerprint = KeyFingerprint.Compute(agentPublicKey);
         _maxFrameSize = options.MaxFrameSize;
+        _handshakeTimeout = options.HandshakeTimeout;
     }
 
     public string Description => $"secure tcp://{_connector.Description}";
@@ -57,7 +59,7 @@ public sealed class SecureConnectionFactory : IConnectionFactory, IDisposable
         SecureSession? session = Volatile.Read(ref _session);
         if (session is not null)
         {
-            IFrameChannel? joined = await TryJoinAsync(session, cancellationToken).ConfigureAwait(false);
+            IFrameChannel? joined = await WithTimeoutAsync(token => TryJoinAsync(session, token), cancellationToken).ConfigureAwait(false);
             if (joined is not null)
                 return joined;
         }
@@ -69,15 +71,33 @@ public sealed class SecureConnectionFactory : IConnectionFactory, IDisposable
             SecureSession? current = Volatile.Read(ref _session);
             if (current is not null && current != session)
             {
-                IFrameChannel? joined = await TryJoinAsync(current, cancellationToken).ConfigureAwait(false);
+                IFrameChannel? joined = await WithTimeoutAsync(token => TryJoinAsync(current, token), cancellationToken).ConfigureAwait(false);
                 if (joined is not null)
                     return joined;
             }
-            return await HandshakeAsync(cancellationToken).ConfigureAwait(false);
+            return await WithTimeoutAsync(HandshakeAsync, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
             _handshakeLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Runs one connect step (handshake or join) under <see cref="TransportOptions.HandshakeTimeout"/>: an Agent that
+    /// accepts the connection and then says nothing fails the step instead of holding the caller for ever.
+    /// </summary>
+    private async Task<T> WithTimeoutAsync<T>(Func<CancellationToken, Task<T>> step, CancellationToken cancellationToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(_handshakeTimeout);
+        try
+        {
+            return await step(timeout.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException e) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new ProtocolStatusException(NtStatus.IoTimeout, $"Secure handshake with {_connector.Description} timed out.", isConnectionFailure: true, inner: e);
         }
     }
 

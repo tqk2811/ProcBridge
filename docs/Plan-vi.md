@@ -360,7 +360,13 @@ Broker kết nối TCP thẳng tới Agent (cổng cấu hình được). Tìm A
   + vân tay A + tên), confirm của A chứng minh mã khớp, chỉ `Accept` của người dùng B mới lưu khoá A; tin cuối báo
   quyết định và tên B, A lưu khoá B kèm địa chỉ. Ghép cặp tắt mặc định (`AllowPairing`).
 - Kho `PairedMachineStore` (JSON bọc DPAPI, liệt kê vân tay, thu hồi) dùng cho cả A và B; thu hồi đóng ngay các
-  kết nối của máy đó ở Agent và từ chối bắt tay/join mới.
+  kết nối của máy đó ở Agent và từ chối bắt tay/join mới, đồng thời xoá hồ sơ Explorer của vân tay đó. File là nguồn
+  sự thật: kho tự tải lại khi mtime/kích thước file đổi (bắn `Revoked` cho máy biến mất), mọi lần ghi lấy khoá liên
+  tiến trình, đọc lại file rồi chỉ áp thay đổi của mình (không ghi đè bằng danh sách cũ trong RAM); Agent quét lại hai
+  file mỗi `TrustRefreshInterval` (2 giây) để thu hồi từ tiến trình khác cũng cắt kết nối đang mở.
+- Chống kết nối chưa xác thực: `MaxPendingHandshakes` (64) toàn cục và `MaxPendingHandshakesPerAddress` (8) theo IP,
+  vượt thì đóng ngay; chỉ một phiên ghép cặp chờ người dùng tại một thời điểm; tắt `AllowPairing` huỷ phiên đang chờ.
+  Phía A bắt tay và join bị chặn bởi `TransportOptions.HandshakeTimeout`.
 - Agent và Broker mặc định bắt buộc mã hoá; `AllowPlaintextTransport` (`--plaintext`) chỉ cho phát triển và test cũ.
 
 ```mermaid
@@ -601,7 +607,7 @@ Phân quyền (Agent là bên quyết định, không tin phía A):
 
 Đã nối giao thức (nhánh `feature/secure-transport`): message `Explorer*` (`0x11xx` file, `0x12xx` process,
 `0x13xx` registry, `0x14xx` ổ đĩa/service/hệ thống) chỉ phục vụ trên kết nối mã hoá; Agent dựng `ExplorerSession`
-từ `ExplorerPolicyStore` theo vân tay máy A đã xác thực (không có hồ sơ = không quyền nào). Bị từ chối vẫn là khung
+từ `ExplorerPolicyStore` theo vân tay máy A đã xác thực (không có hồ sơ = không quyền nào). Đổi hồ sơ (`Set`/`Remove`, hoặc file bị tiến trình khác sửa) đóng các kết nối đang mở của vân tay đó để kết nối mới nhận hồ sơ mới. Bị từ chối vẫn là khung
 trả lời bình thường mang `ExplorerStatus`. Tải file trả byte bằng payload thô của khung. Phía A dùng `ExplorerClient`
 (Hello không kèm chia sẻ).
 

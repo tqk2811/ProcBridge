@@ -17,6 +17,9 @@ public sealed record TransportOptions
 
     public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(10);
 
+    /// <summary>Time the secure handshake (or the join of a session) may take once the stream is open; a silent peer is given up on after it.</summary>
+    public TimeSpan HandshakeTimeout { get; init; } = TimeSpan.FromSeconds(10);
+
     /// <summary>After a failed connect, how long a busy pool leaves that slot alone while another connection is alive.</summary>
     public TimeSpan ConnectBackoff { get; init; } = TimeSpan.FromSeconds(5);
 

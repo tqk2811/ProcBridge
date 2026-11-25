@@ -11,6 +11,12 @@ public sealed record SecureServerOptions
     /// <summary>Time the users have to compare the code and decide, from the XX handshake to the decision.</summary>
     public TimeSpan PairingTimeout { get; init; } = TimeSpan.FromMinutes(5);
 
+    /// <summary>Connections that may be in their preamble or handshake at once; more are closed at once.</summary>
+    public int MaxPendingHandshakes { get; init; } = 64;
+
+    /// <summary>Connections of one remote address that may be in their preamble or handshake at once; more are closed at once.</summary>
+    public int MaxPendingHandshakesPerAddress { get; init; } = 8;
+
     /// <summary>Largest frame body, as in <c>TransportOptions.MaxFrameSize</c>.</summary>
     public int MaxFrameSize { get; init; } = 1024 * 1024 + 64 * 1024;
 }
