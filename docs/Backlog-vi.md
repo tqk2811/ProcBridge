@@ -161,7 +161,11 @@ DLL cạnh exe mà loader tìm theo thư mục của image.
   phải mở lại. Có thể tự mở bản mới khi handle mở lại.
 - Mở bản sparse được thêm `FILE_SHARE_WRITE | FILE_SHARE_DELETE` (handle ghi của Broker còn mở): một process khác ở máy A
   mở ghi cùng file không bị lỗi chia sẻ như khi chạy cục bộ.
-- `NtReadFile` bất đồng bộ chờ tải đồng bộ trong lời gọi; tải cả file cho section dùng thời hạn gấp 10 lần thời hạn IPC.
+- `NtReadFile` bất đồng bộ chờ tải đồng bộ trong lời gọi; tải cả file cho section đi từng đợt 16 MB, mỗi đợt một thời hạn
+  IPC, nên file rất lớn chiếm lời gọi `NtCreateSection` lâu.
+- `RangeFile` không bao giờ rời `FileCache._rangesById` (Broker không biết handle nào của Hook còn giữ `RangeId`): bản
+  bị thay hoặc xoá chỉ đóng handle ghi (`Abandon`), bảng khối vẫn nằm trong bộ nhớ tới khi Broker dừng. Cần Hook báo
+  đóng handle có `RangeId` để gỡ.
 - Chưa có số đo với độ trễ mạng thật, chưa chỉnh kích thước khối theo kiểu đọc (đọc nhỏ rải rác tải 2 khối/lần khi vắt
   qua ranh giới).
 
@@ -169,11 +173,9 @@ DLL cạnh exe mà loader tìm theo thư mục của image.
 
 - Khoá trên handle không có write token (mở chỉ đọc) vẫn chỉ khoá bản cache trên máy A, nên khoá đọc ở máy A và khoá của
   writer (nằm ở máy B) không chặn nhau.
-- `NtLockFile/NtUnlockFile` trên handle có write token được trả lời đồng bộ: không gửi gói completion port, không gọi
-  APC; process khoá bất đồng bộ qua IOCP sẽ không thấy hoàn tất.
-- Handle kế thừa sang con giữ write token: handle giữ trên máy B được nhả khi process mở ban đầu mất hết kết nối pipe,
-  dù con còn dùng.
-- Kết nối giữ handle đứt thì máy B nhả khoá mà process không biết; lần khoá sau mở handle mới.
+- `NtLockFile` trên handle có write token hỏi Broker đồng bộ (chờ tối đa `LockWait` ngay trong lời gọi, kể cả lời gọi
+  bất đồng bộ); chỉ phần hoàn tất (event, APC, gói completion port) đi qua I/O manager bằng một khoá dài 0 byte trên
+  bản cache.
 - Đổi tên thư mục cha của file đang giữ: đường dẫn giữ trên Agent và trong Broker không theo; `Fs.Read` hoặc commit lặp
   lại (so nội dung) từ máy A có thể lỗi chia sẻ với share mode của handle giữ.
 - Chưa test với SQLite thật (thiếu gói `Microsoft.Data.Sqlite`).
@@ -182,10 +184,6 @@ DLL cạnh exe mà loader tìm theo thư mục của image.
 
 `cdb`/`dotnet-dump` (máy test không cài), debug bằng Visual Studio và VS Code, mở DB SQLite trên Agent. Hiện thay bằng
 DbgHelp đọc pdb qua thư mục ảo và kịch bản khoá vùng của NativeProbe.
-
-## [Thấp] Test chập chờn `ConnectionPoolTests.DisposeWhileRequestInFlight_DoesNotReconnect`
-
-Một lần chạy cả bộ (M8) bài này không thấy `ObjectDisposedException`; chạy lại xanh. Thuộc tầng transport, chưa xem.
 
 ## [Vừa] Thời hạn IPC cho file lớn
 

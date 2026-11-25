@@ -650,7 +650,7 @@ Làm song song với M2, chưa có Broker: cấu hình là `PROCBRIDGE_MAP` cụ
   khối kế (mặc định 4). Đủ khối thì bản cache thành file trọn bình thường (đóng handle ghi, đặt lại thời gian), reply
   báo `Complete` để Hook thôi hỏi.
 - **Section và ghi** (mục 15): `NtCreateSection[Ex]` trên handle có `RangeId` gửi `FetchRange` cả file trước (thời hạn
-  gấp 10 lần thời hạn IPC); mở có quyền ghi (hoặc xoá, đổi thuộc tính) hoàn tất bản sparse **tại chỗ** trước khi trả,
+  từng đợt 16 MB, mỗi đợt một thời hạn IPC); mở có quyền ghi (hoặc xoá, đổi thuộc tính) hoàn tất bản sparse **tại chỗ** trước khi trả,
   handle đọc khác vẫn dùng tiếp. Handle kế thừa sang con mang `RangeId` theo `FileInfo`.
 - **Khoá file và share mode trên máy B** (`RemoteHolds`, `AgentShare.Handles`): mở có write token thì Broker xin Agent
   giữ một handle thật (`Fs.OpenHandle`, trên một kết nối riêng) với share mode của process (luôn thêm
@@ -659,8 +659,13 @@ Làm song song với M2, chưa có Broker: cấu hình là `PROCBRIDGE_MAP` cụ
   `NtLockFile/NtUnlockFile` trên handle có write token gửi `Lock/Unlock` → `Fs.Lock/Fs.Unlock` (`LockFileEx`, chờ tối đa
   `LockWait` khi không `FailImmediately`), máy B xử lý khoá của mọi process ở máy A và máy B; bản cache **không** bị khoá
   để Broker vẫn đọc được khi ghi ngược. Commit của file đang được giữ ghi thẳng qua handle giữ (tại chỗ, giữ danh tính và
-  khoá); `Fs.SetInfo` đổi kích thước cũng dùng handle đó. Handle được nhả khi token đóng, khi process đích mất hết kết nối
-  pipe, khi kết nối giữ handle đứt.
+  khoá); `Fs.SetInfo` đổi kích thước cũng dùng handle đó. Commit mang `HoldId` của writer (id duy nhất trong share): đi
+  qua handle của chính writer đó, vùng đang bị handle khác khoá thì trả `LockNotGranted` trước khi ghi (write-back thử
+  lại sau); upload đã bắt đầu ghi tại chỗ được nhớ để lần gửi lại ghi trọn thay vì thành xung đột; đóng handle giữ chờ
+  commit đang ghi qua nó. Khoá được cấp hoàn tất qua I/O manager (khoá dài 0 byte trên bản cache) nên event, APC và gói
+  completion port đúng như khoá cục bộ. Handle được nhả với Close cuối hoặc khi process cuối giữ token (kể cả con nhận
+  kế thừa, `Retain`) mất hết kết nối pipe. Kết nối giữ handle đứt: token đang có khoá bị đánh dấu mất khoá (Lock/Unlock
+  sau đó trả `STATUS_FILE_LOCK_CONFLICT`), các handle giữ được mở lại ngay trên kết nối mới để giữ share mode.
 - **Số đo** (Agent và Broker cùng máy, file 1 GB sparse): đọc 1 MB ở offset ngẫu nhiên (không thẳng khối) tải
   1 310 720 byte (5 khối); 16 lần đọc 64 KB rải rác tải 5 242 880 byte (2 khối/lần do vắt qua ranh giới); kịch bản game
   qua Hook (1 MB + 4 lần đọc nhỏ) tải 2 359 296 byte (9 khối) thay vì 1 GB.
