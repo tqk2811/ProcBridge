@@ -29,8 +29,19 @@ public sealed class RelayHostLink : IAsyncDisposable
     private readonly ConcurrentDictionary<Guid, HostSession> _sessions = new();
     private readonly ConcurrentDictionary<Task, byte> _lanes = new();
     private readonly CancellationTokenSource _stopping = new();
+    private readonly SemaphoreSlim _sendLock = new(1, 1);
+    // Pairing slot state, under _pairingLock: the code waiting for the relay's answer, and the one the relay confirmed.
+    private readonly object _pairingLock = new();
+    private bool _pairingEnabled;
+    private string? _pendingCode;
+    private string? _pendingKey;
+    private string? _activeCode;
+    private string? _activeKey;
+    private DateTime? _activeExpiresAt;
+    private int _rejectedInARow;
     private Task _run = Task.CompletedTask;
     private Task _sweeper = Task.CompletedTask;
+    private Task _pairingTimer = Task.CompletedTask;
     private WebSocket? _control;
     private volatile bool _isConnected;
     private int _disposed;
@@ -69,7 +80,10 @@ public sealed class RelayHostLink : IAsyncDisposable
     /// </summary>
     public TimeSpan SessionRetention { get; init; } = TimeSpan.FromMinutes(2);
 
-    /// <summary>Clock of the session sweep; tests replace it.</summary>
+    /// <summary>How often an open pairing slot is checked for expiry (a new code is opened once it expired).</summary>
+    public TimeSpan PairingCheckInterval { get; init; } = TimeSpan.FromSeconds(1);
+
+    /// <summary>Clock of the session sweep and of the pairing slot expiry; tests replace it.</summary>
     public Func<DateTime> UtcNow { get; init; } = () => DateTime.UtcNow;
 
     /// <summary>Sessions remembered right now (tests).</summary>
@@ -103,10 +117,181 @@ public sealed class RelayHostLink : IAsyncDisposable
     /// <summary>Raised on a background thread when <see cref="IsConnected"/> changes.</summary>
     public event Action<bool>? ConnectionChanged;
 
+    /// <summary>
+    /// Pairing invite code machines A type to find this machine on the relay (<c>1234-5678</c>), once the relay opened
+    /// the slot; null while pairing through the relay is off, not connected, or a new code waits for the relay.
+    /// </summary>
+    public string? PairingCode
+    {
+        get
+        {
+            lock (_pairingLock)
+                return _activeCode is null ? null : RelayPairingCode.Format(_activeCode);
+        }
+    }
+
+    /// <summary>When the relay drops the slot of <see cref="PairingCode"/> (UTC); a new code is opened then.</summary>
+    public DateTime? PairingCodeExpiresAt
+    {
+        get
+        {
+            lock (_pairingLock)
+                return _activeExpiresAt;
+        }
+    }
+
+    /// <summary>Raised on a background thread when <see cref="PairingCode"/> changes (new code, expired, turned off).</summary>
+    public event Action? PairingCodeChanged;
+
+    /// <summary>
+    /// Opens (true) or closes (false) a pairing slot on the relay, so machines A that only reach this machine through the
+    /// relay find it by an invite code (plan 9). While on, the link keeps a slot open: a new code after the relay drops
+    /// the previous one (expired, used by a machine A, control channel reconnected). The pairing itself then runs end to
+    /// end on a lane like on the LAN; the Agent must accept pairings meanwhile.
+    /// </summary>
+    public void SetPairingSlot(bool enabled)
+    {
+        lock (_pairingLock)
+        {
+            if (_pairingEnabled == enabled)
+                return;
+            _pairingEnabled = enabled;
+            _rejectedInARow = 0;
+        }
+        if (enabled)
+            RotatePairingCode();
+        else
+        {
+            ClearPairingCode();
+            _ = SendControlAsync(new TunnelPairingSlotMessageVM(TunnelProtocol.PairingSlotCancelMessage, null));
+        }
+    }
+
+    /// <summary>Asks the relay for a slot under a new code (shown once the relay confirms it). No-op while pairing is off.</summary>
+    private void RotatePairingCode()
+    {
+        string key;
+        bool hadCode;
+        lock (_pairingLock)
+        {
+            if (!_pairingEnabled)
+                return;
+            hadCode = _activeCode is not null;
+            _pendingCode = RelayPairingCode.Generate();
+            _pendingKey = key = RelayPairingCode.DeriveLookupKey(_pendingCode);
+            _activeCode = _activeKey = null;
+            _activeExpiresAt = null;
+        }
+        if (hadCode)
+            PairingCodeChanged?.Invoke();
+        // Not connected: the slot is asked for again once the control channel is proven.
+        _ = SendControlAsync(new TunnelPairingSlotMessageVM(TunnelProtocol.PairingSlotMessage, key));
+    }
+
+    private void ClearPairingCode()
+    {
+        bool hadCode;
+        lock (_pairingLock)
+        {
+            hadCode = _activeCode is not null;
+            _pendingCode = _pendingKey = _activeCode = _activeKey = null;
+            _activeExpiresAt = null;
+        }
+        if (hadCode)
+            PairingCodeChanged?.Invoke();
+    }
+
+    private void OnPairingSlotState(string type, TunnelPairingSlotStateMessageVM state)
+    {
+        switch (type)
+        {
+            case TunnelProtocol.PairingSlotRegisteredMessage:
+                lock (_pairingLock)
+                {
+                    if (!_pairingEnabled || state.LookupKey != _pendingKey)
+                        return; // An answer about a slot replaced meanwhile.
+                    _activeCode = _pendingCode;
+                    _activeKey = _pendingKey;
+                    _activeExpiresAt = state.ExpiresAt?.ToUniversalTime();
+                    _pendingCode = _pendingKey = null;
+                    _rejectedInARow = 0;
+                }
+                PairingCodeChanged?.Invoke();
+                break;
+            case TunnelProtocol.PairingSlotRejectedMessage:
+                lock (_pairingLock)
+                {
+                    // Another host holds the same key (codes are short): try another code, but do not loop forever.
+                    if (state.LookupKey != _pendingKey || ++_rejectedInARow > 5)
+                        return;
+                }
+                RotatePairingCode();
+                break;
+            case TunnelProtocol.PairingSlotClaimedMessage:
+                lock (_pairingLock)
+                {
+                    if (state.LookupKey != _activeKey && state.LookupKey != _pendingKey)
+                        return;
+                }
+                // Single use on the relay: the next machine A needs a new code.
+                RotatePairingCode();
+                break;
+        }
+    }
+
+    private async Task PairingLoopAsync()
+    {
+        using var timer = new PeriodicTimer(PairingCheckInterval);
+        try
+        {
+            while (await timer.WaitForNextTickAsync(_stopping.Token).ConfigureAwait(false))
+            {
+                bool expired;
+                lock (_pairingLock)
+                    expired = _pairingEnabled && _activeExpiresAt is { } at && UtcNow() >= at;
+                if (expired)
+                    RotatePairingCode();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    /// <summary>Sends one JSON line on the control channel; silently nothing when it is not open (the loop reconnects).</summary>
+    private async Task SendControlAsync(object message)
+    {
+        WebSocket? control = _control;
+        if (control is null || !_isConnected)
+            return;
+        byte[] bytes = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(message, _json));
+        try
+        {
+            await _sendLock.WaitAsync(_stopping.Token).ConfigureAwait(false);
+        }
+        catch (Exception e) when (e is OperationCanceledException or ObjectDisposedException)
+        {
+            return;
+        }
+        try
+        {
+            await control.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, _stopping.Token).ConfigureAwait(false);
+        }
+        catch (Exception e) when (e is WebSocketException or OperationCanceledException or ObjectDisposedException or InvalidOperationException)
+        {
+            // The channel broke: the read loop sees it too and reconnects, which asks for a slot again.
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
+    }
+
     public void Start()
     {
         _run = Task.Run(RunAsync);
         _sweeper = Task.Run(SweepLoopAsync);
+        _pairingTimer = Task.Run(PairingLoopAsync);
     }
 
     private async Task SweepLoopAsync()
@@ -139,6 +324,8 @@ public sealed class RelayHostLink : IAsyncDisposable
                 LastError = null;
                 SetConnected(true);
                 delay = ReconnectDelay;
+                // A new control channel has no slot on the relay (it may be a restarted relay): open one with a new code.
+                RotatePairingCode();
                 await ReadControlAsync(control, _stopping.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (_stopping.IsCancellationRequested)
@@ -153,6 +340,20 @@ public sealed class RelayHostLink : IAsyncDisposable
             {
                 _control = null;
                 SetConnected(false);
+                // The relay dropped the slot with the channel: do not show a code nobody can use.
+                lock (_pairingLock)
+                {
+                    _pendingCode = _pendingKey = null;
+                }
+                if (PairingCode is not null)
+                {
+                    lock (_pairingLock)
+                    {
+                        _activeCode = _activeKey = null;
+                        _activeExpiresAt = null;
+                    }
+                    PairingCodeChanged?.Invoke();
+                }
             }
 
             try
@@ -210,8 +411,14 @@ public sealed class RelayHostLink : IAsyncDisposable
     private void OnControlMessage(string text)
     {
         JObject json = JObject.Parse(text);
-        switch (json.Value<string>("type"))
+        string? type = json.Value<string>("type");
+        switch (type)
         {
+            case TunnelProtocol.PairingSlotRegisteredMessage:
+            case TunnelProtocol.PairingSlotRejectedMessage:
+            case TunnelProtocol.PairingSlotClaimedMessage:
+                OnPairingSlotState(type, json.ToObject<TunnelPairingSlotStateMessageVM>(JsonSerializer.Create(_json))!);
+                break;
             case TunnelProtocol.SessionOpenedMessage:
                 TunnelSessionOpenedMessageVM opened = json.ToObject<TunnelSessionOpenedMessageVM>(JsonSerializer.Create(_json))!;
                 _sessions[opened.SessionId] = new HostSession(opened);
@@ -332,6 +539,7 @@ public sealed class RelayHostLink : IAsyncDisposable
         {
             await _run.ConfigureAwait(false);
             await _sweeper.ConfigureAwait(false);
+            await _pairingTimer.ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {

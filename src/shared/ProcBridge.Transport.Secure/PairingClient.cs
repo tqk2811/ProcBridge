@@ -48,6 +48,11 @@ public sealed class PairingClient
             handshake.ReadMessage(await SecureWire.ReadMessageAsync(stream, cancellationToken).ConfigureAwait(false));
             await SecureWire.WriteMessageAsync(stream, handshake.WriteMessage(default), cancellationToken).ConfigureAwait(false);
             using SecureSession session = handshake.CreateSession();
+            // Through the relay the lookup named a HostId: the key the handshake proves must be that machine's.
+            if (connector is IPeerHintConnector { ExpectedPeerFingerprint: { } expected }
+                && handshake.RemoteStaticPublicKey is { } peerKey
+                && !string.Equals(KeyFingerprint.Compute(peerKey), expected, StringComparison.Ordinal))
+                throw new PairingFailedException($"The relay named machine {expected}, but another machine answered: pairing refused.");
             using SecureChannel channel = session.GetPairingChannel();
             var initiator = new PairingInitiator(session);
 
