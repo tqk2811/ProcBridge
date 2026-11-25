@@ -180,6 +180,8 @@ internal static class Program
             {
                 if (relay.PairingCode is { } code)
                     Console.WriteLine($"  relay pairing code: {code} (valid until {relay.PairingCodeExpiresAt:HH:mm:ss} UTC, single use)");
+                else if (relay.PairingError is { } error)
+                    Console.WriteLine($"  relay pairing code unavailable: {error}");
             };
         }
 

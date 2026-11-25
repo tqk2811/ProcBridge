@@ -51,6 +51,7 @@ public sealed class AgentHost : IAgentHost
     public string? RelayState => _server?.Relay switch
     {
         null => null,
+        { IsConnected: true, PairingError: { } pairingError } => $"relay: đã kết nối, chưa có mã ghép cặp ({pairingError})",
         { IsConnected: true } => "relay: đã kết nối",
         { LastError: { } error } => $"relay: mất kết nối ({error}), đang thử lại",
         _ => "relay: đang kết nối",

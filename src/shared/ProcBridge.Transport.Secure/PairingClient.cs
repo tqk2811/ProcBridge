@@ -46,13 +46,17 @@ public sealed class PairingClient
             await SecureWire.WritePreambleAsync(stream, SecureConnectionOp.Pairing, cancellationToken).ConfigureAwait(false);
             await SecureWire.WriteMessageAsync(stream, handshake.WriteMessage(default), cancellationToken).ConfigureAwait(false);
             handshake.ReadMessage(await SecureWire.ReadMessageAsync(stream, cancellationToken).ConfigureAwait(false));
+            // Through the relay the lookup named a HostId: message 2 carries the peer's static key, which must be that
+            // machine's. Checked before message 3, so nothing of ours (our static key included) reaches a wrong peer.
+            if (connector is IPeerHintConnector { ExpectedPeerFingerprint: { } expected })
+            {
+                byte[] peerKey = handshake.RemoteStaticPublicKey
+                    ?? throw new PairingFailedException("The peer did not present its key: pairing refused.");
+                if (!string.Equals(KeyFingerprint.Compute(peerKey), expected, StringComparison.Ordinal))
+                    throw new PairingFailedException($"The relay named machine {expected}, but another machine answered: pairing refused.");
+            }
             await SecureWire.WriteMessageAsync(stream, handshake.WriteMessage(default), cancellationToken).ConfigureAwait(false);
             using SecureSession session = handshake.CreateSession();
-            // Through the relay the lookup named a HostId: the key the handshake proves must be that machine's.
-            if (connector is IPeerHintConnector { ExpectedPeerFingerprint: { } expected }
-                && handshake.RemoteStaticPublicKey is { } peerKey
-                && !string.Equals(KeyFingerprint.Compute(peerKey), expected, StringComparison.Ordinal))
-                throw new PairingFailedException($"The relay named machine {expected}, but another machine answered: pairing refused.");
             using SecureChannel channel = session.GetPairingChannel();
             var initiator = new PairingInitiator(session);
 

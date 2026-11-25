@@ -166,7 +166,12 @@ public sealed class RelayPairingTests
             new AgentSecurity { Identity = agentKey, PairedMachines = agentTrust, AllowPairing = true });
         server.Start();
         bool asked = false;
-        server.PairingRequested += request => request.Accept();
+        bool requested = false;
+        server.PairingRequested += request =>
+        {
+            requested = true;
+            request.Accept();
+        };
         using var other = IdentityKey.Generate();
         var connector = new HintedConnector(new TcpStreamConnector("127.0.0.1", server.Port), other.Fingerprint);
 
@@ -176,16 +181,90 @@ public sealed class RelayPairingTests
             return Task.FromResult("000000");
         }, CancellationToken.None));
         Assert.IsFalse(asked, "A must not even ask for the code.");
+        Assert.IsTrue(connector.ReadSomething, "Message 2 (with the wrong key) was read.");
+        Assert.AreEqual(0, connector.BytesWrittenAfterFirstRead, "Nothing after message 2: message 3 would hand our static key to the wrong peer.");
+        Assert.IsFalse(requested, "Machine B never got as far as a pairing request.");
         Assert.IsEmpty(brokerTrust.List());
         Assert.IsEmpty(agentTrust.List());
     }
 
+    /// <summary>Connector that names an expected HostId and records what A writes after its first read (message 2).</summary>
     private sealed class HintedConnector(IStreamConnector inner, string expected) : IPeerHintConnector
     {
+        private TapStream? _tap;
+
         public string Description => inner.Description;
 
         public string? ExpectedPeerFingerprint => expected;
 
-        public ValueTask<Stream> ConnectAsync(CancellationToken cancellationToken) => inner.ConnectAsync(cancellationToken);
+        public bool ReadSomething => _tap?.ReadSomething ?? false;
+
+        public long BytesWrittenAfterFirstRead => _tap?.BytesWrittenAfterFirstRead ?? 0;
+
+        public async ValueTask<Stream> ConnectAsync(CancellationToken cancellationToken)
+            => _tap = new TapStream(await inner.ConnectAsync(cancellationToken));
+    }
+
+    private sealed class TapStream(Stream inner) : Stream
+    {
+        public bool ReadSomething { get; private set; }
+
+        public long BytesWrittenAfterFirstRead { get; private set; }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+
+        public override void Flush() => inner.Flush();
+        public override Task FlushAsync(CancellationToken cancellationToken) => inner.FlushAsync(cancellationToken);
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override int Read(byte[] buffer, int offset, int count) => Track(inner.Read(buffer, offset, count));
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+            => Track(await inner.ReadAsync(buffer, cancellationToken));
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+            => ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            Count(count);
+            inner.Write(buffer, offset, count);
+        }
+
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            Count(buffer.Length);
+            return inner.WriteAsync(buffer, cancellationToken);
+        }
+
+        public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+            => WriteAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+                inner.Dispose();
+            base.Dispose(disposing);
+        }
+
+        public override ValueTask DisposeAsync() => inner.DisposeAsync();
+
+        private int Track(int read)
+        {
+            if (read > 0)
+                ReadSomething = true;
+            return read;
+        }
+
+        private void Count(int count)
+        {
+            if (ReadSomething)
+                BytesWrittenAfterFirstRead += count;
+        }
     }
 }

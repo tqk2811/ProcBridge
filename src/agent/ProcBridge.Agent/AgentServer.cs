@@ -103,6 +103,9 @@ public sealed class AgentServer : IAsyncDisposable
     /// </summary>
     public string? RelayPairingCode => _relay?.PairingCode;
 
+    /// <summary>Why no relay pairing code can be shown (the relay keeps refusing codes); null when fine or without relay.</summary>
+    public string? RelayPairingError => _relay?.PairingError;
+
     /// <summary>Fingerprint of this Agent's identity key, or null without security.</summary>
     public string? Fingerprint => _secure?.Fingerprint;
 
