@@ -172,7 +172,7 @@ Hook ở tầng Win32 thì hở nhiều đường đi vòng nên không chọn.
 | Tên handle | `NtQueryObject` (`ObjectNameInformation`), `NtQueryInformationFile` (`FileNameInformation`, `FileNormalizedNameInformation`) | Để `GetFinalPathNameByHandle` trả đường dẫn ảo chứ không lộ đường dẫn cache |
 | Volume | `NtQueryVolumeInformationFile` | Tên ổ, serial, hệ thống file, dung lượng trống của thư mục ảo |
 | Khoá | `NtLockFile`, `NtUnlockFile` | Chuyển sang máy B ở mốc sau; ban đầu khoá cục bộ trên file cache |
-| Tạo process | `NtCreateUserProcess` | Mục 5 |
+| Tạo process | `NtCreateUserProcess` | Mục 5; exe nằm trong thư mục ảo chạy từ bản sao (mục 13.7) |
 
 ### 4.3 Nhận diện đường dẫn ảo
 
@@ -707,8 +707,35 @@ Làm song song với M2, chưa có Broker: cấu hình là `PROCBRIDGE_MAP` cụ
   `SEC_IMAGE`); `dotnet <ảo>\app\ProcBridge.Launcher.dll` chạy được (assembly lớn là bản sparse); DbgHelp
   (`SymLoadModuleExW`) đọc pdb qua thư mục ảo và tìm được `wmain`; khoá vùng và share mode thấy được hai chiều giữa máy A
   và máy B, ghi ngược tại chỗ khi đang khoá; `git status`/`git log` trên repo nằm ở máy B. Chưa chạy: `cdb`/`dotnet-dump`
-  (máy không cài), SQLite (chưa có gói `Microsoft.Data.Sqlite`), debug bằng VS/VS Code, chạy exe nằm trong thư mục ảo
-  (xem Backlog).
+  (máy không cài), SQLite (chưa có gói `Microsoft.Data.Sqlite`), debug bằng VS/VS Code. Chạy exe nằm trong thư mục ảo:
+  mục 13.7.
+
+### 13.7 Chạy exe nằm trong thư mục ảo (2026-11-26)
+
+Kernel mở và ánh xạ file image ngay trong `NtCreateUserProcess` theo thuộc tính `PS_ATTRIBUTE_IMAGE_NAME`, không qua hook
+mở file nào; loader của con lại nạp các DLL import tĩnh trước khi Hook được inject vào con (thread inject chạy phần khởi
+tạo process trước `LoadLibraryW`). Nên exe nằm trong thư mục ảo được chạy từ **bản sao** của nó:
+
+- **Đưa vào bản sao** (`ImageMaterializer`, chạy trong hook `NtCreateUserProcess` của cha): `Resolve` exe như một lần mở
+  chỉ đọc; bản sparse (M8) được `FetchRange` trọn trước (kernel ánh xạ không qua hook). Cùng cách cho `<exe>.manifest` và
+  các DLL trong bảng import của exe (đệ quy theo import của chúng, tối đa 128 module, bỏ tên API set) **có mặt cạnh exe**
+  trong thư mục ảo. Chế độ cục bộ (`PROCBRIDGE_MAP`) chỉ là dịch đường dẫn và kiểm file có thật. Exe không đưa vào được thì
+  việc tạo process trả lỗi của `Resolve` (vd `STATUS_OBJECT_NAME_NOT_FOUND`, lỗi mạng); DLL thiếu thì bỏ qua để loader
+  báo lỗi như khi chạy cục bộ.
+- **Dịch đường dẫn** (`ImageRedirect`): gọi hàm gốc với một bản chép của `PS_ATTRIBUTE_LIST` có tên image là đường dẫn NT
+  của bản sao, và tạm trỏ `ImagePathName` của process parameters (dạng normalized) sang đường dẫn DOS của bản sao, để loader
+  của con lấy thư mục của bản sao làm thư mục ứng dụng và thấy các DLL vừa đưa vào. Dòng lệnh giữ nguyên tên ảo. Gọi xong
+  thì trả lại `ImagePathName` cho bên gọi.
+- **Trả lại tên ảo** (`LoaderNames`): khối khởi tạo của con mang `PROCBRIDGE_IMAGE=<thư mục bản sao>*<thư mục ảo>` (rỗng với
+  con thường; Spawn cũng gửi rỗng). Initializer của con đọc rồi xoá biến này (cháu không thừa kế), bật hook xong thì dưới
+  loader lock đổi `FullDllName`/`BaseDllName` của mọi module nằm trong thư mục bản sao và `ImagePathName` sang thư mục ảo.
+  Từ đó `GetModuleFileName` trả tên ảo, và thứ process tìm cạnh chính nó (apphost .NET tìm `app.dll`, `LoadLibrary` theo tên
+  trần) đi qua thư mục ảo có hook.
+- Kiểm (`src/tests/ProcBridge.Tests/Native/VirtualImageTests.cs`, x64 và Win32): `cmd` chạy bản sao của NativeProbe
+  (`--image`) nằm trong thư mục ảo, cạnh nó là bản sao `dbghelp.dll` (import tĩnh) và `pbdyn.dll` (bản sao `version.dll`, nạp
+  sau theo tên trần): tên image, `dbghelp.dll` và `pbdyn.dll` đều là tên ảo trong thư mục ảo, ở chế độ cục bộ và qua Agent
+  với ngưỡng tải theo vùng 16 KB (bản cache của exe trùng từng byte với máy B); apphost `ProcBridge.Launcher.exe` chạy từ
+  máy B. Cả năm bài đỏ khi bỏ bước dịch. Phần chưa phủ ở Backlog.
 
 ---
 

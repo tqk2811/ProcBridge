@@ -68,3 +68,10 @@ số của máy A và máy B được Relay ghép cặp và chép nguyên khung 
 Tên máy B trên Relay: vân tay khoá định danh Noise của nó. Máy B chứng minh sở hữu khoá bằng một bắt tay Noise
 ngắn với Relay trên kênh điều khiển, nên không ai đăng ký được HostId của máy khác; máy A mở phiên theo HostId lấy
 từ máy đã ghép cặp.
+
+## Image và loader
+
+*Image* là file PE (exe, DLL) được ánh xạ vào bộ nhớ để chạy. *Loader* là phần của `ntdll` nạp image vào process:
+với exe, kernel mở và ánh xạ file ngay trong `NtCreateUserProcess`, rồi loader của process mới nạp các DLL mà exe
+import (tìm trước tiên trong thư mục của exe) và ghi tên mỗi module vào danh sách module của PEB, nơi
+`GetModuleFileName` đọc ra.

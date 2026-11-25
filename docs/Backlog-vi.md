@@ -145,12 +145,21 @@ IOCP sẽ không nhận được gói hoàn tất. Bỏ qua `SL_INDEX_SPECIFIED`
   flush/đóng. Chưa có cấu hình ghi xuyên theo thư mục (Plan 10).
 - Remote Explorer (Plan 14) chưa có thao tác file.
 
-## [Vừa] Chạy exe nằm trong thư mục ảo
+## [Thấp] Chạy exe nằm trong thư mục ảo: phần còn thiếu
 
-`NtCreateUserProcess` mở file image trong kernel theo `ImagePathName`, không qua hook mở file, nên exe nằm trong thư mục
-ảo không chạy được (M8 chỉ phủ DLL nạp bằng `LoadLibrary` và app .NET chạy bằng `dotnet <ảo>\app.dll`). Cần dịch đường
-dẫn image sang bản cache (tải trọn trước) trong hook `NtCreateUserProcess`, giữ tên ảo cho `GetModuleFileName`, và lo các
-DLL cạnh exe mà loader tìm theo thư mục của image.
+Plan 13.7. Ghi 2026-11-26.
+
+- Chỉ DLL import tĩnh nằm **cạnh** exe được đưa sẵn vào bản sao. DLL import tĩnh mà loader tìm ở thư mục khác thuộc thư
+  mục ảo (một mục `PATH` trỏ vào thư mục ảo, private assembly SxS ở thư mục con, chuyển hướng `.local`) bị tìm trước khi
+  Hook có mặt trong con nên không thấy.
+- Tên do kernel giữ vẫn là bản sao: `NtQueryInformationProcess(ProcessImageFileName)`, `QueryFullProcessImageName`,
+  `GetMappedFileName` trên vùng image. Tên trong danh sách module của PEB (và `GetModuleFileNameEx` từ process khác) đã là
+  tên ảo.
+- Mỗi lần tạo process từ exe ảo, mỗi tên DLL import (trừ API set) hỏi Broker một `Resolve`; tên DLL hệ thống (kernel32...)
+  thành một lần hỏi máy B không thấy. Có thể nhớ kết quả theo exe hoặc bỏ qua tên trong `KnownDLLs`.
+- Process đầu tiên (Spawn, Launcher) không chạy được exe nằm trong thư mục ảo: chỉ process đã có Hook mới dịch được.
+- `ImagePathName` chỉ được đổi khi process parameters ở dạng normalized (kernelbase luôn tạo dạng này); bên gọi thẳng
+  `NtCreateUserProcess` với parameters dạng offset thì con vẫn chạy nhưng loader tìm DLL theo tên ảo trước khi có Hook.
 
 ## [Vừa] Tải theo vùng (M8): phần còn thiếu
 
