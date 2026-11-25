@@ -75,6 +75,24 @@ public sealed class AgentServerTests
     }
 
     [TestMethod]
+    public async Task ClientsThatDisconnectAtOnce_LeaveNoSessionBehind()
+    {
+        using var share = new TempFolder("agent");
+        await using var server = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
+        server.Start();
+        for (int i = 0; i < 200; i++)
+        {
+            using var client = new System.Net.Sockets.TcpClient();
+            await client.ConnectAsync(IPAddress.Loopback, server.Port);
+        }
+
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        while (server.ActiveSessionCount > 0 && watch.Elapsed < TimeSpan.FromSeconds(10))
+            await Task.Delay(50);
+        Assert.AreEqual(0, server.ActiveSessionCount);
+    }
+
+    [TestMethod]
     public async Task StatListRead_Work()
     {
         using var share = new TempFolder("agent");

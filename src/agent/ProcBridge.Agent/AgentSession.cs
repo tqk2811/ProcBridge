@@ -112,7 +112,7 @@ internal sealed class AgentSession
                 case MessageType.FsList:
                 {
                     FsListRequest list = ProtocolSerializer.Deserialize<FsListRequest>(request.Header);
-                    FsListResponse response = _share!.List(list.Path, list.StartIndex, list.MaxCount);
+                    FsListResponse response = _share!.List(list.Path, list.StartIndex, list.MaxCount, _options.MaxFrameSize - Frame.FixedBodySize);
                     await SendAsync(FrameKind.Response, request, ProtocolSerializer.Serialize(response), default).ConfigureAwait(false);
                     break;
                 }

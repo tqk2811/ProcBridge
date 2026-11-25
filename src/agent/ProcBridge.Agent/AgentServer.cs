@@ -59,12 +59,18 @@ public sealed class AgentServer : IAsyncDisposable
             client.NoDelay = true;
             var channel = new StreamFrameChannel(client.GetStream(), ownsStream: true, _options.MaxFrameSize);
             var session = new AgentSession(channel, client, _shares, _options);
-            _sessions[session] = RunSessionAsync(session);
+
+            // The session removes itself when it ends; it must not start before it is registered, or a connection
+            // that fails at once would be removed first and then re-added for good.
+            var registered = new TaskCompletionSource();
+            _sessions[session] = RunSessionAsync(session, registered.Task);
+            registered.SetResult();
         }
     }
 
-    private async Task RunSessionAsync(AgentSession session)
+    private async Task RunSessionAsync(AgentSession session, Task registered)
     {
+        await registered.ConfigureAwait(false);
         try
         {
             await session.RunAsync(_stopping.Token).ConfigureAwait(false);

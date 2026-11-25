@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.Win32.SafeHandles;
 using ProcBridge.Protocol;
 using ProcBridge.Protocol.Enums;
@@ -15,6 +16,12 @@ public sealed class ReadOnlyShare
 {
     private const int DefaultListPage = 1024;
     private const uint FileTypeDisk = 1;
+
+    /// <summary>Serialized size of an entry besides its name: array and string headers, one u32 and seven 64-bit fields.</summary>
+    private const int ListEntryOverhead = 96;
+
+    /// <summary>Response array headers and the has-more flag, with slack.</summary>
+    private const int ListResponseOverhead = 64;
 
     private static readonly char[] Separators = ['/', '\\'];
     private static readonly char[] InvalidNameChars = Path.GetInvalidFileNameChars();
@@ -149,7 +156,8 @@ public sealed class ReadOnlyShare
         return ToEntry(info, path.Length == RootPath.Length ? string.Empty : info.Name);
     }
 
-    public FsListResponse List(string relativePath, int startIndex, int maxCount)
+    /// <param name="maxResponseBytes">Upper bound for the serialized page; at least one entry is always returned.</param>
+    public FsListResponse List(string relativePath, int startIndex, int maxCount, int maxResponseBytes = int.MaxValue)
     {
         string path = ResolvePath(relativePath);
         FileSystemInfo info = GetExistingInfo(path);
@@ -161,7 +169,18 @@ public sealed class ReadOnlyShare
             .OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
             .ToArray();
         int start = Math.Clamp(startIndex, 0, all.Length);
-        int count = Math.Min(maxCount <= 0 ? DefaultListPage : Math.Min(maxCount, DefaultListPage * 4), all.Length - start);
+        int limit = Math.Min(maxCount <= 0 ? DefaultListPage : Math.Min(maxCount, DefaultListPage * 4), all.Length - start);
+
+        // Names can be 255 characters, so the count alone does not keep the page inside one frame.
+        int budget = maxResponseBytes - ListResponseOverhead;
+        int count = 0;
+        while (count < limit)
+        {
+            budget -= ListEntryOverhead + Encoding.UTF8.GetMaxByteCount(all[start + count].Name.Length);
+            if (budget < 0 && count > 0)
+                break;
+            count++;
+        }
         return new FsListResponse
         {
             Entries = all.Skip(start).Take(count).Select(x => ToEntry(x, x.Name)).ToArray(),

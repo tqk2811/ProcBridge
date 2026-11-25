@@ -1,6 +1,7 @@
 using ProcBridge.Agent;
 using ProcBridge.Protocol;
 using ProcBridge.Protocol.Enums;
+using ProcBridge.Protocol.Models;
 
 namespace ProcBridge.Tests.Lan;
 
@@ -29,6 +30,34 @@ public sealed class ReadOnlyShareTests
         var share = new ReadOnlyShare("src", folder.Path);
         var e = Assert.ThrowsExactly<ProtocolStatusException>(() => share.ResolvePath(path));
         Assert.AreEqual(NtStatus.ObjectNameInvalid, e.Status);
+    }
+
+    [TestMethod]
+    public void List_PageStaysWithinTheByteBudget_AndPagingCoversEverything()
+    {
+        using var folder = new TempFolder("share");
+        string[] names = Enumerable.Range(0, 200).Select(i => i.ToString("D3") + new string('x', 150)).ToArray();
+        foreach (string name in names)
+            folder.WriteFile(name, [1]);
+        var share = new ReadOnlyShare("src", folder.Path);
+
+        const int Budget = 8 * 1024;
+        var seen = new List<string>();
+        int start = 0;
+        int pages = 0;
+        while (true)
+        {
+            FsListResponse page = share.List("", start, maxCount: 4096, maxResponseBytes: Budget);
+            Assert.IsNotEmpty(page.Entries);
+            Assert.IsLessThanOrEqualTo(Budget, ProtocolSerializer.Serialize(page).Length);
+            seen.AddRange(page.Entries.Select(x => x.Name));
+            start += page.Entries.Length;
+            pages++;
+            if (!page.HasMore)
+                break;
+        }
+        CollectionAssert.AreEqual(names, seen);
+        Assert.IsGreaterThan(1, pages);
     }
 
     [TestMethod]
