@@ -5,8 +5,6 @@ name: release
 # smoke tested and kept as workflow artifacts, no GitHub Release is touched. See docs/Release-vi.md.
 on:
   push:
-    # TEMPORARY dry run of this branch (workflow_dispatch needs the file on master); remove before merge.
-    branches: [ feature/release ]
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
   workflow_dispatch:
