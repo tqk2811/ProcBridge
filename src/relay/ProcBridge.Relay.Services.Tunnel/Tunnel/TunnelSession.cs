@@ -65,6 +65,17 @@ internal sealed class TunnelSession
         }
     }
 
+    /// <summary>Aborts every lane (revocation); the session then dies once the lanes are gone.</summary>
+    public void AbortAll()
+    {
+        lock (_lock)
+        {
+            _acceptLanesUntil = DateTime.MinValue;
+            foreach (var pair in _lanes.Values)
+                pair.Abort();
+        }
+    }
+
     /// <summary>Forgets a finished (or abandoned) lane so the index can be reused; restarts the grace window when it was the last one.</summary>
     public void RemoveLane(int lane, TunnelLanePair pair, DateTime now, TimeSpan grace)
     {

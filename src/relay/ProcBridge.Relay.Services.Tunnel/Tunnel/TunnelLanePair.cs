@@ -34,6 +34,13 @@ internal sealed class TunnelLanePair : IDisposable
         }
     }
 
+    /// <summary>Whether that side of the lane is taken (reserved or attached).</summary>
+    public bool IsReserved(TunnelSide side)
+    {
+        lock (_lock)
+            return side == TunnelSide.Client ? _clientReserved : _hostReserved;
+    }
+
     public void Attach(TunnelSide side, WebSocket socket) => Slot(side).TrySetResult(socket);
 
     public Task<WebSocket> PartnerAsync(TunnelSide side) => Slot(side == TunnelSide.Client ? TunnelSide.Host : TunnelSide.Client).Task;

@@ -1,5 +1,8 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
+
+using ProcBridge.Relay.Api.Infrastructure;
 
 using ProcBridge.Relay.Api.Extensions;
 using ProcBridge.Relay.Integration.Api.Interfaces;
@@ -19,11 +22,13 @@ public sealed class AccountsController : ControllerBase, IRelayAccountsControlle
 
     [HttpPost("register")]
     [AllowAnonymous]
+    [EnableRateLimiting(AuthRateLimitOptions.PolicyName)]
     public Task<AccountVM> RegisterAsync([FromBody] RegisterAccountRequestVM request, CancellationToken cancellationToken = default)
         => _accounts.RegisterAsync(request, cancellationToken);
 
     [HttpPost("login")]
     [AllowAnonymous]
+    [EnableRateLimiting(AuthRateLimitOptions.PolicyName)]
     public Task<LoginResultVM> LoginAsync([FromBody] LoginRequestVM request, CancellationToken cancellationToken = default)
         => _accounts.LoginAsync(request, cancellationToken);
 

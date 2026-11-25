@@ -4,9 +4,9 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
 using ProcBridge.Relay.Repositories.Abstractions.Interfaces;
-using ProcBridge.Relay.Tests.Fakes;
+using ProcBridge.Relay.Testing.Fakes;
 
-namespace ProcBridge.Relay.Tests.Infrastructure;
+namespace ProcBridge.Relay.Testing.Infrastructure;
 
 /// <summary>
 /// In-process relay host. With a connection string it runs the real EF repositories on PostgreSQL (and migrates on
@@ -16,12 +16,23 @@ namespace ProcBridge.Relay.Tests.Infrastructure;
 public sealed class RelayApiFactory : WebApplicationFactory<Program>
 {
     private readonly string? _connectionString;
+    private readonly IReadOnlyDictionary<string, string?> _settings;
 
-    public RelayApiFactory(string? connectionString) => _connectionString = connectionString;
+    /// <param name="settings">Extra configuration, applied after the test defaults (which allow self-registration and
+    /// raise the sign-in rate limit, since tests create many accounts from one address).</param>
+    public RelayApiFactory(string? connectionString, IReadOnlyDictionary<string, string?>? settings = null)
+    {
+        _connectionString = connectionString;
+        _settings = settings ?? new Dictionary<string, string?>();
+    }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Testing");
+        builder.UseSetting("Relay:Accounts:AllowRegistration", "true");
+        builder.UseSetting("Relay:RateLimit:AuthPermitLimit", "100000");
+        foreach (var (key, value) in _settings)
+            builder.UseSetting(key, value);
         builder.UseSetting("ConnectionStrings:Relay", _connectionString ?? "Host=unused.invalid;Database=unused");
         builder.UseSetting("Relay:Database:MigrateOnStartup", _connectionString is null ? "false" : "true");
         builder.UseSetting("Relay:Tunnel:PairTimeout", "00:00:10");

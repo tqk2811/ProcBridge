@@ -1,4 +1,7 @@
+using System.Threading.RateLimiting;
+
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.Mvc;
 
 using ProcBridge.Relay.Api.Filters;
@@ -39,6 +42,8 @@ public static class RelayHostServiceCollectionExtensions
         services.Configure<TunnelOptions>(configuration.GetSection(TunnelOptions.SectionName));
         services.AddApplicationServices();
 
+        AddAuthRateLimiter(services, configuration);
+
         services.AddAuthentication(RelayAuth.Scheme)
             .AddScheme<AuthenticationSchemeOptions, RelayBearerAuthenticationHandler>(RelayAuth.Scheme, null);
         services.AddAuthorizationBuilder()
@@ -59,6 +64,37 @@ public static class RelayHostServiceCollectionExtensions
                 });
             });
         return services;
+    }
+
+    /// <summary>Fixed window per client address on login and register (<see cref="AuthRateLimitOptions"/>).</summary>
+    private static void AddAuthRateLimiter(IServiceCollection services, IConfiguration configuration)
+    {
+        var limits = configuration.GetSection(AuthRateLimitOptions.SectionName).Get<AuthRateLimitOptions>() ?? new AuthRateLimitOptions();
+        services.AddRateLimiter(o =>
+        {
+            o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+            o.AddPolicy(AuthRateLimitOptions.PolicyName, context => RateLimitPartition.GetFixedWindowLimiter(
+                context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = limits.AuthPermitLimit,
+                    Window = limits.AuthWindow,
+                    QueueLimit = 0,
+                }));
+            o.OnRejected = async (context, cancellationToken) =>
+            {
+                var response = context.HttpContext.Response;
+                if (context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter))
+                    response.Headers.RetryAfter = ((int)Math.Ceiling(retryAfter.TotalSeconds)).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                response.ContentType = "application/json; charset=utf-8";
+                var body = new ApiErrorResponse
+                {
+                    RequestId = context.HttpContext.Items[RequestIdKeys.ItemKey]?.ToString() ?? string.Empty,
+                    Error = new ApiError { Code = RelayErrors.TooManyRequests, Message = "Thử quá nhiều lần, hãy đợi rồi thử lại." },
+                };
+                await response.WriteAsync(Newtonsoft.Json.JsonConvert.SerializeObject(body, RelayJsonSettings.Create()), cancellationToken);
+            };
+        });
     }
 
     /// <summary>

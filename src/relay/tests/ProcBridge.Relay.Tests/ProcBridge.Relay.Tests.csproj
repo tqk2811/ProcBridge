@@ -11,5 +11,6 @@
   <ItemGroup>
     <ProjectReference Include="..\..\ProcBridge.Relay.Api\ProcBridge.Relay.Api.csproj" />
     <ProjectReference Include="..\..\ProcBridge.Relay.Cli\ProcBridge.Relay.Cli.csproj" />
+    <ProjectReference Include="..\ProcBridge.Relay.Testing\ProcBridge.Relay.Testing.csproj" />
   </ItemGroup>
 </Project>

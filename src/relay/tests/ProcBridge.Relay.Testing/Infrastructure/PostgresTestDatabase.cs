@@ -1,6 +1,6 @@
 using Npgsql;
 
-namespace ProcBridge.Relay.Tests.Infrastructure;
+namespace ProcBridge.Relay.Testing.Infrastructure;
 
 /// <summary>
 /// A throw-away database on a REAL PostgreSQL server. <see cref="EnvironmentVariable"/> holds the connection string of an

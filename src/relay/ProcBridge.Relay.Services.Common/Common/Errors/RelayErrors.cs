@@ -18,4 +18,5 @@ public static class RelayErrors
     public const string TunnelSessionNotFound = "TUNNEL_SESSION_NOT_FOUND";
     public const string TunnelLaneInvalid = "TUNNEL_LANE_INVALID";
     public const string TunnelLaneBusy = "TUNNEL_LANE_BUSY";
+    public const string TooManyRequests = "TOO_MANY_REQUESTS";
 }

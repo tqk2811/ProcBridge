@@ -1,6 +1,6 @@
 using ProcBridge.Relay.ViewModels.Records;
 
-namespace ProcBridge.Relay.Tests.Fakes;
+namespace ProcBridge.Relay.Testing.Fakes;
 
 /// <summary>Rows of the in-memory relay database (one per factory). Every access goes through <see cref="Lock"/>.</summary>
 public sealed class InMemoryRelayStore

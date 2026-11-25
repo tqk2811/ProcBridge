@@ -7,6 +7,7 @@ using Newtonsoft.Json;
 using ProcBridge.Relay.Integration.Api.Implements;
 using ProcBridge.Relay.Integration.Api.Interfaces;
 using ProcBridge.Relay.Shared.Json;
+using ProcBridge.Relay.Testing.Infrastructure;
 using ProcBridge.Relay.Shared.Tunnel;
 using ProcBridge.Relay.ViewModels.Accounts;
 using ProcBridge.Relay.ViewModels.Devices;
@@ -58,6 +59,21 @@ public sealed class RelayTestClient
             await Task.Delay(20);
         }
         return socket;
+    }
+
+    /// <summary>Reads control messages until one of type <paramref name="type"/> arrives; returns its JSON.</summary>
+    public static async Task<string> ReceiveControlMessageAsync(WebSocket control, string type)
+    {
+        var buffer = new byte[8192];
+        using var cts = new CancellationTokenSource(Timeout);
+        while (true)
+        {
+            var result = await control.ReceiveAsync(buffer, cts.Token);
+            Assert.AreEqual(WebSocketMessageType.Text, result.MessageType);
+            var text = System.Text.Encoding.UTF8.GetString(buffer, 0, result.Count);
+            if (Newtonsoft.Json.Linq.JObject.Parse(text).Value<string>("type") == type)
+                return text;
+        }
     }
 
     public async Task<TunnelSessionOpenedMessageVM> ReceiveControlMessageAsync(WebSocket control)

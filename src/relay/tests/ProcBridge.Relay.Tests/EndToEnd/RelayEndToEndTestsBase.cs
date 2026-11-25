@@ -1,10 +1,15 @@
 using System.Net.WebSockets;
 using System.Security.Cryptography;
 
+using Newtonsoft.Json;
+
 using ProcBridge.Relay.Cli;
 using ProcBridge.Relay.Cli.Interfaces;
 using ProcBridge.Relay.Integration.Api.Implements;
 using ProcBridge.Relay.Integration.Api.Models;
+using ProcBridge.Relay.Shared.Json;
+using ProcBridge.Relay.Shared.Tunnel;
+using ProcBridge.Relay.Testing.Infrastructure;
 using ProcBridge.Relay.Tests.Infrastructure;
 using ProcBridge.Relay.ViewModels.Shares;
 using ProcBridge.Relay.ViewModels.Tunnel;
@@ -68,6 +73,85 @@ public abstract class RelayEndToEndTestsBase
         c1.Abort();
         h1.Abort();
         control.Abort();
+    }
+
+    [TestMethod]
+    public async Task LaneCủaMáyKháchĐượcBáoChoMáyChủQuaKênhĐiềuKhiển()
+    {
+        var (_, _, client, share, control) = await SetUpSharedHostAsync();
+        var session = await Relay.NewApi(client.Token).Tunnel.OpenSessionAsync(new OpenTunnelSessionRequestVM { ShareId = share.Id });
+        var opened = await Relay.ReceiveControlMessageAsync(control);
+
+        var clientLane = Relay.ConnectLaneAsync(session.SessionId, session.Ticket, 5);
+        var request = JsonConvert.DeserializeObject<TunnelLaneRequestedMessageVM>(
+            await RelayTestClient.ReceiveControlMessageAsync(control, TunnelProtocol.LaneRequestedMessage), RelayJsonSettings.Create())!;
+        Assert.AreEqual(session.SessionId, request.SessionId);
+        Assert.AreEqual(5, request.Lane);
+
+        var hostLane = await Relay.ConnectLaneAsync(opened.SessionId, opened.Ticket, request.Lane);
+        var c = await clientLane;
+        var payload = RandomNumberGenerator.GetBytes(64);
+        await RelayTestClient.SendAsync(c, payload);
+        CollectionAssert.AreEqual(payload, await RelayTestClient.ReceiveAsync(hostLane));
+        c.Abort();
+        hostLane.Abort();
+        control.Abort();
+    }
+
+    [TestMethod]
+    public async Task ThuHồiQuyềnHoặcMáyCắtLaneĐangMở()
+    {
+        var (owner, host, client, share, control) = await SetUpSharedHostAsync();
+
+        // Grant revoked: the open lane of that client is cut.
+        var (c0, h0) = await OpenLaneAsync(client, share, control);
+        await Relay.NewApi(owner).Shares.RevokeGrantAsync(share.Id, client.Device.Id);
+        await AssertClosedAsync(c0);
+        await AssertClosedAsync(h0);
+
+        // Host device revoked: its control channel and lanes are cut.
+        await Relay.NewApi(owner).Shares.GrantAsync(share.Id, new GrantShareRequestVM { DeviceId = client.Device.Id });
+        var (c1, h1) = await OpenLaneAsync(client, share, control);
+        await Relay.NewApi(owner).Devices.RevokeAsync(host.Device.Id);
+        await AssertClosedAsync(c1);
+        await AssertClosedAsync(h1);
+        await AssertClosedAsync(control);
+    }
+
+    private async Task<(WebSocket Client, WebSocket Host)> OpenLaneAsync(ViewModels.Devices.DeviceRegisteredVM client, ShareVM share, WebSocket control)
+    {
+        var session = await Relay.NewApi(client.Token).Tunnel.OpenSessionAsync(new OpenTunnelSessionRequestVM { ShareId = share.Id });
+        var opened = JsonConvert.DeserializeObject<TunnelSessionOpenedMessageVM>(
+            await RelayTestClient.ReceiveControlMessageAsync(control, TunnelProtocol.SessionOpenedMessage), RelayJsonSettings.Create())!;
+        var clientLane = Relay.ConnectLaneAsync(session.SessionId, session.Ticket, 0);
+        var hostLane = await Relay.ConnectLaneAsync(opened.SessionId, opened.Ticket, 0);
+        var c = await clientLane;
+        var payload = RandomNumberGenerator.GetBytes(16);
+        await RelayTestClient.SendAsync(c, payload);
+        CollectionAssert.AreEqual(payload, await RelayTestClient.ReceiveAsync(hostLane));
+        return (c, hostLane);
+    }
+
+    /// <summary>The next receive ends (close frame or broken socket) instead of waiting.</summary>
+    private static async Task AssertClosedAsync(WebSocket socket)
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        try
+        {
+            while (true)
+            {
+                var result = await socket.ReceiveAsync(new byte[1024], cts.Token);
+                if (result.MessageType == WebSocketMessageType.Close)
+                    return;
+            }
+        }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested)
+        {
+            Assert.Fail("Kết nối không bị cắt sau khi thu hồi.");
+        }
+        catch (Exception ex) when (ex is WebSocketException or IOException or ObjectDisposedException or OperationCanceledException)
+        {
+        }
     }
 
     [TestMethod]

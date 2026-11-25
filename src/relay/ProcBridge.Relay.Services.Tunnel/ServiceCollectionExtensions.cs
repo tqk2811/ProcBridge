@@ -14,6 +14,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<TunnelHub>();
         services.AddSingleton<ITunnelHub>(sp => sp.GetRequiredService<TunnelHub>());
         services.AddSingleton<IDevicePresence>(sp => sp.GetRequiredService<TunnelHub>());
+        services.AddSingleton<ITunnelTerminator>(sp => sp.GetRequiredService<TunnelHub>());
         services.AddScoped<ITunnelSessionService, TunnelSessionService>();
         return services;
     }

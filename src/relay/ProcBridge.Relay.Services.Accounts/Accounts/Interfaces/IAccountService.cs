@@ -6,6 +6,8 @@ namespace ProcBridge.Relay.Services.Accounts.Interfaces;
 public interface IAccountService
 {
     Task<AccountVM> RegisterAsync(RegisterAccountRequestVM request, CancellationToken cancellationToken = default);
+    /// <summary>Creates an account whatever <c>AllowRegistration</c> says (operator command on the relay host).</summary>
+    Task<AccountVM> CreateByOperatorAsync(RegisterAccountRequestVM request, CancellationToken cancellationToken = default);
     Task<LoginResultVM> LoginAsync(LoginRequestVM request, CancellationToken cancellationToken = default);
     Task LogoutAsync(Guid sessionId, CancellationToken cancellationToken = default);
     Task<AccountVM> GetAsync(Guid accountId, CancellationToken cancellationToken = default);

@@ -22,7 +22,7 @@ namespace ProcBridge.Relay.Services.Tunnel;
 /// In-memory tunnel registry (singleton). State lives only in this process: a relay restart drops every session and
 /// control channel, and peers reconnect. Running several relay instances needs a shared registry (backlog).
 /// </summary>
-public sealed class TunnelHub : ITunnelHub, IDevicePresence
+public sealed class TunnelHub : ITunnelHub, IDevicePresence, ITunnelTerminator
 {
     private const string TicketPrefix = "pbt_";
 
@@ -117,7 +117,54 @@ public sealed class TunnelHub : ITunnelHub, IDevicePresence
             throw ServiceException.BadRequest(RelayErrors.TunnelLaneInvalid, $"Lane phải trong khoảng 0-{TunnelProtocol.MaxLanes - 1}.");
         var pair = session.TryReserve(lane, side)
             ?? throw ServiceException.Conflict(RelayErrors.TunnelLaneBusy, "Lane này đã có kết nối ở phía đó.");
+        // The host does not know which lanes the client will open: ask it for this one.
+        if (side == TunnelSide.Client && !pair.IsReserved(TunnelSide.Host))
+            _ = RequestHostLaneAsync(session, lane);
         return new TunnelLaneReservation(session, pair, side, lane);
+    }
+
+    private async Task RequestHostLaneAsync(TunnelSession session, int lane)
+    {
+        if (!_controls.TryGetValue(session.HostDeviceId, out var control))
+            return; // The client lane times out waiting for its partner.
+        var message = new TunnelLaneRequestedMessageVM(TunnelProtocol.LaneRequestedMessage, session.Id, lane);
+        try
+        {
+            using var timeout = new CancellationTokenSource(_options.PairTimeout);
+            await control.SendTextAsync(JsonConvert.SerializeObject(message, _json), timeout.Token);
+        }
+        catch (Exception ex) when (ex is WebSocketException or ObjectDisposedException or InvalidOperationException or OperationCanceledException)
+        {
+            _logger.LogInformation("Phiên {SessionId}: không báo được máy chủ mở lane {Lane}.", session.Id, lane);
+        }
+    }
+
+    public void DisconnectDevice(Guid deviceId)
+    {
+        if (_controls.TryRemove(deviceId, out var control))
+            control.Abort();
+        foreach (var session in _sessions.Values)
+        {
+            if (session.ClientDeviceId == deviceId || session.HostDeviceId == deviceId)
+                AbortSession(session);
+        }
+        _logger.LogInformation("Đã cắt kết nối tunnel của máy {DeviceId}.", deviceId);
+    }
+
+    public void DisconnectShare(Guid shareId, Guid? clientDeviceId = null)
+    {
+        foreach (var session in _sessions.Values)
+        {
+            if (session.ShareId == shareId && (clientDeviceId is null || session.ClientDeviceId == clientDeviceId))
+                AbortSession(session);
+        }
+        _logger.LogInformation("Đã cắt các phiên tunnel tới chia sẻ {ShareId}.", shareId);
+    }
+
+    private void AbortSession(TunnelSession session)
+    {
+        session.AbortAll();
+        _sessions.TryRemove(new KeyValuePair<Guid, TunnelSession>(session.Id, session));
     }
 
     public void ReleaseLane(TunnelLaneReservation reservation)
@@ -135,7 +182,14 @@ public sealed class TunnelHub : ITunnelHub, IDevicePresence
             WebSocket partner;
             try
             {
-                partner = await pair.PartnerAsync(reservation.Side).WaitAsync(_options.PairTimeout, cancellationToken);
+                using var waiting = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, pair.AbortToken);
+                partner = await pair.PartnerAsync(reservation.Side).WaitAsync(_options.PairTimeout, waiting.Token);
+            }
+            catch (OperationCanceledException) when (pair.AbortToken.IsCancellationRequested)
+            {
+                // Revoked while waiting for the other end.
+                socket.Abort();
+                return;
             }
             catch (TimeoutException)
             {

@@ -21,4 +21,7 @@ public static class TunnelProtocol
 
     /// <summary>Control message type pushed to the host when a client opens a session to one of its shares.</summary>
     public const string SessionOpenedMessage = "sessionOpened";
+
+    /// <summary>Control message type pushed to the host when a client lane waits for the host end of that lane.</summary>
+    public const string LaneRequestedMessage = "laneRequested";
 }

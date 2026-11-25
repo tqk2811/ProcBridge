@@ -19,13 +19,15 @@ public sealed class DeviceService : IDeviceService
 
     private readonly IDeviceRepository _devices;
     private readonly IDevicePresence _presence;
+    private readonly ITunnelTerminator _tunnels;
     private readonly TimeProvider _time;
     private readonly ILogger<DeviceService> _logger;
 
-    public DeviceService(IDeviceRepository devices, IDevicePresence presence, TimeProvider time, ILogger<DeviceService> logger)
+    public DeviceService(IDeviceRepository devices, IDevicePresence presence, ITunnelTerminator tunnels, TimeProvider time, ILogger<DeviceService> logger)
     {
         _devices = devices;
         _presence = presence;
+        _tunnels = tunnels;
         _time = time;
         _logger = logger;
     }
@@ -52,6 +54,8 @@ public sealed class DeviceService : IDeviceService
     {
         if (await _devices.RevokeAsync(deviceId, _time.GetUtcNow().UtcDateTime, cancellationToken))
             _logger.LogInformation("Đã thu hồi máy {DeviceId}.", deviceId);
+        // Also when it was revoked before: a lane opened in between must not outlive the revocation.
+        _tunnels.DisconnectDevice(deviceId);
     }
 
     public async Task<DeviceIdentity?> AuthenticateAsync(string token, CancellationToken cancellationToken = default)

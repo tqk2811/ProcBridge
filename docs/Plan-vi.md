@@ -323,6 +323,13 @@ Broker kết nối TCP thẳng tới Agent (cổng cấu hình được). Tìm A
   - Hai phía mở các lane dữ liệu `GET /tunnel?sessionId=..&ticket=..&lane=N` (WebSocket). Lane cùng số
     của hai phía được ghép cặp; relay chép nguyên khung nhị phân giữa chúng, không đọc payload. Một phiên
     có tối đa 16 lane song song (quyết định 1 ở mục 15). Đóng một đầu thì đóng đầu kia của cùng lane.
+  - Máy A mở lane theo nhu cầu (mỗi kết nối của pool là một lane, lấy số nhỏ nhất còn trống). Khi đầu
+    của A tới trước, relay đẩy `laneRequested {sessionId, lane}` qua kênh điều khiển và máy B mở đúng lane
+    đó bằng vé của mình; máy B không phải mở sẵn lane chờ.
+  - Thu hồi máy, thu hồi quyền hay xoá chia sẻ cắt luôn kênh điều khiển và các lane đang mở liên quan.
+  - Tài khoản: mặc định tắt tự đăng ký (`Relay:Accounts:AllowRegistration=false`); người vận hành tạo
+    tài khoản bằng `ProcBridge.Relay.Api account create <user>` trên máy relay. `login`/`register` giới hạn
+    tần suất theo địa chỉ máy khách (`Relay:RateLimit`, mặc định 10 lần/phút, quá thì 429).
   - Trạng thái phiên chỉ nằm trong bộ nhớ một tiến trình relay.
 - Lưu trữ: PostgreSQL (tài khoản, máy, khoá công khai của máy, chia sẻ, quyền, log phiên). Không lưu
   nội dung file.

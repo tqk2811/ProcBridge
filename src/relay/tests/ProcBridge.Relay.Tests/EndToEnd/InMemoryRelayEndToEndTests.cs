@@ -1,3 +1,4 @@
+using ProcBridge.Relay.Testing.Infrastructure;
 using ProcBridge.Relay.Tests.Infrastructure;
 
 namespace ProcBridge.Relay.Tests.EndToEnd;

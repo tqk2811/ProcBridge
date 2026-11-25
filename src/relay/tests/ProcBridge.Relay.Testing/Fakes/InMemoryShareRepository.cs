@@ -1,7 +1,7 @@
 using ProcBridge.Relay.Repositories.Abstractions.Interfaces;
 using ProcBridge.Relay.ViewModels.Records;
 
-namespace ProcBridge.Relay.Tests.Fakes;
+namespace ProcBridge.Relay.Testing.Fakes;
 
 /// <summary>Mirrors <c>ShareRepository</c>: owner joined from the host device, cascade of grants on delete, revoked devices hidden from the accessible list.</summary>
 public sealed class InMemoryShareRepository : IShareRepository

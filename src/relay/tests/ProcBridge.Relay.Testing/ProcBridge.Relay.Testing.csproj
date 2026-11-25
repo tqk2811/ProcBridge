@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Shared test infrastructure of the relay: in-process host (WebApplicationFactory), in-memory repositories and the
+       throw-away PostgreSQL database. Used by ProcBridge.Relay.Tests and by the Agent/Broker-through-relay tests. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\ProcBridge.Relay.Api\ProcBridge.Relay.Api.csproj" />
+  </ItemGroup>
+</Project>

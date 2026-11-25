@@ -16,13 +16,15 @@ public sealed class ShareService : IShareService
     private readonly IShareRepository _shares;
     private readonly IDeviceRepository _devices;
     private readonly IDevicePresence _presence;
+    private readonly ITunnelTerminator _tunnels;
     private readonly ILogger<ShareService> _logger;
 
-    public ShareService(IShareRepository shares, IDeviceRepository devices, IDevicePresence presence, ILogger<ShareService> logger)
+    public ShareService(IShareRepository shares, IDeviceRepository devices, IDevicePresence presence, ITunnelTerminator tunnels, ILogger<ShareService> logger)
     {
         _shares = shares;
         _devices = devices;
         _presence = presence;
+        _tunnels = tunnels;
         _logger = logger;
     }
 
@@ -43,6 +45,7 @@ public sealed class ShareService : IShareService
     {
         if (await _shares.HardDeleteAsync(shareId, cancellationToken))
             _logger.LogInformation("Đã xoá chia sẻ {ShareId}.", shareId);
+        _tunnels.DisconnectShare(shareId);
     }
 
     public async Task<ShareGrantVM> GrantAsync(Guid shareId, GrantShareRequestVM request, CancellationToken cancellationToken = default)
@@ -65,6 +68,7 @@ public sealed class ShareService : IShareService
         if (!await _shares.DeleteGrantAsync(shareId, deviceId, cancellationToken))
             throw ServiceException.NotFound(RelayErrors.ShareGrantNotFound, "Máy này chưa được cấp quyền chia sẻ đó.");
         _logger.LogInformation("Đã thu hồi quyền chia sẻ {ShareId} của máy {DeviceId}.", shareId, deviceId);
+        _tunnels.DisconnectShare(shareId, deviceId);
     }
 
     public async Task<IReadOnlyList<AccessibleShareVM>> GetAccessibleAsync(Guid clientDeviceId, CancellationToken cancellationToken = default)

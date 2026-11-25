@@ -1,7 +1,7 @@
 using ProcBridge.Relay.Repositories.Abstractions.Interfaces;
 using ProcBridge.Relay.ViewModels.Records;
 
-namespace ProcBridge.Relay.Tests.Fakes;
+namespace ProcBridge.Relay.Testing.Fakes;
 
 public sealed class InMemoryAccountRepository : IAccountRepository
 {

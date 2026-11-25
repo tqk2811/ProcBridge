@@ -44,6 +44,11 @@ public sealed class AccountService : IAccountService
     {
         if (!_options.AllowRegistration)
             throw ServiceException.Forbidden(RelayErrors.RegistrationDisabled, "Relay không cho tự đăng ký tài khoản.");
+        return await CreateByOperatorAsync(request, cancellationToken);
+    }
+
+    public async Task<AccountVM> CreateByOperatorAsync(RegisterAccountRequestVM request, CancellationToken cancellationToken = default)
+    {
         var userName = NormalizeUserName(request.UserName);
         if (userName.Length == 0 || userName.Length > MaxUserNameLength || !userName.All(IsUserNameChar))
             throw ServiceException.BadRequest(RelayErrors.ValidationFailed, "Tên đăng nhập 1-64 ký tự: chữ, số, '.', '_', '-'.");
