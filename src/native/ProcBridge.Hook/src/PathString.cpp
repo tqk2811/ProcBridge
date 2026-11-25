@@ -78,7 +78,7 @@ namespace ProcBridge::Hook
         {
             return false;
         }
-        // text and destination may not overlap in callers; copy the tail first anyway for safety.
+        // destination may be text itself (in-place rewrite): move the tail first, then write the head.
         memmove(reinterpret_cast<BYTE*>(destination) + to.Length, reinterpret_cast<const BYTE*>(text) + from.Length, tailBytes);
         memcpy(destination, to.Buffer, to.Length);
         resultBytes = total;

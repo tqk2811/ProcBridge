@@ -20,6 +20,7 @@ namespace ProcBridge::Hook
 
     /// Writes "to" + text[from.Length..] into destination when text has the path prefix "from".
     /// Returns false (destination untouched) when the prefix does not match or the result does not fit.
+    /// destination may overlap text (in-place rewrite).
     bool ReplacePathPrefix(const wchar_t* text, size_t textBytes, const UNICODE_STRING& from, const UNICODE_STRING& to,
         wchar_t* destination, size_t destinationCapacityBytes, size_t& resultBytes) noexcept;
 

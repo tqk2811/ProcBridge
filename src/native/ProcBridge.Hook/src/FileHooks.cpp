@@ -22,6 +22,8 @@ namespace ProcBridge::Hook
 
         // Largest name a file system returns (32767 characters) plus headroom.
         constexpr size_t MaxNameBytes = 0x10000;
+        // Largest UNICODE_STRING text whose MaximumLength (text + NUL) still fits in a USHORT.
+        constexpr size_t MaxUnicodeStringBytes = 0xFFFC;
 
         const IPathResolver* g_resolver = nullptr;
         HandleTable g_handles;
@@ -236,6 +238,10 @@ namespace ProcBridge::Hook
                     return;
                 }
                 const size_t joinedBytes = static_cast<size_t>(rootName.Length) + sizeof(wchar_t) + relative.Length;
+                if (joinedBytes > MaxUnicodeStringBytes)
+                {
+                    return; // too long for any NT name: let the system reject it
+                }
                 UNICODE_STRING joined{};
                 if (!AllocateString(joined, joinedBytes))
                 {
@@ -426,33 +432,31 @@ namespace ProcBridge::Hook
             const PathMapping& map = g_resolver->GetMapping(mapping);
             const size_t headerBytes = nameOffset + sizeof(ULONG);
             const size_t bufferBytes = headerBytes + MaxNameBytes;
-            HeapBuffer real(bufferBytes);
-            HeapBuffer rewritten(bufferBytes);
-            if (!real || !rewritten || map.RealVolumeRelative.Length == 0)
+            HeapBuffer buffer(bufferBytes);
+            if (!buffer || map.RealVolumeRelative.Length == 0)
             {
                 return g_ntQueryInformationFile(fileHandle, ioStatusBlock, information, length, informationClass);
             }
 
             IO_STATUS_BLOCK realStatus{};
-            const NTSTATUS status = g_ntQueryInformationFile(fileHandle, &realStatus, real.Get(),
+            const NTSTATUS status = g_ntQueryInformationFile(fileHandle, &realStatus, buffer.Get(),
                 static_cast<ULONG>(bufferBytes), informationClass);
-            const auto* realName = reinterpret_cast<const FileNameInfo*>(real.Get() + nameOffset);
-            auto* newName = reinterpret_cast<FileNameInfo*>(rewritten.Get() + nameOffset);
+            // The name is rewritten in place (one buffer per call).
+            auto* name = reinterpret_cast<FileNameInfo*>(buffer.Get() + nameOffset);
             size_t newBytes = 0;
             if (!NT_SUCCESS(status)
-                || !ReplacePathPrefix(realName->FileName, realName->FileNameLength, map.RealVolumeRelative,
-                    map.VirtualVolumeRelative, newName->FileName, MaxNameBytes, newBytes))
+                || !ReplacePathPrefix(name->FileName, name->FileNameLength, map.RealVolumeRelative,
+                    map.VirtualVolumeRelative, name->FileName, MaxNameBytes, newBytes))
             {
                 // Name outside the backing root (or query failed): answer exactly as the system does.
                 return g_ntQueryInformationFile(fileHandle, ioStatusBlock, information, length, informationClass);
             }
-            memcpy(rewritten.Get(), real.Get(), nameOffset);
-            newName->FileNameLength = static_cast<ULONG>(newBytes);
+            name->FileNameLength = static_cast<ULONG>(newBytes);
 
             const size_t required = headerBytes + newBytes;
             const size_t copied = required <= length ? required : length;
             const NTSTATUS result = required <= length ? STATUS_SUCCESS : STATUS_BUFFER_OVERFLOW;
-            if (!SafeCopy(information, rewritten.Get(), copied) || !SafeSetIoStatus(ioStatusBlock, result, copied))
+            if (!SafeCopy(information, buffer.Get(), copied) || !SafeSetIoStatus(ioStatusBlock, result, copied))
             {
                 return STATUS_ACCESS_VIOLATION;
             }
@@ -536,19 +540,20 @@ namespace ProcBridge::Hook
             }
             const PathMapping& map = g_resolver->GetMapping(mapping);
             const size_t bufferBytes = sizeof(ObjectNameInfo) + MaxNameBytes;
-            HeapBuffer real(bufferBytes);
-            HeapBuffer rewritten(MaxNameBytes);
-            if (!real || !rewritten || map.RealDevicePath.Length == 0)
+            HeapBuffer buffer(bufferBytes);
+            if (!buffer || map.RealDevicePath.Length == 0)
             {
                 return g_ntQueryObject(handle, informationClass, information, length, returnLength);
             }
-            const NTSTATUS status = g_ntQueryObject(handle, informationClass, real.Get(), static_cast<ULONG>(bufferBytes), nullptr);
-            const auto* realName = reinterpret_cast<const ObjectNameInfo*>(real.Get());
-            auto* newText = reinterpret_cast<wchar_t*>(rewritten.Get());
+            const NTSTATUS status = g_ntQueryObject(handle, informationClass, buffer.Get(), static_cast<ULONG>(bufferBytes), nullptr);
+            // The answer (header + text) is built in place in the same buffer.
+            BYTE* answer = buffer.Get();
+            auto* result = reinterpret_cast<ObjectNameInfo*>(answer);
+            auto* text = reinterpret_cast<wchar_t*>(answer + sizeof(ObjectNameInfo));
             size_t newBytes = 0;
             if (!NT_SUCCESS(status)
-                || !ReplacePathPrefix(realName->Name.Buffer, realName->Name.Length, map.RealDevicePath, map.VirtualDevicePath,
-                    newText, MaxNameBytes - sizeof(wchar_t), newBytes))
+                || !ReplacePathPrefix(result->Name.Buffer, result->Name.Length, map.RealDevicePath, map.VirtualDevicePath,
+                    text, MaxUnicodeStringBytes, newBytes))
             {
                 return g_ntQueryObject(handle, informationClass, information, length, returnLength);
             }
@@ -562,11 +567,6 @@ namespace ProcBridge::Hook
             {
                 return STATUS_BUFFER_OVERFLOW;
             }
-            // Build the answer in the scratch buffer (header + text), then copy it out in one guarded step.
-            BYTE* answer = real.Get();
-            auto* result = reinterpret_cast<ObjectNameInfo*>(answer);
-            auto* text = reinterpret_cast<wchar_t*>(answer + sizeof(ObjectNameInfo));
-            memcpy(text, newText, newBytes);
             text[newBytes / sizeof(wchar_t)] = L'\0';
             result->Name.Buffer = reinterpret_cast<wchar_t*>(static_cast<BYTE*>(information) + sizeof(ObjectNameInfo));
             result->Name.Length = static_cast<USHORT>(newBytes);
