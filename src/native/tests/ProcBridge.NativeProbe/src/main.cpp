@@ -899,6 +899,13 @@ namespace
         return 0;
     }
 
+    /// --stdin-name: final path of the standard input handle (inherited from the parent, plan 5.5).
+    int StdinName()
+    {
+        WriteLine(L"stdin: " + FinalPath(GetStdHandle(STD_INPUT_HANDLE)));
+        return 0;
+    }
+
     /// --delete <file>: NtDeleteFile on the DOS path, prints the status.
     int DeleteByName(const wchar_t* file)
     {
@@ -926,6 +933,10 @@ namespace
         if (command == L"--delete" && argc == 3)
         {
             return DeleteByName(argv[2]);
+        }
+        if (command == L"--stdin-name" && argc == 2)
+        {
+            return StdinName();
         }
         if (command == L"--threads" && argc == 4)
         {

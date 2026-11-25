@@ -88,6 +88,24 @@ namespace ProcBridge::Hook
         RemoveIf(handle, false, generation);
     }
 
+    size_t HandleTable::CopyEntries(HANDLE* handles, int* mappings, size_t capacity) const noexcept
+    {
+        if (_count.load(std::memory_order_acquire) == 0)
+        {
+            return 0;
+        }
+        AcquireSRWLockShared(&_lock);
+        const size_t count = _count.load(std::memory_order_relaxed);
+        const size_t copied = count < capacity ? count : capacity;
+        for (size_t i = 0; i < copied; ++i)
+        {
+            handles[i] = _entries[i].Handle;
+            mappings[i] = _entries[i].Mapping;
+        }
+        ReleaseSRWLockShared(&_lock);
+        return copied;
+    }
+
     void HandleTable::RemoveIf(HANDLE handle, bool anyGeneration, ULONG64 generation) noexcept
     {
         // Shared probe first: Remove runs for every successful open that is not virtual.

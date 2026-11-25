@@ -9,7 +9,9 @@
 // folder they need no rewriting in M1; M2 replaces them with listings built from machine B.
 #include "FileHooks.h"
 #include "DirectoryNameCache.h"
+#include "HandleInheritance.h"
 #include "HandleTable.h"
+#include "HookGuard.h"
 #include "PathString.h"
 #include <MinHook.h>
 #include <cstring>
@@ -39,8 +41,7 @@ namespace ProcBridge::Hook
         NtCloseFn g_ntClose = nullptr;
         NtQueryInformationByNameFn g_ntQueryInformationByName = nullptr;
         NtDeleteFileFn g_ntDeleteFile = nullptr;
-
-        thread_local unsigned t_hookDepth = 0;
+        NtDuplicateObjectFn g_ntDuplicateObject = nullptr;
 
         // Caller memory: hooks read and write pointers that the kernel would probe and answer with
         // STATUS_ACCESS_VIOLATION. Every access to caller memory goes through these SEH-guarded copies
@@ -73,22 +74,6 @@ namespace ProcBridge::Hook
             value.Information = information;
             return SafeCopy(ioStatusBlock, &value, sizeof(value));
         }
-
-        /// Per-thread re-entry guard (plan 4.6): a hook that ends up calling a hooked function again
-        /// on the same thread goes straight to the original.
-        class ReentryGuard final
-        {
-        public:
-            ReentryGuard() noexcept : _outermost(t_hookDepth == 0) { ++t_hookDepth; }
-            ~ReentryGuard() { --t_hookDepth; }
-            ReentryGuard(const ReentryGuard&) = delete;
-            ReentryGuard& operator=(const ReentryGuard&) = delete;
-
-            bool IsOutermost() const noexcept { return _outermost; }
-
-        private:
-            bool _outermost;
-        };
 
         /// Resolves OBJECT_ATTRIBUTES against the virtual roots and owns the rewritten name.
         /// The caller's structures are read once into a snapshot (SEH-guarded); an unreadable pointer
@@ -595,6 +580,91 @@ namespace ProcBridge::Hook
             return status;
         }
 
+        bool IsCurrentProcess(HANDLE process) noexcept
+        {
+            return process == GetCurrentProcess() || (process != nullptr && GetProcessId(process) == GetCurrentProcessId());
+        }
+
+        /// DuplicateHandle inside the process: the copy of a virtual handle is virtual too, a copy that
+        /// lands on a stale value replaces its entry, and DUPLICATE_CLOSE_SOURCE closes like NtClose.
+        /// Duplicates into other processes are not tracked (backlog).
+        NTSTATUS NTAPI HookNtDuplicateObject(HANDLE sourceProcess, HANDLE sourceHandle, HANDLE targetProcess, PHANDLE targetHandle,
+            ACCESS_MASK desiredAccess, ULONG handleAttributes, ULONG options)
+        {
+            ReentryGuard guard;
+            if (!guard.IsOutermost())
+            {
+                return g_ntDuplicateObject(sourceProcess, sourceHandle, targetProcess, targetHandle, desiredAccess, handleAttributes, options);
+            }
+            const bool sourceIsSelf = IsCurrentProcess(sourceProcess);
+            ULONG64 generation = 0;
+            const int mapping = sourceIsSelf ? g_handles.Find(sourceHandle, &generation) : -1;
+            const NTSTATUS status = g_ntDuplicateObject(sourceProcess, sourceHandle, targetProcess, targetHandle, desiredAccess,
+                handleAttributes, options);
+            if (!NT_SUCCESS(status))
+            {
+                return status;
+            }
+            if (sourceIsSelf && (options & DUPLICATE_CLOSE_SOURCE) != 0)
+            {
+                if (mapping >= 0)
+                {
+                    g_handles.Remove(sourceHandle, generation);
+                }
+                g_directoryNames.Remove(sourceHandle);
+            }
+            HANDLE copy = nullptr;
+            if (targetHandle != nullptr && targetProcess != nullptr && SafeCopy(&copy, targetHandle, sizeof(copy))
+                && IsCurrentProcess(targetProcess))
+            {
+                g_directoryNames.Remove(copy);
+                if (mapping >= 0)
+                {
+                    g_handles.Add(copy, mapping);
+                }
+                else
+                {
+                    g_handles.Remove(copy);
+                }
+            }
+            return status;
+        }
+
+        /// M4 handle inheritance: entries travel in the child's init block (see HandleInheritance.h).
+        class LocalHandleInheritance final : public IHandleInheritance
+        {
+        public:
+            void ExportForChild(std::vector<Inject::InheritedHandle>& handles) const override
+            {
+                constexpr size_t MaxHandles = 4096;
+                std::vector<HANDLE> values(MaxHandles);
+                std::vector<int> mappings(MaxHandles);
+                const size_t count = g_handles.CopyEntries(values.data(), mappings.data(), MaxHandles);
+                for (size_t i = 0; i < count; ++i)
+                {
+                    DWORD flags = 0;
+                    if (GetHandleInformation(values[i], &flags) && (flags & HANDLE_FLAG_INHERIT) != 0)
+                    {
+                        handles.push_back({ reinterpret_cast<ULONG_PTR>(values[i]), mappings[i], 0 });
+                    }
+                }
+            }
+
+            void ImportFromParent(const Inject::InheritedHandle* handles, size_t count) noexcept override
+            {
+                for (size_t i = 0; i < count; ++i)
+                {
+                    const int mapping = handles[i].Mapping;
+                    if (mapping >= 0 && mapping < g_resolver->Count())
+                    {
+                        g_handles.Add(reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(handles[i].Handle)), mapping);
+                    }
+                }
+            }
+        };
+
+        LocalHandleInheritance g_localInheritance;
+
         struct HookEntry
         {
             const char* Name;
@@ -622,6 +692,7 @@ namespace ProcBridge::Hook
             { "NtQueryObject", reinterpret_cast<void*>(&HookNtQueryObject), reinterpret_cast<void**>(&g_ntQueryObject) },
             { "NtClose", reinterpret_cast<void*>(&HookNtClose), reinterpret_cast<void**>(&g_ntClose) },
             { "NtDeleteFile", reinterpret_cast<void*>(&HookNtDeleteFile), reinterpret_cast<void**>(&g_ntDeleteFile) },
+            { "NtDuplicateObject", reinterpret_cast<void*>(&HookNtDuplicateObject), reinterpret_cast<void**>(&g_ntDuplicateObject) },
             { "NtQueryInformationByName", reinterpret_cast<void*>(&HookNtQueryInformationByName),
                 reinterpret_cast<void**>(&g_ntQueryInformationByName), true },
         };
@@ -641,6 +712,11 @@ namespace ProcBridge::Hook
                 return ERROR_GEN_FAILURE;
             }
         }
-        return MH_EnableHook(MH_ALL_HOOKS) == MH_OK ? ERROR_SUCCESS : ERROR_GEN_FAILURE;
+        return ERROR_SUCCESS;
+    }
+
+    IHandleInheritance& GetLocalHandleInheritance() noexcept
+    {
+        return g_localInheritance;
     }
 }

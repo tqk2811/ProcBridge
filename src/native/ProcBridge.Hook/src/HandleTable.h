@@ -27,6 +27,9 @@ namespace ProcBridge::Hook
         /// handle with the same value in the meantime (NtClose removes after the close succeeded).
         void Remove(HANDLE handle, ULONG64 generation) noexcept;
 
+        /// Copies up to capacity entries; returns how many were copied.
+        size_t CopyEntries(HANDLE* handles, int* mappings, size_t capacity) const noexcept;
+
     private:
         struct Entry
         {

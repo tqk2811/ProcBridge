@@ -69,6 +69,7 @@
     <ClCompile Include="src\Inject.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="include\ProcBridge\InitBlock.h" />
     <ClInclude Include="include\ProcBridge\Inject.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

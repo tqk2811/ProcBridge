@@ -1,12 +1,20 @@
-// ProcBridge.Spawn: minimal native launcher for the M1 spike.
-// Creates the target suspended, injects ProcBridge.Hook, runs its initializer, resumes the target and
-// returns the target's exit code. The C# Launcher (M2) starts the Broker and drives this helper; it
-// also becomes the same-architecture inject helper of plan 5.4.
+// ProcBridge.Spawn: minimal native launcher (M1 spike, process tree of M4).
+// Creates the target suspended inside a Job Object (KILL_ON_JOB_CLOSE), injects ProcBridge.Hook of the
+// target's architecture, runs its initializer, resumes the target and waits until every process of
+// the job has exited (the hook injects itself into children, which stay in the job). Returns the exit
+// code of the first process. The C# Launcher (M2) starts the Broker and drives this helper.
 //
 // Usage:
-//   ProcBridge.Spawn.<arch>.exe [--hook <dll>] --map <virtual dir> <real dir> [--map ...] -- <command line>
+//   ProcBridge.Spawn.<arch>.exe [--hook <dll>] [--hook-x64 <dll>] [--hook-x86 <dll>]
+//                               --map <virtual dir> <real dir> [--map ...] -- <command line>
+//   ProcBridge.Spawn.<arch>.exe --inject <process handle> --init-section <section handle> <bytes> --hook <dll>
 // Everything after the "--" argument of the raw command line is passed to CreateProcessW verbatim.
+// --hook overrides the DLL of this launcher's architecture. A DLL that is not given is looked up next
+// to this executable, then in the other platform's build folder (out\<Platform>\<Configuration>).
+// --inject is the cross-architecture helper of plan 5.4: it inherits both handles from the injector
+// (ProcBridge::Inject::InjectHook), injects the DLL of its own architecture and exits with the result.
 #include <windows.h>
+#include <ProcBridge/InitBlock.h>
 #include <ProcBridge/Inject.h>
 #include <cstdio>
 #include <cwchar>
@@ -19,11 +27,8 @@ namespace
     constexpr int SpawnFailure = 125;
     constexpr DWORD InjectTimeoutMs = 30000;
 
-#ifdef _WIN64
-    constexpr const wchar_t* DefaultHookName = L"ProcBridge.Hook.x64.dll";
-#else
-    constexpr const wchar_t* DefaultHookName = L"ProcBridge.Hook.x86.dll";
-#endif
+    constexpr const wchar_t* HookX64Name = L"ProcBridge.Hook.x64.dll";
+    constexpr const wchar_t* HookX86Name = L"ProcBridge.Hook.x86.dll";
 
     struct Mapping
     {
@@ -44,14 +49,34 @@ namespace
         return full;
     }
 
-    std::wstring GetDefaultHookPath()
+    bool FileExists(const std::wstring& path)
+    {
+        const DWORD attributes = GetFileAttributesW(path.c_str());
+        return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+    }
+
+    std::wstring GetDirectory(const std::wstring& path)
+    {
+        const size_t slash = path.find_last_of(L'\\');
+        return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash);
+    }
+
+    /// Hook DLL next to this executable, else in the other platform's build folder
+    /// (...\out\x64\Release <-> ...\out\Win32\Release). Empty when not found.
+    std::wstring FindDefaultHook(const wchar_t* name, const wchar_t* platform)
     {
         wchar_t self[MAX_PATH];
         const DWORD length = GetModuleFileNameW(nullptr, self, MAX_PATH);
-        std::wstring path(self, length);
-        const size_t slash = path.find_last_of(L'\\');
-        path.resize(slash == std::wstring::npos ? 0 : slash + 1);
-        return path + DefaultHookName;
+        const std::wstring directory = GetDirectory(std::wstring(self, length));
+        std::wstring candidate = directory + L'\\' + name;
+        if (FileExists(candidate))
+        {
+            return candidate;
+        }
+        const std::wstring platformDirectory = GetDirectory(directory);
+        const std::wstring configuration = directory.substr(platformDirectory.size());
+        candidate = GetDirectory(platformDirectory) + L'\\' + platform + configuration + L'\\' + name;
+        return FileExists(candidate) ? GetFullPath(candidate) : std::wstring();
     }
 
     int Fail(const wchar_t* message, DWORD error)
@@ -136,9 +161,105 @@ namespace
     int Usage()
     {
         std::fwprintf(stderr,
-            L"Usage: ProcBridge.Spawn [--hook <dll>] --map <virtual dir> <real dir> [--map ...] -- <command line>\n");
+            L"Usage: ProcBridge.Spawn [--hook <dll>] [--hook-x64 <dll>] [--hook-x86 <dll>] --map <virtual dir> <real dir> [--map ...] -- <command line>\n");
         return SpawnFailure;
     }
+
+    HANDLE ParseHandle(const wchar_t* text)
+    {
+        return reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(std::wcstoull(text, nullptr, 10)));
+    }
+
+    /// --inject <process handle> --init-section <section handle> <bytes> --hook <dll>: the handles are
+    /// inherited from the injector. Exit code: ERROR_SUCCESS or the Win32 error (initializer included).
+    int RunInjectHelper(int argc, wchar_t** argv)
+    {
+        if (argc != 8 || std::wcscmp(argv[3], L"--init-section") != 0 || std::wcscmp(argv[6], L"--hook") != 0)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        const HANDLE process = ParseHandle(argv[2]);
+        const HANDLE section = ParseHandle(argv[4]);
+        const size_t bytes = static_cast<size_t>(std::wcstoull(argv[5], nullptr, 10));
+        const void* view = bytes == 0 ? nullptr : MapViewOfFile(section, FILE_MAP_READ, 0, 0, bytes);
+        if (bytes != 0 && view == nullptr)
+        {
+            return static_cast<int>(GetLastError());
+        }
+        DWORD initResult = ERROR_SUCCESS;
+        const DWORD error = ProcBridge::Inject::InjectDll(process, argv[7], ProcBridge::Inject::HookInitializeExport, view, bytes,
+            InjectTimeoutMs, initResult);
+        if (view != nullptr)
+        {
+            UnmapViewOfFile(view);
+        }
+        CloseHandle(section);
+        CloseHandle(process);
+        return static_cast<int>(error != ERROR_SUCCESS ? error : initResult);
+    }
+
+    /// Job Object holding the whole process tree: closing it (this launcher exits or dies) kills every
+    /// process still in it.
+    class TreeJob final
+    {
+    public:
+        TreeJob() noexcept = default;
+        ~TreeJob()
+        {
+            if (_job != nullptr)
+            {
+                CloseHandle(_job);
+            }
+            if (_port != nullptr)
+            {
+                CloseHandle(_port);
+            }
+        }
+        TreeJob(const TreeJob&) = delete;
+        TreeJob& operator=(const TreeJob&) = delete;
+
+        DWORD Create() noexcept
+        {
+            _job = CreateJobObjectW(nullptr, nullptr);
+            _port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0, 1);
+            if (_job == nullptr || _port == nullptr)
+            {
+                return GetLastError();
+            }
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            JOBOBJECT_ASSOCIATE_COMPLETION_PORT port{};
+            port.CompletionKey = _job;
+            port.CompletionPort = _port;
+            if (!SetInformationJobObject(_job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))
+                || !SetInformationJobObject(_job, JobObjectAssociateCompletionPortInformation, &port, sizeof(port)))
+            {
+                return GetLastError();
+            }
+            return ERROR_SUCCESS;
+        }
+
+        bool Assign(HANDLE process) const noexcept { return AssignProcessToJobObject(_job, process) != FALSE; }
+
+        /// Waits until no process is left in the job (children and grandchildren included).
+        void WaitUntilEmpty() const noexcept
+        {
+            DWORD message = 0;
+            ULONG_PTR key = 0;
+            LPOVERLAPPED overlapped = nullptr;
+            while (GetQueuedCompletionStatus(_port, &message, &key, &overlapped, INFINITE))
+            {
+                if (key == reinterpret_cast<ULONG_PTR>(_job) && message == JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO)
+                {
+                    return;
+                }
+            }
+        }
+
+    private:
+        HANDLE _job = nullptr;
+        HANDLE _port = nullptr;
+    };
 
     /// Owns the PROCESS_INFORMATION handles.
     class ChildProcess final
@@ -177,7 +298,12 @@ namespace
 
 int wmain(int argc, wchar_t** argv)
 {
+    if (argc >= 2 && std::wcscmp(argv[1], L"--inject") == 0)
+    {
+        return RunInjectHelper(argc, argv);
+    }
     std::wstring hookPath;
+    ProcBridge::Inject::HookPaths hooks;
     std::vector<Mapping> mappings;
     int separatorIndex = 0;
     for (int i = 1; i < argc; ++i)
@@ -190,7 +316,15 @@ int wmain(int argc, wchar_t** argv)
         }
         if (arg == L"--hook" && i + 1 < argc)
         {
-            hookPath = argv[++i];
+            hookPath = GetFullPath(argv[++i]);
+        }
+        else if (arg == L"--hook-x64" && i + 1 < argc)
+        {
+            hooks.X64 = GetFullPath(argv[++i]);
+        }
+        else if (arg == L"--hook-x86" && i + 1 < argc)
+        {
+            hooks.X86 = GetFullPath(argv[++i]);
         }
         else if (arg == L"--map" && i + 2 < argc)
         {
@@ -229,13 +363,27 @@ int wmain(int argc, wchar_t** argv)
             return SpawnFailure;
         }
     }
-    if (hookPath.empty())
+#ifdef _WIN64
+    std::wstring& ownHook = hooks.X64;
+#else
+    std::wstring& ownHook = hooks.X86;
+#endif
+    if (!hookPath.empty())
     {
-        hookPath = GetDefaultHookPath();
+        ownHook = hookPath;
+    }
+    if (hooks.X64.empty())
+    {
+        hooks.X64 = FindDefaultHook(HookX64Name, L"x64");
+    }
+    if (hooks.X86.empty())
+    {
+        hooks.X86 = FindDefaultHook(HookX86Name, L"Win32");
     }
 
     // M1 configuration channel: the hook reads PROCBRIDGE_MAP ("virtual*real|virtual*real").
-    // M2 replaces it with the Broker pipe name.
+    // M2 replaces it with the Broker pipe name. The variables travel in the init block, so the hook
+    // sets them in each process of the tree whatever environment its creator passed.
     std::wstring mapValue;
     for (const Mapping& mapping : mappings)
     {
@@ -245,30 +393,38 @@ int wmain(int argc, wchar_t** argv)
         }
         mapValue += mapping.VirtualDir + L'*' + mapping.RealDir;
     }
-    if (!SetEnvironmentVariableW(L"PROCBRIDGE_MAP", mapValue.c_str()))
-    {
-        return Fail(L"cannot set PROCBRIDGE_MAP", GetLastError());
-    }
+    std::wstring environment = L"PROCBRIDGE_MAP=" + mapValue + L'\0';
+    environment += L"PROCBRIDGE_HOOK_X64=" + hooks.X64 + L'\0';
+    environment += L"PROCBRIDGE_HOOK_X86=" + hooks.X86 + L'\0';
+    const std::vector<BYTE> initBlock = ProcBridge::Inject::BuildInitBlock(environment, {});
 
+    TreeJob job;
+    const DWORD jobError = job.Create();
+    if (jobError != ERROR_SUCCESS)
+    {
+        return Fail(L"cannot create the job object", jobError);
+    }
     ChildProcess child;
     if (!child.StartSuspended(commandLine))
     {
         return Fail(L"CreateProcessW failed", GetLastError());
     }
+    if (!job.Assign(child.Process()))
+    {
+        const DWORD error = GetLastError();
+        TerminateProcess(child.Process(), SpawnFailure);
+        return Fail(L"AssignProcessToJobObject failed", error);
+    }
 
-    DWORD initResult = ERROR_SUCCESS;
-    const DWORD injectError = ProcBridge::Inject::InjectDll(child.Process(), hookPath.c_str(),
-        "ProcBridgeHookInitialize", InjectTimeoutMs, initResult);
-    if (injectError != ERROR_SUCCESS || initResult != ERROR_SUCCESS)
+    const DWORD injectError = ProcBridge::Inject::InjectHook(child.Process(), hooks, initBlock.data(), initBlock.size(), InjectTimeoutMs);
+    if (injectError != ERROR_SUCCESS)
     {
         TerminateProcess(child.Process(), SpawnFailure);
         if (injectError == ERROR_EXE_MACHINE_TYPE_MISMATCH)
         {
-            return Fail(L"target architecture differs from this launcher; use the ProcBridge.Spawn of the target's architecture",
-                injectError);
+            return Fail(L"no hook DLL for the target architecture (use --hook-x64 / --hook-x86)", injectError);
         }
-        return Fail(injectError != ERROR_SUCCESS ? L"inject failed" : L"hook initialization failed",
-            injectError != ERROR_SUCCESS ? injectError : initResult);
+        return Fail(L"inject failed", injectError);
     }
 
     if (ResumeThread(child.Thread()) == static_cast<DWORD>(-1))
@@ -278,6 +434,7 @@ int wmain(int argc, wchar_t** argv)
         return Fail(L"ResumeThread failed", error);
     }
     WaitForSingleObject(child.Process(), INFINITE);
+    job.WaitUntilEmpty();
     DWORD exitCode = 0;
     GetExitCodeProcess(child.Process(), &exitCode);
     return static_cast<int>(exitCode);
