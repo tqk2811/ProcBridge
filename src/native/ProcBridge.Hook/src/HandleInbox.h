@@ -22,7 +22,8 @@ namespace ProcBridge::Hook
     /// process's own integrity level (no write up). A name that already exists (squatted, or left by a dead process with
     /// the same id) turns the feature off for the process. The header carries the owner's creation time, so a sender never
     /// writes into the section of an earlier process with the same id. Slots stuck in writing (sender died) are reclaimed
-    /// after a timeout. The section is never unmapped: hooks may drain it until the process ends.
+    /// after a timeout; each slot carries a generation next to its state, so a sender that wakes after its slot was
+    /// reclaimed cannot publish into it. The section is never unmapped: hooks may drain it until the process ends.
     class HandleInbox final
     {
     public:
