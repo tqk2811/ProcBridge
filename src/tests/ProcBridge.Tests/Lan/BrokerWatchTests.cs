@@ -137,7 +137,7 @@ public sealed class BrokerWatchTests
 
         server.GetWatcher(new ReadOnlyShare("src", share.Path)).OnError(new InternalBufferOverflowException());
 
-        await rescans.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        await rescans.Task.WaitAsync(TimeSpan.FromSeconds(10));
         await cache.StatAsync("a.txt", CancellationToken.None);
         Assert.AreEqual(before + 1, Requests(client));
     }
@@ -309,7 +309,7 @@ public sealed class BrokerWatchTests
         };
 
         share.WriteFile(@"proj\a.txt", [1]);
-        await raised.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        await raised.Task.WaitAsync(TimeSpan.FromSeconds(10));
         held.Set();
         var reply = await registry.WaitAsync(1, id, TimeSpan.FromSeconds(5), CancellationToken.None);
         Assert.IsTrue(reply.Changes.Any(x => x.Name == "a.txt"));

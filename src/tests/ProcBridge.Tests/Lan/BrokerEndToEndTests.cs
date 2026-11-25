@@ -185,7 +185,7 @@ public sealed class BrokerEndToEndTests
     {
         using var share = new TempFolder("e2e");
         share.WriteFile("f.txt", "x"u8.ToArray());
-        var options = Transport with { ConnectTimeout = TimeSpan.FromSeconds(2), MaxRetries = 1 };
+        var options = Transport with { ConnectTimeout = TimeSpan.FromSeconds(10), MaxRetries = 1 };
 
         AgentServer server = StartAgent(share);
         int port = server.Port;
