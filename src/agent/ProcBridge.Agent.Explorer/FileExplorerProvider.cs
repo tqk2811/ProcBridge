@@ -70,12 +70,9 @@ public sealed class FileExplorerProvider : ExplorerProviderBase
     {
         if (request.Offset < 0 || request.Count < 0)
             throw new ExplorerDeniedException(ExplorerStatus.InvalidArgument, "Offset and count must not be negative.");
-        var handle = _guard.OpenForRead(request.Path, NativeMethods.GenericRead, out _);
+        using var handle = _guard.OpenForRead(request.Path, NativeMethods.GenericRead, out _);
         if (NativeFile.IsDirectory(handle))
-        {
-            handle.Dispose();
             throw new ExplorerDeniedException(ExplorerStatus.NotFound, "File not found.");
-        }
 
         using var stream = new FileStream(handle, FileAccess.Read);
 
@@ -117,8 +114,9 @@ public sealed class FileExplorerProvider : ExplorerProviderBase
                     last ? NativeMethods.NtFileCreate : NativeMethods.NtFileOpenIf, NativeMethods.NtFileDirectoryFile,
                     NativeMethods.FileShareRead | NativeMethods.FileShareWrite);
                 handles.Add(handle);
-                // An existing folder on the way that is a link (made between the check and now) is not walked through.
-                if (!last && (NativeFile.GetAttributeTag(handle).FileAttributes & NativeMethods.FileAttributeReparsePoint) != 0)
+                // An existing folder on the way that is a mount point or symbolic link (made between the check and now)
+                // is not walked through. Other reparse points (OneDrive, dedup...) are ordinary folders here.
+                if (!last && IsRedirectingLink(NativeFile.GetAttributeTag(handle)))
                     throw new ExplorerDeniedException(ExplorerStatus.OutOfScope, "A folder on the way became a link.");
             }
         }
@@ -128,6 +126,10 @@ public sealed class FileExplorerProvider : ExplorerProviderBase
                 handle.Dispose();
         }
     });
+
+    internal static bool IsRedirectingLink(NativeMethods.FileAttributeTagInformation tag)
+        => (tag.FileAttributes & NativeMethods.FileAttributeReparsePoint) != 0
+        && tag.ReparseTag is NativeMethods.ReparseTagMountPoint or NativeMethods.ReparseTagSymlink;
 
     private static FileEntry ToEntry(string directory, NativeDirectoryEntry entry) => new()
     {

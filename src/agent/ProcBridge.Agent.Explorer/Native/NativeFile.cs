@@ -150,9 +150,20 @@ internal static class NativeFile
         return entries;
     }
 
-    /// <summary>Marks the object of the handle (opened with DELETE) for deletion; it goes away when the handle closes.</summary>
+    /// <summary>
+    /// Marks the object of the handle (opened with DELETE) for deletion. POSIX semantics unlink the name at
+    /// once even while other processes keep the file open (share-delete), so a recursive delete is not blocked
+    /// by them; a read-only file is deleted too. Older systems fall back to the plain disposition.
+    /// </summary>
     public static unsafe void MarkDeleted(SafeFileHandle handle)
     {
+        uint flags = NativeMethods.FileDispositionDelete | NativeMethods.FileDispositionPosixSemantics | NativeMethods.FileDispositionIgnoreReadonlyAttribute;
+        if (NativeMethods.SetFileInformationByHandle(handle, NativeMethods.FileDispositionInfoEx, &flags, sizeof(uint)))
+            return;
+        var error = Marshal.GetLastPInvokeError();
+        if (error != NativeMethods.ErrorInvalidParameter)
+            throw Error(error, null);
+
         byte delete = 1;
         if (!NativeMethods.SetFileInformationByHandle(handle, NativeMethods.FileDispositionInfo, &delete, 1))
             throw Error(Marshal.GetLastPInvokeError(), null);
@@ -246,8 +257,12 @@ internal static class NativeFile
             2 => new FileNotFoundException(message, path),
             3 => new DirectoryNotFoundException(message),
             5 => new UnauthorizedAccessException(message),
+            17 => new ExplorerDeniedException(ExplorerStatus.Failed, "Renaming across drives is not supported."),
             80 or 183 => new ExplorerDeniedException(ExplorerStatus.AlreadyExists, "Path already exists."),
             123 => new ArgumentException(message),
+            // STATUS_NOT_A_DIRECTORY: a component on the way is a file.
+            267 => new ExplorerDeniedException(ExplorerStatus.InvalidArgument, "A component of the path is not a directory."),
+            145 => new ExplorerDeniedException(ExplorerStatus.Failed, "The directory is not empty."),
             _ => new Win32Exception(code),
         };
     }

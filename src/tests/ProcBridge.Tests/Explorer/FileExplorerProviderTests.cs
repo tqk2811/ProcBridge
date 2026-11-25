@@ -2,6 +2,7 @@ using System.Diagnostics;
 using ProcBridge.Agent.Explorer;
 using ProcBridge.Agent.Explorer.Enums;
 using ProcBridge.Agent.Explorer.Models;
+using ProcBridge.Agent.Explorer.Native;
 
 namespace ProcBridge.Tests.Explorer;
 
@@ -284,6 +285,89 @@ public sealed class FileExplorerProviderTests
 
         Assert.AreEqual(ExplorerStatus.NotFound, files.ListDirectory(new DirectoryListRequest { Path = Path.Combine(_root, "a.txt") }).Status);
         Assert.AreEqual(ExplorerStatus.NotFound, files.ReadFile(new FileReadRequest { Path = Path.Combine(_root, "sub"), Count = 1 }).Status);
+    }
+
+    [TestMethod]
+    public void DeleteRecursive_ChildOpenedWithShareDelete_Succeeds()
+    {
+        var dir = Path.Combine(_root, "busy");
+        Directory.CreateDirectory(dir);
+        var child = Path.Combine(dir, "open.txt");
+        File.WriteAllText(child, "x");
+        using var held = new FileStream(child, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+
+        var response = Session(ReadWrite).Files.Delete(new FileDeleteRequest { Path = dir, Recursive = true });
+
+        Assert.AreEqual(ExplorerStatus.Ok, response.Status, response.Error);
+        Assert.IsFalse(Directory.Exists(dir));
+    }
+
+    [TestMethod]
+    public void DeleteRecursive_ReadOnlyChild_Succeeds()
+    {
+        var dir = Path.Combine(_root, "ro");
+        Directory.CreateDirectory(dir);
+        var child = Path.Combine(dir, "locked.txt");
+        File.WriteAllText(child, "x");
+        File.SetAttributes(child, FileAttributes.ReadOnly);
+
+        var response = Session(ReadWrite).Files.Delete(new FileDeleteRequest { Path = dir, Recursive = true });
+
+        Assert.AreEqual(ExplorerStatus.Ok, response.Status, response.Error);
+        Assert.IsFalse(Directory.Exists(dir));
+    }
+
+    [TestMethod]
+    public void Delete_NonEmptyDirectoryWithoutRecursive_SaysNotEmpty()
+    {
+        File.WriteAllText(Path.Combine(_root, "sub", "x.txt"), "x");
+        var response = Session(ReadWrite).Files.Delete(new FileDeleteRequest { Path = Path.Combine(_root, "sub") });
+
+        Assert.AreEqual(ExplorerStatus.Failed, response.Status);
+        StringAssert.Contains(response.Error, "not empty");
+    }
+
+    [TestMethod]
+    public void CreateDirectory_ComponentOnTheWayIsAFile_IsInvalidArgument()
+    {
+        var response = Session(ReadWrite).Files.CreateDirectory(new DirectoryCreateRequest { Path = Path.Combine(_root, "a.txt", "child", "deeper") });
+
+        Assert.AreEqual(ExplorerStatus.InvalidArgument, response.Status, response.Error);
+    }
+
+    [TestMethod]
+    public void CreateDirectory_ParentIsAFile_IsInvalidArgument()
+    {
+        var response = Session(ReadWrite).Files.CreateDirectory(new DirectoryCreateRequest { Path = Path.Combine(_root, "a.txt", "child") });
+
+        Assert.AreEqual(ExplorerStatus.InvalidArgument, response.Status, response.Error);
+        Assert.IsFalse(Directory.Exists(Path.Combine(_root, "a.txt", "child")));
+    }
+
+    [TestMethod]
+    public void NativeError_MapsDriveAndEmptinessAndNotADirectory()
+    {
+        var crossDrive = (ExplorerDeniedException)NativeFile.Error(17, null);
+        Assert.AreEqual(ExplorerStatus.Failed, crossDrive.Status);
+        StringAssert.Contains(crossDrive.Message, "across drives");
+
+        var notEmpty = (ExplorerDeniedException)NativeFile.Error(145, null);
+        Assert.AreEqual(ExplorerStatus.Failed, notEmpty.Status);
+        StringAssert.Contains(notEmpty.Message, "not empty");
+
+        var notDirectory = (ExplorerDeniedException)NativeFile.Error(267, null);
+        Assert.AreEqual(ExplorerStatus.InvalidArgument, notDirectory.Status);
+    }
+
+    [TestMethod]
+    public void IsRedirectingLink_OnlyMountPointAndSymlink()
+    {
+        const uint reparse = 0x400;
+        Assert.IsTrue(FileExplorerProvider.IsRedirectingLink(new NativeMethods.FileAttributeTagInformation { FileAttributes = reparse, ReparseTag = 0xA0000003 }));
+        Assert.IsTrue(FileExplorerProvider.IsRedirectingLink(new NativeMethods.FileAttributeTagInformation { FileAttributes = reparse, ReparseTag = 0xA000000C }));
+        // IO_REPARSE_TAG_CLOUD_* (OneDrive placeholder) and dedup are plain folders for this purpose.
+        Assert.IsFalse(FileExplorerProvider.IsRedirectingLink(new NativeMethods.FileAttributeTagInformation { FileAttributes = reparse, ReparseTag = 0x9000001A }));
+        Assert.IsFalse(FileExplorerProvider.IsRedirectingLink(new NativeMethods.FileAttributeTagInformation { FileAttributes = 0x10, ReparseTag = 0 }));
     }
 
     [TestMethod]

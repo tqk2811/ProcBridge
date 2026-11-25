@@ -97,6 +97,13 @@ internal sealed class PathScopeGuard
             var handle = NativeFile.TryOpen(current, ParentAccess, followLinks: true, ParentShare, out var error);
             if (handle is not null)
             {
+                // A file on the way (a.txt/new) opens fine as an entry but nothing can be created below it.
+                if (!NativeFile.IsDirectory(handle))
+                {
+                    handle.Dispose();
+                    throw new ExplorerDeniedException(ExplorerStatus.InvalidArgument, "A component of the path is not a directory.");
+                }
+
                 names.Reverse();
                 missing = names;
                 return Checked(handle, full, allowRoot: true);

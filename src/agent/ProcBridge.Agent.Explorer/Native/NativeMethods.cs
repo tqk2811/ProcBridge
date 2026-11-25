@@ -34,12 +34,23 @@ internal static partial class NativeMethods
     public const int FileBasicInfo = 0;
     public const int FileStandardInfo = 1;
     public const int FileDispositionInfo = 4;
+    public const int FileDispositionInfoEx = 21;
     public const int FileAttributeTagInfo = 9;
     public const int FileFullDirectoryInfo = 14;
     public const int FileFullDirectoryRestartInfo = 15;
     public const int NtFileRenameInformation = 10;
 
     public const int ErrorNoMoreFiles = 18;
+    public const int ErrorInvalidParameter = 87;
+
+    // FILE_DISPOSITION_INFO_EX flags.
+    public const uint FileDispositionDelete = 0x1;
+    public const uint FileDispositionPosixSemantics = 0x2;
+    public const uint FileDispositionIgnoreReadonlyAttribute = 0x10;
+
+    // Reparse tags that redirect a path to another location.
+    public const uint ReparseTagMountPoint = 0xA0000003;
+    public const uint ReparseTagSymlink = 0xA000000C;
     public const uint ProcessQueryLimitedInformation = 0x1000;
 
     [LibraryImport("kernel32.dll", EntryPoint = "CreateFileW", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
