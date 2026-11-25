@@ -17,6 +17,12 @@ public sealed class TunnelOptions
     /// <summary>After one direction of a lane closed, how long the other direction may take to finish its close.</summary>
     public TimeSpan CloseGrace { get; set; } = TimeSpan.FromSeconds(10);
 
+    /// <summary>
+    /// Also accept the lane ticket as <c>?ticket=</c> in the URL (old peers). Off by default: URLs are logged by proxies
+    /// and servers, headers normally are not.
+    /// </summary>
+    public bool AllowTicketInQuery { get; set; }
+
     /// <summary>Receive buffer per lane direction (bytes).</summary>
     public int BufferSize { get; set; } = 64 * 1024;
 }

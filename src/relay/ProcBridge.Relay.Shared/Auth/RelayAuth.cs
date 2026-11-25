@@ -20,4 +20,10 @@ public static class RelayAuth
 
     /// <summary>Prefix of device tokens.</summary>
     public const string DeviceTokenPrefix = "pbd_";
+
+    /// <summary>
+    /// Prefix of tunnel lane tickets. A lane carries its ticket as <c>Authorization: Bearer pbt_...</c>; in the URL it
+    /// would end up in proxy and access logs.
+    /// </summary>
+    public const string TicketPrefix = "pbt_";
 }

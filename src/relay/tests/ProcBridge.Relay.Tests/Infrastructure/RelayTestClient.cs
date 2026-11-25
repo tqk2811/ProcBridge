@@ -87,7 +87,18 @@ public sealed class RelayTestClient
         return JsonConvert.DeserializeObject<TunnelSessionOpenedMessageVM>(text, RelayJsonSettings.Create())!;
     }
 
+    /// <summary>Opens a data lane with the ticket in the Authorization header (the way real peers do).</summary>
     public Task<WebSocket> ConnectLaneAsync(Guid sessionId, string ticket, int lane)
+    {
+        var client = _factory.Server.CreateWebSocketClient();
+        client.ConfigureRequest = r => r.Headers.Authorization = "Bearer " + ticket;
+        return client.ConnectAsync(
+            new Uri($"ws://localhost{TunnelProtocol.DataPath}?{TunnelProtocol.SessionIdQuery}={sessionId}&{TunnelProtocol.LaneQuery}={lane}"),
+            CancellationToken.None);
+    }
+
+    /// <summary>Legacy form: ticket in the URL.</summary>
+    public Task<WebSocket> ConnectLaneWithTicketInQueryAsync(Guid sessionId, string ticket, int lane)
         => _factory.Server.CreateWebSocketClient().ConnectAsync(
             new Uri($"ws://localhost{TunnelProtocol.DataPath}?{TunnelProtocol.SessionIdQuery}={sessionId}&{TunnelProtocol.TicketQuery}={Uri.EscapeDataString(ticket)}&{TunnelProtocol.LaneQuery}={lane}"),
             CancellationToken.None);

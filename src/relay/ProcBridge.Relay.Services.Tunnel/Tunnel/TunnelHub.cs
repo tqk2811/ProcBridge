@@ -12,6 +12,7 @@ using ProcBridge.Relay.Services.Common.Security;
 using ProcBridge.Relay.Services.Tunnel.Enums;
 using ProcBridge.Relay.Services.Tunnel.Interfaces;
 using ProcBridge.Relay.Services.Tunnel.Models;
+using ProcBridge.Relay.Shared.Auth;
 using ProcBridge.Relay.Shared.Json;
 using ProcBridge.Relay.Shared.Tunnel;
 using ProcBridge.Relay.ViewModels.Tunnel;
@@ -24,7 +25,7 @@ namespace ProcBridge.Relay.Services.Tunnel;
 /// </summary>
 public sealed class TunnelHub : ITunnelHub, IDevicePresence, ITunnelTerminator
 {
-    private const string TicketPrefix = "pbt_";
+    private const string TicketPrefix = RelayAuth.TicketPrefix;
 
     private readonly ConcurrentDictionary<Guid, TunnelControlChannel> _controls = new();
     private readonly ConcurrentDictionary<Guid, TunnelSession> _sessions = new();

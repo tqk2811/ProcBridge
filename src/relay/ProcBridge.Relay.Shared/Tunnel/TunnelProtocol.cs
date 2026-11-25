@@ -6,13 +6,14 @@ namespace ProcBridge.Relay.Shared.Tunnel;
 /// </summary>
 public static class TunnelProtocol
 {
-    /// <summary>Data lane: <c>GET /tunnel?sessionId=..&amp;ticket=..&amp;lane=0</c> (WebSocket upgrade).</summary>
+    /// <summary>Data lane: <c>GET /tunnel?sessionId=..&amp;lane=0</c> + <c>Authorization: Bearer pbt_...</c> ticket (WebSocket upgrade).</summary>
     public const string DataPath = "/tunnel";
 
     /// <summary>Control channel of a host device: <c>GET /tunnel/control</c> + device bearer token (WebSocket upgrade).</summary>
     public const string ControlPath = "/tunnel/control";
 
     public const string SessionIdQuery = "sessionId";
+    /// <summary>Legacy: ticket in the URL; the relay only accepts it when <c>Relay:Tunnel:AllowTicketInQuery</c> is on.</summary>
     public const string TicketQuery = "ticket";
     public const string LaneQuery = "lane";
 

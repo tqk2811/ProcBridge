@@ -1,5 +1,7 @@
 using ProcBridge.Relay.Api.Extensions;
 using ProcBridge.Relay.Api.Infrastructure;
+using Microsoft.Extensions.Options;
+
 using ProcBridge.Relay.Services.Common.Common.Errors;
 using ProcBridge.Relay.Services.Devices.Interfaces;
 using ProcBridge.Relay.Services.Tunnel.Models;
@@ -15,7 +17,7 @@ public static class TunnelEndpoints
     public static IEndpointRouteBuilder MapTunnelEndpoints(this IEndpointRouteBuilder endpoints)
     {
         endpoints.MapGet(TunnelProtocol.ControlPath, RunControlAsync).RequireAuthorization(RelayAuth.DevicePolicy);
-        // Anonymous at the HTTP level: the session ticket in the query authorizes the lane.
+        // Anonymous at the HTTP level: the session ticket (Authorization: Bearer pbt_...) authorizes the lane.
         endpoints.MapGet(TunnelProtocol.DataPath, RunLaneAsync).AllowAnonymous();
         return endpoints;
     }
@@ -32,13 +34,13 @@ public static class TunnelEndpoints
         await hub.RunControlChannelAsync(deviceId, socket, context.RequestAborted, access);
     }
 
-    private static async Task RunLaneAsync(HttpContext context, ITunnelHub hub)
+    private static async Task RunLaneAsync(HttpContext context, ITunnelHub hub, IOptions<TunnelOptions> options)
     {
         var query = context.Request.Query;
         if (!Guid.TryParse(query[TunnelProtocol.SessionIdQuery], out var sessionId)
             || !int.TryParse(query[TunnelProtocol.LaneQuery], out var lane))
             throw ApiErrorException.BadRequest(RelayErrors.ValidationFailed, "Thiếu hoặc sai sessionId/lane.");
-        var ticket = query[TunnelProtocol.TicketQuery].ToString();
+        var ticket = ReadTicket(context, options.Value.AllowTicketInQuery);
 
         // Validate and reserve BEFORE accepting, so refusals are plain HTTP errors (401/404/409) the peer can read.
         var reservation = hub.ReserveLane(sessionId, ticket, lane);
@@ -60,5 +62,14 @@ public static class TunnelEndpoints
         }
         using (socket)
             await hub.RunLaneAsync(reservation, socket, context.RequestAborted);
+    }
+
+    /// <summary>The ticket from <c>Authorization: Bearer pbt_...</c>; the URL only when <paramref name="allowQuery"/> (old peers).</summary>
+    private static string ReadTicket(HttpContext context, bool allowQuery)
+    {
+        var header = context.Request.Headers.Authorization.ToString();
+        if (header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+            return header["Bearer ".Length..].Trim();
+        return allowQuery ? context.Request.Query[TunnelProtocol.TicketQuery].ToString() : string.Empty;
     }
 }

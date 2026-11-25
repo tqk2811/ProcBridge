@@ -354,8 +354,8 @@ mở/đóng, số byte) và API/CLI xem. Ghi 2026-11-25 (M6).
 
 ## [Thấp] Giới hạn tài nguyên tunnel
 
-Chưa có trần kích thước message, quota băng thông, thời gian rảnh tối đa của lane, hay số phiên đồng thời mỗi
-máy. Một máy được cấp quyền có thể giữ nhiều lane mở mãi. Ghi 2026-11-25 (M6).
+Chưa có quota băng thông, thời gian rảnh tối đa của lane, hay số phiên đồng thời mỗi máy (đã có giới hạn
+tần suất mở phiên theo máy). Một máy được cấp quyền có thể giữ nhiều lane mở mãi. Ghi 2026-11-25 (M6).
 
 ## [Thấp] Dọn phiên đăng nhập hết hạn
 

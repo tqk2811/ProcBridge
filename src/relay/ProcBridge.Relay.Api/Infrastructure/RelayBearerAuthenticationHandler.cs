@@ -62,6 +62,11 @@ public sealed class RelayBearerAuthenticationHandler : AuthenticationHandler<Aut
                 return AuthenticateResult.Fail("Invalid device token.");
             claims = [new(RelayAuth.DeviceIdClaim, identity.DeviceId.ToString())];
         }
+        else if (token.StartsWith(RelayAuth.TicketPrefix, StringComparison.Ordinal))
+        {
+            // A tunnel lane ticket, not an identity: the lane endpoint reads and checks it itself.
+            return AuthenticateResult.NoResult();
+        }
         else
         {
             return AuthenticateResult.Fail("Unknown token kind.");

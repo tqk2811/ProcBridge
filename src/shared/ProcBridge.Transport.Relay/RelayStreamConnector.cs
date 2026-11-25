@@ -60,13 +60,12 @@ public sealed class RelayStreamConnector : IStreamConnector, IDisposable
         for (int attempt = 0; ; attempt++)
         {
             (Session session, int lane) = await AcquireLaneAsync(cancellationToken).ConfigureAwait(false);
-            Uri uri = _relay.WebSocketUri(
-                $"{TunnelProtocol.DataPath}?{TunnelProtocol.SessionIdQuery}={session.Info.SessionId}"
-                + $"&{TunnelProtocol.TicketQuery}={Uri.EscapeDataString(session.Info.Ticket)}&{TunnelProtocol.LaneQuery}={lane}");
+            // The ticket goes in the Authorization header, not the URL: URLs end up in proxy and access logs.
+            Uri uri = _relay.WebSocketUri($"{TunnelProtocol.DataPath}?{TunnelProtocol.SessionIdQuery}={session.Info.SessionId}&{TunnelProtocol.LaneQuery}={lane}");
             WebSocket socket;
             try
             {
-                socket = await _sockets.ConnectAsync(uri, null, cancellationToken).ConfigureAwait(false);
+                socket = await _sockets.ConnectAsync(uri, session.Info.Ticket, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception e) when (e is WebSocketException or HttpRequestException or InvalidOperationException or IOException)
             {

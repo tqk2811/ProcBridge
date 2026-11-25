@@ -320,7 +320,9 @@ Broker kết nối TCP thẳng tới Agent (cổng cấu hình được). Tìm A
   - Máy A gọi `POST api/tunnel/sessions {shareId}` bằng token máy A. Relay kiểm quyền A dùng chia sẻ,
     tạo phiên với hai vé ngắn hạn (một cho mỗi phía), trả vé của A và đẩy vé của B qua kênh điều khiển
     (kèm khoá công khai hai bên để đối chiếu vân tay).
-  - Hai phía mở các lane dữ liệu `GET /tunnel?sessionId=..&ticket=..&lane=N` (WebSocket). Lane cùng số
+  - Hai phía mở các lane dữ liệu `GET /tunnel?sessionId=..&lane=N` (WebSocket) kèm vé trong header
+    `Authorization: Bearer pbt_...` (vé không nằm trong URL để khỏi lọt vào log proxy; `?ticket=` chỉ nhận khi
+    bật `Relay:Tunnel:AllowTicketInQuery`, mặc định tắt). Lane cùng số
     của hai phía được ghép cặp; relay chép nguyên khung nhị phân giữa chúng, không đọc payload. Một phiên
     có tối đa 16 lane song song (quyết định 1 ở mục 15). Đóng một đầu thì đóng đầu kia của cùng lane.
   - Máy A mở lane theo nhu cầu (mỗi kết nối của pool là một lane, lấy số nhỏ nhất còn trống). Khi đầu
@@ -335,7 +337,10 @@ Broker kết nối TCP thẳng tới Agent (cổng cấu hình được). Tìm A
   - Thu hồi máy, thu hồi quyền hay xoá chia sẻ cắt luôn kênh điều khiển và các lane đang mở liên quan.
   - Tài khoản: mặc định tắt tự đăng ký (`Relay:Accounts:AllowRegistration=false`); người vận hành tạo
     tài khoản bằng `ProcBridge.Relay.Api account create <user>` trên máy relay. `login`/`register` giới hạn
-    tần suất theo địa chỉ máy khách (`Relay:RateLimit`, mặc định 10 lần/phút, quá thì 429).
+    tần suất theo địa chỉ máy khách và theo tên đăng nhập (`Relay:RateLimit`, mặc định 10 lần/phút, quá thì
+    429); `POST api/tunnel/sessions` giới hạn theo máy (mặc định 60 phiên/phút). Relay chỉ tin
+    `X-Forwarded-For` từ proxy khai trong `Relay:ForwardedHeaders:KnownProxies`/`KnownNetworks` (mặc định rỗng:
+    không tin header nào).
   - Trạng thái phiên chỉ nằm trong bộ nhớ một tiến trình relay.
 - Lưu trữ: PostgreSQL (tài khoản, máy, khoá công khai của máy, chia sẻ, quyền, log phiên). Không lưu
   nội dung file.
