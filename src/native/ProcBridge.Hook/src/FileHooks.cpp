@@ -879,8 +879,14 @@ namespace ProcBridge::Hook
             // Remove only after the close succeeded (a failed close keeps the handle open). Once closed,
             // another thread may already have received the same value and a new entry: the generation
             // check leaves that entry alone.
+            // A close made by the hook itself (BrokerClient dropping a pipe instance during a directory query,
+            // which holds a RemoteHandleTable state lock) never touches the remote table: those handles are
+            // not in it.
+            ReentryGuard guard;
             ULONG64 generation = 0;
             const bool tracked = g_handles.Find(handle, &generation) >= 0;
+            ULONG64 remoteGeneration = 0;
+            const bool remote = guard.IsOutermost() && g_remoteHandles.Find(handle, remoteGeneration);
             const NTSTATUS status = g_ntClose(handle);
             if (NT_SUCCESS(status))
             {
@@ -891,7 +897,10 @@ namespace ProcBridge::Hook
                 // A cached directory name is only a cache: a stale entry for a reused value is also
                 // dropped by the next hooked open that returns it.
                 g_directoryNames.Remove(handle);
-                g_remoteHandles.Remove(handle);
+                if (remote)
+                {
+                    g_remoteHandles.Remove(handle, remoteGeneration);
+                }
             }
             return status;
         }
@@ -903,6 +912,12 @@ namespace ProcBridge::Hook
             ULONG length, ULONG informationClass, bool returnSingleEntry, PUNICODE_STRING fileName, bool restartScan, bool& handled)
         {
             handled = false;
+            // Most listings are of real folders: decide before copying anything.
+            ULONG64 generation = 0;
+            if (!g_resolver->IsRemote() || g_remoteHandles.IsEmpty() || !g_remoteHandles.Find(fileHandle, generation))
+            {
+                return STATUS_SUCCESS;
+            }
             UNICODE_STRING pattern{};
             HeapBuffer patternText(fileName != nullptr ? 0x10000 : 1);
             if (fileName != nullptr)

@@ -29,7 +29,7 @@ namespace ProcBridge::Hook
         RemoteHandleTable& operator=(const RemoteHandleTable&) = delete;
 
         /// Records handle (replacing a stale entry with the same value). virtualNtPath is copied (trailing '\'
-        /// dropped); info is machine B's metadata of the file or directory.
+        /// dropped); info is machine B's metadata of the file or directory. Each entry gets a new generation.
         void Add(HANDLE handle, int mapping, const UNICODE_STRING& virtualNtPath, const HookIpc::FileInfo& info) noexcept;
 
         /// Fast check used before any lock: false when no handle is tracked at all.
@@ -38,7 +38,12 @@ namespace ProcBridge::Hook
         /// Machine B's metadata of handle. False when not tracked.
         bool GetInfo(HANDLE handle, HookIpc::FileInfo& info) const noexcept;
 
-        void Remove(HANDLE handle) noexcept;
+        /// Removes the entry of handle; with a generation (from Find), only that entry (a close that raced with
+        /// a new open of the same value leaves the new entry alone).
+        void Remove(HANDLE handle, ULONG64 generation = 0) noexcept;
+
+        /// True when handle is tracked; generation receives its entry's generation.
+        bool Find(HANDLE handle, ULONG64& generation) const noexcept;
 
         /// Copies the virtual NT path of the directory handle into path (freed with FreeString). False when the
         /// handle is not a tracked directory.
@@ -56,13 +61,20 @@ namespace ProcBridge::Hook
     private:
         struct State;
 
-        /// Under the shared table lock: the state of handle with its own lock held exclusively, or nullptr.
+        /// The state of handle with its own lock held exclusively (and a reference), or nullptr. The table lock
+        /// is not held while waiting for the state lock, nor afterwards: a query may wait on the network.
         State* Lock(HANDLE handle) const noexcept;
+
+        /// Releases what Lock took.
+        static void Unlock(State* state) noexcept;
+
+        static void Release(State* state) noexcept;
 
         mutable SRWLOCK _lock = SRWLOCK_INIT;
         State** _entries = nullptr;
         size_t _capacity = 0;
         // Written under the exclusive lock; the unlocked read is only a fast path for untracked handles.
         std::atomic<size_t> _count{ 0 };
+        ULONG64 _nextGeneration = 0; // under the exclusive lock
     };
 }

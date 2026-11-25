@@ -147,6 +147,10 @@ namespace ProcBridge::Hook
     struct RemoteHandleTable::State
     {
         HANDLE Handle;
+        ULONG64 Generation;
+        // One reference held by the table, one by each Lock in progress; the last one destroys the state.
+        LONG References;
+        bool Removed;       // set under the state lock once the table dropped it
         int Mapping;
         UNICODE_STRING Path;
         HookIpc::FileInfo Self; // machine B's metadata; for a directory also the "." entry
@@ -273,6 +277,20 @@ namespace ProcBridge::Hook
         }
     };
 
+    void RemoteHandleTable::Release(State* state) noexcept
+    {
+        if (InterlockedDecrement(&state->References) == 0)
+        {
+            state->Destroy();
+        }
+    }
+
+    void RemoteHandleTable::Unlock(State* state) noexcept
+    {
+        ReleaseSRWLockExclusive(&state->Lock);
+        Release(state);
+    }
+
     RemoteHandleTable::~RemoteHandleTable()
     {
         // Runs at DLL detach; hooks may still be called afterwards (NtClose from other destructors), so leave
@@ -280,7 +298,7 @@ namespace ProcBridge::Hook
         const size_t count = _count.exchange(0);
         for (size_t i = 0; i < count; ++i)
         {
-            _entries[i]->Destroy();
+            Release(_entries[i]);
         }
         if (_entries != nullptr)
         {
@@ -299,6 +317,7 @@ namespace ProcBridge::Hook
         }
         State* state = new (memory) State{};
         state->Handle = handle;
+        state->References = 1;
         state->Mapping = mapping;
         state->Self = info;
         state->Directory = (info.Attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
@@ -331,14 +350,38 @@ namespace ProcBridge::Hook
             _entries = static_cast<State**>(grown);
             _capacity = capacity;
         }
+        state->Generation = ++_nextGeneration;
         _entries[count] = state;
         _count.store(count + 1, std::memory_order_release);
         ReleaseSRWLockExclusive(&_lock);
     }
 
-    void RemoteHandleTable::Remove(HANDLE handle) noexcept
+    bool RemoteHandleTable::Find(HANDLE handle, ULONG64& generation) const noexcept
     {
+        generation = 0;
         if (_count.load(std::memory_order_acquire) == 0)
+        {
+            return false;
+        }
+        AcquireSRWLockShared(&_lock);
+        const size_t count = _count.load(std::memory_order_relaxed);
+        for (size_t i = 0; i < count; ++i)
+        {
+            if (_entries[i]->Handle == handle)
+            {
+                generation = _entries[i]->Generation;
+                break;
+            }
+        }
+        ReleaseSRWLockShared(&_lock);
+        return generation != 0;
+    }
+
+    void RemoteHandleTable::Remove(HANDLE handle, ULONG64 generation) noexcept
+    {
+        // Every NtClose comes here: look under the shared lock first, most handles are not tracked.
+        ULONG64 found = 0;
+        if (!Find(handle, found) || (generation != 0 && found != generation))
         {
             return;
         }
@@ -347,7 +390,7 @@ namespace ProcBridge::Hook
         const size_t count = _count.load(std::memory_order_relaxed);
         for (size_t i = 0; i < count; ++i)
         {
-            if (_entries[i]->Handle == handle)
+            if (_entries[i]->Handle == handle && (generation == 0 || _entries[i]->Generation == generation))
             {
                 removed = _entries[i];
                 _entries[i] = _entries[count - 1];
@@ -358,10 +401,10 @@ namespace ProcBridge::Hook
         ReleaseSRWLockExclusive(&_lock);
         if (removed != nullptr)
         {
-            // Wait for a query still running on it (it holds the state lock).
-            AcquireSRWLockExclusive(&removed->Lock);
-            ReleaseSRWLockExclusive(&removed->Lock);
-            removed->Destroy();
+            // A query still running on it keeps a reference; it sees Removed once it gets the lock. Nothing waits
+            // here for the state lock (a query may be waiting on the network while holding it).
+            InterlockedExchange8(reinterpret_cast<volatile char*>(&removed->Removed), 1);
+            Release(removed);
         }
     }
 
@@ -380,11 +423,21 @@ namespace ProcBridge::Hook
             {
                 found = _entries[i];
                 // Taken before the table lock is released, so Remove cannot free it in between.
-                AcquireSRWLockExclusive(&found->Lock);
+                InterlockedIncrement(&found->References);
                 break;
             }
         }
         ReleaseSRWLockShared(&_lock);
+        if (found == nullptr)
+        {
+            return nullptr;
+        }
+        AcquireSRWLockExclusive(&found->Lock);
+        if (found->Removed)
+        {
+            Unlock(found); // closed while this thread waited
+            return nullptr;
+        }
         return found;
     }
 
@@ -396,7 +449,7 @@ namespace ProcBridge::Hook
             return false;
         }
         info = state->Self;
-        ReleaseSRWLockExclusive(&state->Lock);
+        Unlock(state);
         return true;
     }
 
@@ -409,7 +462,7 @@ namespace ProcBridge::Hook
         }
         mapping = state->Mapping;
         const bool copied = state->Directory && ConcatString(path, state->Path, nullptr, 0);
-        ReleaseSRWLockExclusive(&state->Lock);
+        Unlock(state);
         return copied;
     }
 
@@ -423,7 +476,7 @@ namespace ProcBridge::Hook
         mapping = state->Mapping;
         info = state->Self;
         const bool copied = ConcatString(path, state->Path, nullptr, 0);
-        ReleaseSRWLockExclusive(&state->Lock);
+        Unlock(state);
         return copied;
     }
 
@@ -438,7 +491,7 @@ namespace ProcBridge::Hook
         if (!state->Directory)
         {
             // A file: the system answers (STATUS_INVALID_PARAMETER) on the cache copy.
-            ReleaseSRWLockExclusive(&state->Lock);
+            Unlock(state);
             return false;
         }
         written = 0;
@@ -541,7 +594,7 @@ namespace ProcBridge::Hook
             // Only the first query of a scan reports "no such file"; later ones report the end.
             state->ReturnedAny = true;
         }
-        ReleaseSRWLockExclusive(&state->Lock);
+        Unlock(state);
         return true;
     }
 }
