@@ -9,6 +9,7 @@ using Newtonsoft.Json;
 using ProcBridge.Relay.Services.Accounts.Interfaces;
 using ProcBridge.Relay.Services.Common.Common.Errors;
 using ProcBridge.Relay.Services.Devices.Interfaces;
+using ProcBridge.Relay.Services.Tunnel.Interfaces;
 using ProcBridge.Relay.Shared.Auth;
 using ProcBridge.Relay.Shared.Common;
 using ProcBridge.Relay.Shared.Json;
@@ -23,16 +24,19 @@ public sealed class RelayBearerAuthenticationHandler : AuthenticationHandler<Aut
 {
     private readonly IAccountService _accounts;
     private readonly IDeviceService _devices;
+    private readonly ITunnelHub _hub;
 
     public RelayBearerAuthenticationHandler(
         IOptionsMonitor<AuthenticationSchemeOptions> options,
         ILoggerFactory logger,
         UrlEncoder encoder,
         IAccountService accounts,
-        IDeviceService devices) : base(options, logger, encoder)
+        IDeviceService devices,
+        ITunnelHub hub) : base(options, logger, encoder)
     {
         _accounts = accounts;
         _devices = devices;
+        _hub = hub;
     }
 
     protected override async Task<AuthenticateResult> HandleAuthenticateAsync()
@@ -52,6 +56,7 @@ public sealed class RelayBearerAuthenticationHandler : AuthenticationHandler<Aut
         }
         else if (token.StartsWith(RelayAuth.DeviceTokenPrefix, StringComparison.Ordinal))
         {
+            Context.Items[AuthItemKeys.RevocationEpoch] = _hub.RevocationEpoch;
             var identity = await _devices.AuthenticateAsync(token, Context.RequestAborted);
             if (identity is null)
                 return AuthenticateResult.Fail("Invalid device token.");

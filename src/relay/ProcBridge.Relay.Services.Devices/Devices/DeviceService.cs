@@ -68,6 +68,9 @@ public sealed class DeviceService : IDeviceService
         return new DeviceIdentity(device.Id, device.OwnerAccountId);
     }
 
+    public async Task<bool> IsActiveAsync(Guid deviceId, CancellationToken cancellationToken = default)
+        => await _devices.GetByIdAsync(deviceId, cancellationToken) is { RevokedAt: null };
+
     private DeviceVM ToVM(DeviceRecordVM record)
         => new(record.Id, record.Name, record.PublicKey, record.CreatedAt, record.RevokedAt is not null, record.RevokedAt is null && _presence.IsOnline(record.Id));
 }

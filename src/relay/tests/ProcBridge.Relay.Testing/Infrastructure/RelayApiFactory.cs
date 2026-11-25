@@ -36,6 +36,7 @@ public sealed class RelayApiFactory : WebApplicationFactory<Program>
         builder.UseSetting("ConnectionStrings:Relay", _connectionString ?? "Host=unused.invalid;Database=unused");
         builder.UseSetting("Relay:Database:MigrateOnStartup", _connectionString is null ? "false" : "true");
         builder.UseSetting("Relay:Tunnel:PairTimeout", "00:00:10");
+        builder.ConfigureServices(services => services.AddTransient<IStartupFilter, TestRemoteAddressStartupFilter>());
         if (_connectionString is not null)
             return;
 

@@ -32,6 +32,7 @@ public sealed class TunnelHub : ITunnelHub, IDevicePresence, ITunnelTerminator
     private readonly TunnelOptions _options;
     private readonly TimeProvider _time;
     private readonly ILogger<TunnelHub> _logger;
+    private long _revocationEpoch;
 
     public TunnelHub(IOptions<TunnelOptions> options, TimeProvider time, ILogger<TunnelHub> logger)
     {
@@ -42,9 +43,11 @@ public sealed class TunnelHub : ITunnelHub, IDevicePresence, ITunnelTerminator
 
     private DateTime Now => _time.GetUtcNow().UtcDateTime;
 
+    public long RevocationEpoch => Interlocked.Read(ref _revocationEpoch);
+
     public bool IsOnline(Guid deviceId) => _controls.ContainsKey(deviceId);
 
-    public async Task RunControlChannelAsync(Guid deviceId, WebSocket socket, CancellationToken cancellationToken)
+    public async Task RunControlChannelAsync(Guid deviceId, WebSocket socket, CancellationToken cancellationToken, TunnelAccessCheck? access = null)
     {
         var channel = new TunnelControlChannel(socket);
         TunnelControlChannel? replaced = null;
@@ -57,6 +60,14 @@ public sealed class TunnelHub : ITunnelHub, IDevicePresence, ITunnelTerminator
         _logger.LogInformation("Máy {DeviceId} đã mở kênh điều khiển tunnel.", deviceId);
         try
         {
+            // A revocation may have run between the caller's check and the registration above (it cut the old
+            // entries, not this one): ask again and drop the channel when the device lost access meanwhile.
+            if (!await StillAllowedAsync(access, cancellationToken))
+            {
+                _logger.LogInformation("Máy {DeviceId} bị thu hồi khi đang mở kênh điều khiển: đóng kênh.", deviceId);
+                channel.Abort();
+                return;
+            }
             await channel.RunAsync(cancellationToken);
         }
         catch (Exception ex) when (ex is WebSocketException or OperationCanceledException)
@@ -76,7 +87,8 @@ public sealed class TunnelHub : ITunnelHub, IDevicePresence, ITunnelTerminator
         Guid shareId,
         Guid hostDeviceId,
         string? hostPublicKey,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TunnelAccessCheck? access = null)
     {
         PurgeDeadSessions();
         if (!_controls.TryGetValue(hostDeviceId, out var control))
@@ -87,6 +99,13 @@ public sealed class TunnelHub : ITunnelHub, IDevicePresence, ITunnelTerminator
         var hostTicket = SecretTokens.Create(TicketPrefix);
         var session = new TunnelSession(Guid.NewGuid(), shareId, clientDeviceId, hostDeviceId, clientTicket, hostTicket, expiresAt);
         _sessions[session.Id] = session;
+        // Same race as on the control channel: a revocation between the caller's check and the line above missed
+        // this session, so ask again before telling the host about it.
+        if (!await StillAllowedAsync(access, cancellationToken))
+        {
+            AbortSession(session);
+            throw ServiceException.Forbidden(RelayErrors.ShareAccessDenied, "Máy này không được dùng chia sẻ đó.");
+        }
 
         var message = new TunnelSessionOpenedMessageVM(
             TunnelProtocol.SessionOpenedMessage, session.Id, hostTicket, expiresAt, shareId, clientDeviceId, clientPublicKey);
@@ -105,6 +124,10 @@ public sealed class TunnelHub : ITunnelHub, IDevicePresence, ITunnelTerminator
             session.Id, clientDeviceId, shareId, hostDeviceId);
         return new TunnelSessionVM(session.Id, clientTicket, expiresAt, hostDeviceId, hostPublicKey);
     }
+
+    /// <summary>True when nothing was revoked since <paramref name="access"/> was captured, or the permission still holds.</summary>
+    private async Task<bool> StillAllowedAsync(TunnelAccessCheck? access, CancellationToken cancellationToken)
+        => access is null || access.Epoch == RevocationEpoch || await access.StillAllowed(cancellationToken);
 
     public TunnelLaneReservation ReserveLane(Guid sessionId, string ticket, int lane)
     {
@@ -141,6 +164,8 @@ public sealed class TunnelHub : ITunnelHub, IDevicePresence, ITunnelTerminator
 
     public void DisconnectDevice(Guid deviceId)
     {
+        // Bump first: an opener that registered after the sweeps below sees the epoch moved and re-checks.
+        Interlocked.Increment(ref _revocationEpoch);
         if (_controls.TryRemove(deviceId, out var control))
             control.Abort();
         foreach (var session in _sessions.Values)
@@ -153,6 +178,7 @@ public sealed class TunnelHub : ITunnelHub, IDevicePresence, ITunnelTerminator
 
     public void DisconnectShare(Guid shareId, Guid? clientDeviceId = null)
     {
+        Interlocked.Increment(ref _revocationEpoch);
         foreach (var session in _sessions.Values)
         {
             if (session.ShareId == shareId && (clientDeviceId is null || session.ClientDeviceId == clientDeviceId))

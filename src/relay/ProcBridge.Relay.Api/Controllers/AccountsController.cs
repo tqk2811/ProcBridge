@@ -17,8 +17,13 @@ namespace ProcBridge.Relay.Api.Controllers;
 public sealed class AccountsController : ControllerBase, IRelayAccountsController
 {
     private readonly IAccountService _accounts;
+    private readonly LoginUserNameLimiter _loginLimiter;
 
-    public AccountsController(IAccountService accounts) => _accounts = accounts;
+    public AccountsController(IAccountService accounts, LoginUserNameLimiter loginLimiter)
+    {
+        _accounts = accounts;
+        _loginLimiter = loginLimiter;
+    }
 
     [HttpPost("register")]
     [AllowAnonymous]
@@ -30,7 +35,10 @@ public sealed class AccountsController : ControllerBase, IRelayAccountsControlle
     [AllowAnonymous]
     [EnableRateLimiting(AuthRateLimitOptions.PolicyName)]
     public Task<LoginResultVM> LoginAsync([FromBody] LoginRequestVM request, CancellationToken cancellationToken = default)
-        => _accounts.LoginAsync(request, cancellationToken);
+    {
+        _loginLimiter.Acquire(request.UserName);
+        return _accounts.LoginAsync(request, cancellationToken);
+    }
 
     [HttpPost("logout")]
     [Authorize(Policy = RelayAuth.AccountPolicy)]

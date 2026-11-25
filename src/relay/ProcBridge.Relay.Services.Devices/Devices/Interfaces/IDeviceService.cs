@@ -11,4 +11,7 @@ public interface IDeviceService
     Task RevokeAsync(Guid deviceId, CancellationToken cancellationToken = default);
     /// <summary><c>null</c> when the token is unknown or the device is revoked.</summary>
     Task<DeviceIdentity?> AuthenticateAsync(string token, CancellationToken cancellationToken = default);
+
+    /// <summary>True while the device exists and is not revoked (re-check after a possible revocation race).</summary>
+    Task<bool> IsActiveAsync(Guid deviceId, CancellationToken cancellationToken = default);
 }

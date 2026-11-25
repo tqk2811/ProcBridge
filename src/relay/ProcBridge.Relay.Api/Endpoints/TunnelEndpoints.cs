@@ -1,6 +1,8 @@
 using ProcBridge.Relay.Api.Extensions;
 using ProcBridge.Relay.Api.Infrastructure;
 using ProcBridge.Relay.Services.Common.Common.Errors;
+using ProcBridge.Relay.Services.Devices.Interfaces;
+using ProcBridge.Relay.Services.Tunnel.Models;
 using ProcBridge.Relay.Services.Tunnel.Interfaces;
 using ProcBridge.Relay.Shared.Auth;
 using ProcBridge.Relay.Shared.Tunnel;
@@ -18,13 +20,16 @@ public static class TunnelEndpoints
         return endpoints;
     }
 
-    private static async Task RunControlAsync(HttpContext context, ITunnelHub hub)
+    private static async Task RunControlAsync(HttpContext context, ITunnelHub hub, IDeviceService devices)
     {
         if (!context.WebSockets.IsWebSocketRequest)
             throw ApiErrorException.BadRequest(RelayErrors.ValidationFailed, "Cần nâng cấp WebSocket.");
         var deviceId = context.User.GetDeviceId();
+        // Epoch read by the authentication handler before it checked the token; absent means "always re-check".
+        var epoch = context.Items[AuthItemKeys.RevocationEpoch] is long captured ? captured : -1;
+        var access = new TunnelAccessCheck(epoch, ct => devices.IsActiveAsync(deviceId, ct));
         using var socket = await context.WebSockets.AcceptWebSocketAsync();
-        await hub.RunControlChannelAsync(deviceId, socket, context.RequestAborted);
+        await hub.RunControlChannelAsync(deviceId, socket, context.RequestAborted, access);
     }
 
     private static async Task RunLaneAsync(HttpContext context, ITunnelHub hub)

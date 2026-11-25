@@ -56,6 +56,88 @@ public sealed class TunnelHubTests
         Assert.IsFalse(hub.IsOnline(hostId));
     }
 
+    [TestMethod]
+    public async Task ThuHồiXenGiữaKiểmQuyềnVàThêmPhiênThìPhiênBịGỡVàMáyChủKhôngĐượcBáo()
+    {
+        var hub = NewHub();
+        var hostId = Guid.NewGuid();
+        var shareId = Guid.NewGuid();
+        using var control = new ControlSocketStub();
+        var controlTask = hub.RunControlChannelAsync(hostId, control, CancellationToken.None);
+
+        var epoch = hub.RevocationEpoch;       // the caller read the epoch, then checked the grant: still valid ...
+        hub.DisconnectShare(shareId);          // ... and the revocation committed and cut the share right here.
+        var access = new TunnelAccessCheck(epoch, _ => Task.FromResult(false));
+
+        var ex = await Assert.ThrowsExactlyAsync<ServiceException>(
+            () => hub.OpenSessionAsync(Guid.NewGuid(), null, shareId, hostId, null, CancellationToken.None, access));
+        Assert.AreEqual(RelayErrors.ShareAccessDenied, ex.Code);
+        Assert.IsEmpty(control.Sent, "Máy chủ không được báo về phiên đã bị thu hồi.");
+
+        control.Close();
+        await controlTask;
+    }
+
+    [TestMethod]
+    public async Task KhôngCóThuHồiThìKhôngKiểmLạiQuyền()
+    {
+        var hub = NewHub();
+        var hostId = Guid.NewGuid();
+        using var control = new ControlSocketStub();
+        var controlTask = hub.RunControlChannelAsync(hostId, control, CancellationToken.None);
+
+        var rechecks = 0;
+        var access = new TunnelAccessCheck(hub.RevocationEpoch, _ =>
+        {
+            rechecks++;
+            return Task.FromResult(false);
+        });
+        var session = await hub.OpenSessionAsync(Guid.NewGuid(), null, Guid.NewGuid(), hostId, null, CancellationToken.None, access);
+        Assert.AreEqual(0, rechecks);
+        hub.ReleaseLane(hub.ReserveLane(session.SessionId, session.Ticket, 0));
+
+        // A revocation of something else moves the epoch: the check runs, and a still-valid grant is kept.
+        var moved = new TunnelAccessCheck(hub.RevocationEpoch, _ => Task.FromResult(true));
+        hub.DisconnectShare(Guid.NewGuid());
+        var kept = await hub.OpenSessionAsync(Guid.NewGuid(), null, Guid.NewGuid(), hostId, null, CancellationToken.None, moved);
+        hub.ReleaseLane(hub.ReserveLane(kept.SessionId, kept.Ticket, 0));
+
+        control.Close();
+        await controlTask;
+    }
+
+    [TestMethod]
+    public async Task ThuHồiMáyXenGiữaXácThựcVàĐăngKýKênhĐiềuKhiểnThìKênhBịĐóng()
+    {
+        var hub = NewHub();
+        var hostId = Guid.NewGuid();
+        using var control = new ControlSocketStub();
+
+        var epoch = hub.RevocationEpoch;   // read before the device token was checked
+        hub.DisconnectDevice(hostId);      // revoked right after that check, before the channel registered
+        var access = new TunnelAccessCheck(epoch, _ => Task.FromResult(false));
+
+        await hub.RunControlChannelAsync(hostId, control, CancellationToken.None, access).WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.IsFalse(hub.IsOnline(hostId));
+    }
+
+    [TestMethod]
+    public async Task PhiênBịThuHồiKhôngNhậnThêmLaneKểCảKhiĐãTraCứuTrước()
+    {
+        var hub = NewHub();
+        var hostId = Guid.NewGuid();
+        var shareId = Guid.NewGuid();
+        using var control = new ControlSocketStub();
+        var controlTask = hub.RunControlChannelAsync(hostId, control, CancellationToken.None);
+        var session = await hub.OpenSessionAsync(Guid.NewGuid(), null, shareId, hostId, null, CancellationToken.None);
+
+        hub.DisconnectShare(shareId);
+        Assert.AreEqual(RelayErrors.TunnelSessionNotFound, Assert.ThrowsExactly<ServiceException>(() => hub.ReserveLane(session.SessionId, session.Ticket, 0)).Code);
+
+        control.Close();
+        await controlTask;
+    }
+
     /// <summary>Control socket that records sent frames and blocks reads until closed.</summary>
     private sealed class ControlSocketStub : WebSocket
     {

@@ -10,6 +10,7 @@ var builder = WebApplication.CreateBuilder(hostArgs);
 builder.Services.AddRelayHost(builder.Configuration);
 
 var app = builder.Build();
+app.UseRelayForwardedHeaders();
 app.UseMiddleware<RequestIdMiddleware>();
 app.UseMiddleware<ExceptionWrapperMiddleware>();
 app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });

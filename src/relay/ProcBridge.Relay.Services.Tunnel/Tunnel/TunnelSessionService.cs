@@ -1,6 +1,7 @@
 using ProcBridge.Relay.Repositories.Abstractions.Interfaces;
 using ProcBridge.Relay.Services.Common.Common.Errors;
 using ProcBridge.Relay.Services.Tunnel.Interfaces;
+using ProcBridge.Relay.Services.Tunnel.Models;
 using ProcBridge.Relay.ViewModels.Tunnel;
 
 namespace ProcBridge.Relay.Services.Tunnel;
@@ -16,13 +17,15 @@ public sealed class TunnelSessionService : ITunnelSessionService
         _hub = hub;
     }
 
-    public async Task<TunnelSessionVM> OpenAsync(Guid clientDeviceId, Guid shareId, Guid hostDeviceId, CancellationToken cancellationToken = default)
+    public long RevocationEpoch => _hub.RevocationEpoch;
+
+    public async Task<TunnelSessionVM> OpenAsync(Guid clientDeviceId, Guid shareId, Guid hostDeviceId, CancellationToken cancellationToken = default, TunnelAccessCheck? access = null)
     {
         var client = await _devices.GetByIdAsync(clientDeviceId, cancellationToken)
             ?? throw ServiceException.NotFound(RelayErrors.DeviceNotFound, "Không tìm thấy máy.");
         var host = await _devices.GetByIdAsync(hostDeviceId, cancellationToken)
             ?? throw ServiceException.NotFound(RelayErrors.DeviceNotFound, "Không tìm thấy máy.");
         // Public keys travel with the session so each end can check the other's fingerprint (decision in Plan 9).
-        return await _hub.OpenSessionAsync(clientDeviceId, client.PublicKey, shareId, hostDeviceId, host.PublicKey, cancellationToken);
+        return await _hub.OpenSessionAsync(clientDeviceId, client.PublicKey, shareId, hostDeviceId, host.PublicKey, cancellationToken, access);
     }
 }

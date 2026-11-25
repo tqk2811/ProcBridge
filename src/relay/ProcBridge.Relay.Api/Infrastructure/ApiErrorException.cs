@@ -13,5 +13,6 @@ public sealed class ApiErrorException : Exception
     public string Code { get; }
 
     public static ApiErrorException BadRequest(string code, string message) => new(StatusCodes.Status400BadRequest, code, message);
+    public static ApiErrorException TooManyRequests(string code, string message) => new(StatusCodes.Status429TooManyRequests, code, message);
     public static ApiErrorException Unauthorized(string code, string message) => new(StatusCodes.Status401Unauthorized, code, message);
 }

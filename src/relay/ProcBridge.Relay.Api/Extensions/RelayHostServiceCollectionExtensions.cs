@@ -1,6 +1,8 @@
+using System.Net;
 using System.Threading.RateLimiting;
 
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.Mvc;
 
@@ -43,6 +45,7 @@ public static class RelayHostServiceCollectionExtensions
         services.AddApplicationServices();
 
         AddAuthRateLimiter(services, configuration);
+        AddForwardedHeaders(services, configuration);
 
         services.AddAuthentication(RelayAuth.Scheme)
             .AddScheme<AuthenticationSchemeOptions, RelayBearerAuthenticationHandler>(RelayAuth.Scheme, null);
@@ -66,13 +69,25 @@ public static class RelayHostServiceCollectionExtensions
         return services;
     }
 
-    /// <summary>Fixed window per client address on login and register (<see cref="AuthRateLimitOptions"/>).</summary>
+    /// <summary>
+    /// Fixed window per client address on login and register, and per device on opening tunnel sessions
+    /// (<see cref="AuthRateLimitOptions"/>); plus a per user name limit on login (<see cref="LoginUserNameLimiter"/>).
+    /// </summary>
     private static void AddAuthRateLimiter(IServiceCollection services, IConfiguration configuration)
     {
         var limits = configuration.GetSection(AuthRateLimitOptions.SectionName).Get<AuthRateLimitOptions>() ?? new AuthRateLimitOptions();
+        services.AddSingleton(new LoginUserNameLimiter(limits));
         services.AddRateLimiter(o =>
         {
             o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+            o.AddPolicy(AuthRateLimitOptions.TunnelSessionPolicyName, context => RateLimitPartition.GetFixedWindowLimiter(
+                context.User.FindFirst(RelayAuth.DeviceIdClaim)?.Value ?? context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = limits.TunnelSessionPermitLimit,
+                    Window = limits.TunnelSessionWindow,
+                    QueueLimit = 0,
+                }));
             o.AddPolicy(AuthRateLimitOptions.PolicyName, context => RateLimitPartition.GetFixedWindowLimiter(
                 context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
                 _ => new FixedWindowRateLimiterOptions
@@ -95,6 +110,35 @@ public static class RelayHostServiceCollectionExtensions
                 await response.WriteAsync(Newtonsoft.Json.JsonConvert.SerializeObject(body, RelayJsonSettings.Create()), cancellationToken);
             };
         });
+    }
+
+    /// <summary>Trusts <c>X-Forwarded-*</c> only from the proxies listed in <c>Relay:ForwardedHeaders</c>; none listed means none trusted.</summary>
+    private static void AddForwardedHeaders(IServiceCollection services, IConfiguration configuration)
+    {
+        var settings = configuration.GetSection(ForwardedHeadersSettings.SectionName).Get<ForwardedHeadersSettings>() ?? new ForwardedHeadersSettings();
+        services.AddSingleton(settings);
+        services.Configure<ForwardedHeadersOptions>(o =>
+        {
+            o.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+            // The framework defaults trust loopback; the relay trusts exactly what the operator lists.
+            o.KnownProxies.Clear();
+            o.KnownIPNetworks.Clear();
+            foreach (var proxy in settings.KnownProxies)
+                o.KnownProxies.Add(IPAddress.Parse(proxy));
+            foreach (var network in settings.KnownNetworks)
+                o.KnownIPNetworks.Add(System.Net.IPNetwork.Parse(network));
+        });
+    }
+
+    /// <summary>
+    /// Applies <c>X-Forwarded-For/Proto</c> from the configured proxies. Put it before everything that reads the client
+    /// address (rate limiter). Without configured proxies it adds nothing: the headers are ignored.
+    /// </summary>
+    public static WebApplication UseRelayForwardedHeaders(this WebApplication app)
+    {
+        if (!app.Services.GetRequiredService<ForwardedHeadersSettings>().IsEmpty)
+            app.UseForwardedHeaders();
+        return app;
     }
 
     /// <summary>

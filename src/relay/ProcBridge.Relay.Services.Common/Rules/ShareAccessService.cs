@@ -44,13 +44,19 @@ public sealed class ShareAccessService
     /// Missing share and missing grant answer the same 403 so a device cannot probe which share ids exist.
     /// </summary>
     public async Task<ShareRecordVM> EnsureCanUseShareAsync(Guid clientDeviceId, Guid shareId, CancellationToken cancellationToken = default)
+        => await FindUsableShareAsync(clientDeviceId, shareId, cancellationToken)
+            ?? throw ServiceException.Forbidden(RelayErrors.ShareAccessDenied, "Máy này không được dùng chia sẻ đó.");
+
+    /// <summary>The same rule as <see cref="EnsureCanUseShareAsync"/> as a yes/no, for re-checks after a possible revocation.</summary>
+    public async Task<bool> CanUseShareAsync(Guid clientDeviceId, Guid shareId, CancellationToken cancellationToken = default)
+        => await FindUsableShareAsync(clientDeviceId, shareId, cancellationToken) is not null;
+
+    private async Task<ShareRecordVM?> FindUsableShareAsync(Guid clientDeviceId, Guid shareId, CancellationToken cancellationToken)
     {
         var share = await _shares.GetByIdAsync(shareId, cancellationToken);
         if (share is null || !await _shares.GrantExistsAsync(shareId, clientDeviceId, cancellationToken))
-            throw ServiceException.Forbidden(RelayErrors.ShareAccessDenied, "Máy này không được dùng chia sẻ đó.");
+            return null;
         var host = await _devices.GetByIdAsync(share.DeviceId, cancellationToken);
-        if (host is null || host.RevokedAt is not null)
-            throw ServiceException.Forbidden(RelayErrors.ShareAccessDenied, "Máy này không được dùng chia sẻ đó.");
-        return share;
+        return host is null || host.RevokedAt is not null ? null : share;
     }
 }
