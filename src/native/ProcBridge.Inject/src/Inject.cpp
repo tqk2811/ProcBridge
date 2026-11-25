@@ -137,8 +137,9 @@ namespace ProcBridge::Inject
             }
         }
 
-        /// Runs the helper of the target's architecture: it inherits an inheritable copy of the target
-        /// process handle and a section holding the init data, injects and exits with the result.
+        /// Runs the helper of the target's architecture: it duplicates the target process handle and a
+        /// section holding the init data from this process, injects and exits with the result. Nothing
+        /// is inheritable, so children created meanwhile by other threads receive neither handle.
         DWORD InjectWithHelper(HANDLE process, const std::wstring& dllPath, const wchar_t* architecture, const void* initData,
             size_t initBytes, DWORD timeoutMs) noexcept
         {
@@ -149,16 +150,8 @@ namespace ProcBridge::Inject
             }
             const std::wstring helper = dllPath.substr(0, slash + 1) + L"ProcBridge.Spawn." + architecture + L".exe";
 
-            HANDLE inheritedProcess = nullptr;
-            if (!DuplicateHandle(GetCurrentProcess(), process, GetCurrentProcess(), &inheritedProcess, 0, TRUE, DUPLICATE_SAME_ACCESS))
-            {
-                return GetLastError();
-            }
-            ScopedHandle processCopy(inheritedProcess);
-
-            SECURITY_ATTRIBUTES inherit{ sizeof(inherit), nullptr, TRUE };
             const size_t sectionBytes = initBytes == 0 ? 1 : initBytes;
-            ScopedHandle section(CreateFileMappingW(INVALID_HANDLE_VALUE, &inherit, PAGE_READWRITE, 0,
+            ScopedHandle section(CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
                 static_cast<DWORD>(sectionBytes), nullptr));
             if (!section.IsValid())
             {
@@ -175,39 +168,18 @@ namespace ProcBridge::Inject
                 UnmapViewOfFile(view);
             }
 
-            // Inherit exactly these two handles (not every inheritable handle of the caller).
-            SIZE_T attributeBytes = 0;
-            InitializeProcThreadAttributeList(nullptr, 1, 0, &attributeBytes);
-            std::wstring attributeStorage(attributeBytes / sizeof(wchar_t) + 1, L'\0');
-            auto* attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attributeStorage.data());
-            if (!InitializeProcThreadAttributeList(attributes, 1, 0, &attributeBytes))
+            // Both handles stay open here until the helper exits (this function waits for it).
+            std::wstring commandLine = L"\"" + helper + L"\" --inject " + std::to_wstring(GetCurrentProcessId()) + L" "
+                + std::to_wstring(reinterpret_cast<ULONG_PTR>(process)) + L" --init-section "
+                + std::to_wstring(reinterpret_cast<ULONG_PTR>(section.Get())) + L" " + std::to_wstring(initBytes) + L" --hook \""
+                + dllPath + L"\"";
+            STARTUPINFOW startup{};
+            startup.cb = sizeof(startup);
+            PROCESS_INFORMATION info{};
+            if (!CreateProcessW(helper.c_str(), commandLine.data(), nullptr, nullptr, FALSE, DETACHED_PROCESS, nullptr, nullptr,
+                &startup, &info))
             {
                 return GetLastError();
-            }
-            HANDLE inherited[] = { processCopy.Get(), section.Get() };
-            DWORD error = ERROR_SUCCESS;
-            if (!UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, sizeof(inherited), nullptr, nullptr))
-            {
-                error = GetLastError();
-            }
-            PROCESS_INFORMATION info{};
-            if (error == ERROR_SUCCESS)
-            {
-                std::wstring commandLine = L"\"" + helper + L"\" --inject " + std::to_wstring(reinterpret_cast<ULONG_PTR>(processCopy.Get()))
-                    + L" --init-section " + std::to_wstring(reinterpret_cast<ULONG_PTR>(section.Get())) + L" " + std::to_wstring(initBytes)
-                    + L" --hook \"" + dllPath + L"\"";
-                STARTUPINFOEXW startup{};
-                startup.StartupInfo.cb = sizeof(startup);
-                if (!CreateProcessW(helper.c_str(), commandLine.data(), nullptr, nullptr, TRUE,
-                    EXTENDED_STARTUPINFO_PRESENT | DETACHED_PROCESS, nullptr, nullptr, &startup.StartupInfo, &info))
-                {
-                    error = GetLastError();
-                }
-            }
-            DeleteProcThreadAttributeList(attributes);
-            if (error != ERROR_SUCCESS)
-            {
-                return error;
             }
             ScopedHandle helperProcess(info.hProcess);
             ScopedHandle helperThread(info.hThread);

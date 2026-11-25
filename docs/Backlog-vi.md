@@ -40,13 +40,6 @@ bên nhận thấy tên thật. Cần bên nhận hỏi Broker theo `(pid nguồ
 - Khối khởi tạo không còn biến cấu hình khi process đặt `PROCBRIDGE_MAP` khác đi giữa chừng: Hook dùng giá
   trị lúc khởi tạo, cố ý. Ghi 2026-11-25.
 
-## [Thấp] Handle tạm của helper khác kiến trúc có thể lọt sang con khác
-
-`InjectWithHelper` (`src/native/ProcBridge.Inject/src/Inject.cpp`) tạo bản sao kế thừa được của handle
-process đích và section khối khởi tạo, chỉ cho helper kế thừa qua `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`. Một
-thread khác của cùng process tạo con với `bInheritHandles` và không có danh sách handle đúng lúc đó sẽ kế
-thừa luôn hai handle này (rò handle, không hỏng dữ liệu). Ghi 2026-11-25.
-
 ## [Thấp] Build server dùng chung nằm ngoài cây process
 
 `VBCSCompiler`, node MSBuild tái sử dụng và MSBuild server sống lâu hơn lệnh build: Spawn chờ cả Job nên sẽ

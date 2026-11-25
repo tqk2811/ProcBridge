@@ -7,12 +7,13 @@
 // Usage:
 //   ProcBridge.Spawn.<arch>.exe [--hook <dll>] [--hook-x64 <dll>] [--hook-x86 <dll>]
 //                               --map <virtual dir> <real dir> [--map ...] -- <command line>
-//   ProcBridge.Spawn.<arch>.exe --inject <process handle> --init-section <section handle> <bytes> --hook <dll>
+//   ProcBridge.Spawn.<arch>.exe --inject <injector pid> <process handle> --init-section <section handle> <bytes> --hook <dll>
 // Everything after the "--" argument of the raw command line is passed to CreateProcessW verbatim.
 // --hook overrides the DLL of this launcher's architecture. A DLL that is not given is looked up next
 // to this executable, then in the other platform's build folder (out\<Platform>\<Configuration>).
-// --inject is the cross-architecture helper of plan 5.4: it inherits both handles from the injector
-// (ProcBridge::Inject::InjectHook), injects the DLL of its own architecture and exits with the result.
+// --inject is the cross-architecture helper of plan 5.4: it duplicates both handles from the injector
+// (ProcBridge::Inject::InjectHook; nothing is inherited, so they cannot leak into the injector's other
+// children), injects the DLL of its own architecture and exits with the result.
 #include <windows.h>
 #include <ProcBridge/InitBlock.h>
 #include <ProcBridge/Inject.h>
@@ -170,24 +171,47 @@ namespace
         return reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(std::wcstoull(text, nullptr, 10)));
     }
 
-    /// --inject <process handle> --init-section <section handle> <bytes> --hook <dll>: the handles are
-    /// inherited from the injector. Exit code: ERROR_SUCCESS or the Win32 error (initializer included).
+    /// Copies a handle of the injector into this process. Returns nullptr on failure (error set).
+    HANDLE DuplicateFromInjector(HANDLE injector, const wchar_t* text)
+    {
+        HANDLE local = nullptr;
+        return DuplicateHandle(injector, ParseHandle(text), GetCurrentProcess(), &local, 0, FALSE, DUPLICATE_SAME_ACCESS) ? local : nullptr;
+    }
+
+    /// --inject <injector pid> <process handle> --init-section <section handle> <bytes> --hook <dll>: the
+    /// handle values belong to the injector, which waits for this helper. Exit code: ERROR_SUCCESS or
+    /// the Win32 error (initializer included).
     int RunInjectHelper(int argc, wchar_t** argv)
     {
-        if (argc != 8 || std::wcscmp(argv[3], L"--init-section") != 0 || std::wcscmp(argv[6], L"--hook") != 0)
+        if (argc != 9 || std::wcscmp(argv[4], L"--init-section") != 0 || std::wcscmp(argv[7], L"--hook") != 0)
         {
             return ERROR_INVALID_PARAMETER;
         }
-        const HANDLE process = ParseHandle(argv[2]);
-        const HANDLE section = ParseHandle(argv[4]);
-        const size_t bytes = static_cast<size_t>(std::wcstoull(argv[5], nullptr, 10));
+        const HANDLE injector = OpenProcess(PROCESS_DUP_HANDLE, FALSE, static_cast<DWORD>(std::wcstoul(argv[2], nullptr, 10)));
+        if (injector == nullptr)
+        {
+            return static_cast<int>(GetLastError());
+        }
+        const HANDLE process = DuplicateFromInjector(injector, argv[3]);
+        const HANDLE section = process == nullptr ? nullptr : DuplicateFromInjector(injector, argv[5]);
+        const DWORD duplicateError = section == nullptr ? GetLastError() : ERROR_SUCCESS;
+        CloseHandle(injector);
+        if (section == nullptr)
+        {
+            if (process != nullptr)
+            {
+                CloseHandle(process);
+            }
+            return static_cast<int>(duplicateError);
+        }
+        const size_t bytes = static_cast<size_t>(std::wcstoull(argv[6], nullptr, 10));
         const void* view = bytes == 0 ? nullptr : MapViewOfFile(section, FILE_MAP_READ, 0, 0, bytes);
         if (bytes != 0 && view == nullptr)
         {
             return static_cast<int>(GetLastError());
         }
         DWORD initResult = ERROR_SUCCESS;
-        const DWORD error = ProcBridge::Inject::InjectDll(process, argv[7], ProcBridge::Inject::HookInitializeExport, view, bytes,
+        const DWORD error = ProcBridge::Inject::InjectDll(process, argv[8], ProcBridge::Inject::HookInitializeExport, view, bytes,
             InjectTimeoutMs, initResult);
         if (view != nullptr)
         {

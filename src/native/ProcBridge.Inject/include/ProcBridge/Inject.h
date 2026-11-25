@@ -31,8 +31,8 @@ namespace ProcBridge::Inject
         DWORD timeoutMs, DWORD& initResult) noexcept;
 
     /// Injects the hook DLL of the target's architecture. Same architecture: InjectDll in this process.
-    /// Other architecture: runs "ProcBridge.Spawn.<arch>.exe --inject" next to that DLL, which inherits
-    /// the target process handle and the init data (a section) and calls InjectDll there.
+    /// Other architecture: runs "ProcBridge.Spawn.<arch>.exe --inject" next to that DLL, which duplicates
+    /// the target process handle and the init data (a section) from this process and calls InjectDll there.
     /// Returns ERROR_SUCCESS only when the hook was loaded and its initializer returned ERROR_SUCCESS;
     /// otherwise the Win32 error of the step that failed (initializer failure included).
     DWORD InjectHook(HANDLE process, const HookPaths& hooks, const void* initData, size_t initBytes, DWORD timeoutMs) noexcept;
