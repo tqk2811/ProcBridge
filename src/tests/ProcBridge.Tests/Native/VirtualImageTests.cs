@@ -66,6 +66,124 @@ public sealed class VirtualImageTests
         StringAssert.Contains(result.StandardError, LauncherCommandLine.Usage.Split('\n')[0].Trim(), "The apphost ran from machine B.");
     }
 
+    [TestMethod]
+    public async Task ImageMissingOnMachineB_FallsBackToTheOriginalCall()
+    {
+        // Machine B has no binpp.exe, but a real file sits at the virtual path itself: the hook cannot bring the
+        // image in, so the creation must go on unchanged (and find that file) instead of failing.
+        using HookSandbox sandbox = new("x64");
+        string localBin = Path.Combine(sandbox.VirtualRoot, BinFolder);
+        Directory.CreateDirectory(localBin);
+        File.Copy(sandbox.Binaries.Probe, Path.Combine(localBin, ImageName));
+        await using RemoteSession session = RemoteSession.Start(sandbox);
+
+        ProcessResult result = session.Run($"\"{sandbox.Binaries.Probe}\" --run-image \"{localBin}\\{ImageName}\" \"app --image\"");
+
+        Assert.AreEqual(0, result.ExitCode, Lines(result));
+        StringAssert.Contains(result.StandardOutput, $"image {localBin}\\{ImageName}");
+    }
+
+    [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public async Task MalformedImages_FailLikeLocally(bool remote)
+    {
+        using HookSandbox sandbox = new("x64");
+        string bin = Path.Combine(sandbox.RealRoot, BinFolder);
+        Directory.CreateDirectory(bin);
+        byte[] probe = File.ReadAllBytes(sandbox.Binaries.Probe);
+        File.WriteAllBytes(Path.Combine(bin, "garbage.exe"), [(byte)'M', (byte)'Z', .. new byte[200]]);
+        File.WriteAllBytes(Path.Combine(bin, "truncated.exe"), probe[..1024]);
+        await using RemoteSession? session = remote ? RemoteSession.Start(sandbox) : null;
+
+        foreach (string name in new[] { "garbage.exe", "truncated.exe" })
+        {
+            string command = $"\"{sandbox.Binaries.Probe}\" --run \"{sandbox.VirtualRoot}\\{BinFolder}\\{name}\"";
+            ProcessResult result = session is null ? sandbox.RunHooked(command) : session.Run(command);
+
+            Assert.AreEqual(1, result.ExitCode, Lines(result));
+            StringAssert.Contains(result.StandardOutput, "run: ", $"{name}: CreateProcess fails, the creator does not crash.");
+        }
+    }
+
+    [TestMethod]
+    public async Task SameImage_StartedInParallel_RunsEveryTime()
+    {
+        using HookSandbox sandbox = new("x64");
+        CreateImageFolder(sandbox, "x64");
+        await using RemoteSession session = RemoteSession.Start(sandbox, configure: x => x with { RangeThreshold = 16 * 1024 });
+
+        ProcessResult[] results = await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => Task.Run(() => session.Run(ImageCommand(sandbox)))));
+
+        foreach (ProcessResult result in results)
+            AssertVirtualNames(sandbox, result);
+    }
+
+    [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public async Task BatchFileInVirtualFolder_RunsThroughCmd(bool remote)
+    {
+        using HookSandbox sandbox = new("x64");
+        Directory.CreateDirectory(Path.Combine(sandbox.RealRoot, BinFolder));
+        File.WriteAllText(Path.Combine(sandbox.RealRoot, BinFolder, "hello.bat"), "@echo bat-ok %~nx0\r\n");
+        await using RemoteSession? session = remote ? RemoteSession.Start(sandbox) : null;
+        string command = $"\"{sandbox.Binaries.Probe}\" --run \"{sandbox.VirtualRoot}\\{BinFolder}\\hello.bat\"";
+
+        ProcessResult result = session is null ? sandbox.RunHooked(command) : session.Run(command);
+
+        Assert.AreEqual(0, result.ExitCode, Lines(result));
+        StringAssert.Contains(result.StandardOutput, "bat-ok hello.bat");
+    }
+
+    [TestMethod]
+    public void ChildOfVirtualImage_DoesNotInheritTheImageVariable()
+    {
+        using HookSandbox sandbox = new("x64");
+        CreateImageFolder(sandbox, "x64");
+
+        ProcessResult result = sandbox.RunHooked(
+            $"cmd.exe /d /c \"\"{sandbox.VirtualRoot}\\{BinFolder}\\{ImageName}\" --run \"cmd.exe /d /c set PROCBRIDGE_\"\"");
+
+        Assert.AreEqual(0, result.ExitCode, Lines(result));
+        StringAssert.Contains(result.StandardOutput, "PROCBRIDGE_MAP=", "The grandchild listed the variables.");
+        Assert.DoesNotContain("PROCBRIDGE_IMAGE", result.StandardOutput);
+    }
+
+    [TestMethod]
+    public async Task ImageChangedOnMachineB_WhileAnInstanceRuns_NewRunUsesTheNewCopy()
+    {
+        using HookSandbox sandbox = new("x64");
+        CreateImageFolder(sandbox, "x64");
+        await using RemoteSession session = RemoteSession.Start(sandbox, configure: x => x with { MetadataTtl = TimeSpan.Zero });
+        string started = Path.Combine(sandbox.BaseDirectory, "started");
+        string go = Path.Combine(sandbox.BaseDirectory, "go");
+        string virtualImage = $"{sandbox.VirtualRoot}\\{BinFolder}\\{ImageName}";
+        Task<ProcessResult> first = Task.Run(() => session.Run($"cmd.exe /d /c \"\"{virtualImage}\" --image-wait \"{started}\" \"{go}\"\""));
+        try
+        {
+            for (int i = 0; i < 600 && !File.Exists(started) && !first.IsCompleted; i++)
+                await Task.Delay(50);
+            Assert.IsTrue(File.Exists(started), "The first instance runs from the cache copy.");
+            // A new version on machine B (an overlay byte changes size and content) while the old copy is mapped as an image.
+            string sourceImage = Path.Combine(sandbox.RealRoot, BinFolder, ImageName);
+            byte[] updated = [.. File.ReadAllBytes(sourceImage), 0x5A];
+            File.WriteAllBytes(sourceImage, updated);
+
+            ProcessResult second = session.Run(ImageCommand(sandbox));
+
+            AssertVirtualNames(sandbox, second);
+            CollectionAssert.AreEqual(updated, File.ReadAllBytes(Path.Combine(session.CacheRoot, BinFolder, ImageName)),
+                "The cache holds the new version.");
+        }
+        finally
+        {
+            File.WriteAllText(go, "");
+        }
+        ProcessResult firstResult = await first;
+        Assert.AreEqual(0, firstResult.ExitCode, Lines(firstResult));
+    }
+
     /// <summary>
     /// bin\app.exe (a copy of the probe), a copy of dbghelp.dll next to it (a static import of the probe, which the
     /// loader takes from the image folder first) and pbdyn.dll (a copy of version.dll, loaded by bare name later).
