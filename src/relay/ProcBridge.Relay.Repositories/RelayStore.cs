@@ -1,9 +1,13 @@
 using ProcBridge.Relay.ViewModels.Records;
 
-namespace ProcBridge.Relay.Testing.Fakes;
+namespace ProcBridge.Relay.Repositories;
 
-/// <summary>Rows of the in-memory relay database (one per factory). Every access goes through <see cref="Lock"/>.</summary>
-public sealed class InMemoryRelayStore
+/// <summary>
+/// The relay's data: rows kept in this process (singleton). Nothing is persisted: a relay restart starts empty and
+/// accounts come back only from <c>Relay:Accounts:Seed</c> (decision of the project owner, see docs/Plan-vi.md 8.2).
+/// Every access goes through <see cref="Lock"/>.
+/// </summary>
+public sealed class RelayStore
 {
     public object Lock { get; } = new();
     public List<(AccountRecordVM Account, string NormalizedName)> Accounts { get; } = new();

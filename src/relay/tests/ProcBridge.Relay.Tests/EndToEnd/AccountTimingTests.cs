@@ -17,7 +17,7 @@ public sealed class AccountTimingTests
     public async Task ĐăngNhậpTênKhôngTồnTạiVẫnTốnMộtLầnXácMinhMậtKhẩu()
     {
         var hasher = new CountingPasswordHasher();
-        await using var factory = new RelayApiFactory(null);
+        await using var factory = new RelayApiFactory();
         await using var custom = new CustomFactory(factory, hasher);
         var api = new RelayApiImplement(custom.CreateClient());
 

@@ -1,90 +1,98 @@
-using Microsoft.EntityFrameworkCore;
-
-using Npgsql;
-
-using ProcBridge.Relay.Database.Entities;
-using ProcBridge.Relay.Database.PostgreSql.EF;
 using ProcBridge.Relay.Repositories.Abstractions.Interfaces;
-using ProcBridge.Relay.Repositories.Mappings;
 using ProcBridge.Relay.ViewModels.Records;
 
 namespace ProcBridge.Relay.Repositories;
 
+/// <summary>Shares and grants in <see cref="RelayStore"/>: owner joined from the host device, cascade of grants on delete, revoked devices hidden from the accessible list.</summary>
 public sealed class ShareRepository : IShareRepository
 {
-    private readonly RelayDbContext _db;
+    private readonly RelayStore _store;
 
-    public ShareRepository(RelayDbContext db) => _db = db;
+    public ShareRepository(RelayStore store) => _store = store;
 
-    public async Task<ShareRecordVM?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
-        => await _db.Shares.AsNoTracking().Where(x => x.Id == id).Select(ShareMapping.ToRecordExpression).FirstOrDefaultAsync(cancellationToken);
-
-    public async Task<IReadOnlyList<ShareRecordVM>> GetAllByOwnerAsync(Guid ownerAccountId, CancellationToken cancellationToken = default)
-        => await _db.Shares.AsNoTracking()
-            .Where(x => x.Device!.OwnerAccountId == ownerAccountId)
-            .OrderBy(x => x.CreatedAt)
-            .Select(ShareMapping.ToRecordExpression)
-            .ToListAsync(cancellationToken);
-
-    public async Task<ShareRecordVM> CreateAsync(NewShareRecordVM share, CancellationToken cancellationToken = default)
+    public Task<ShareRecordVM?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
     {
-        var row = share.ToDbo();
-        _db.Shares.Add(row);
-        await _db.SaveChangesAsync(cancellationToken);
-        // Read back for the joined owner column; the write is committed, so do not let a cancel fake a failure.
-        return await _db.Shares.AsNoTracking().Where(x => x.Id == row.Id).Select(ShareMapping.ToRecordExpression).FirstAsync(CancellationToken.None);
+        lock (_store.Lock)
+            return Task.FromResult(Records().FirstOrDefault(x => x.Id == id));
     }
 
-    public async Task<bool> HardDeleteAsync(Guid id, CancellationToken cancellationToken = default)
-        => await _db.Shares.Where(x => x.Id == id).ExecuteDeleteAsync(cancellationToken) > 0;
-
-    public async Task<IReadOnlyList<ShareGrantRecordVM>> GetGrantsAsync(Guid shareId, CancellationToken cancellationToken = default)
-        => await _db.ShareGrants.AsNoTracking()
-            .Where(x => x.ShareId == shareId)
-            .OrderBy(x => x.CreatedAt)
-            .Select(ShareMapping.ToGrantRecordExpression)
-            .ToListAsync(cancellationToken);
-
-    public async Task<ShareGrantRecordVM> EnsureGrantAsync(Guid shareId, Guid granteeDeviceId, CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<ShareRecordVM>> GetAllByOwnerAsync(Guid ownerAccountId, CancellationToken cancellationToken = default)
     {
-        var existing = await FindGrantAsync(shareId, granteeDeviceId, cancellationToken);
-        if (existing is not null)
-            return existing;
+        lock (_store.Lock)
+            return Task.FromResult<IReadOnlyList<ShareRecordVM>>(Records().Where(x => x.OwnerAccountId == ownerAccountId).ToList());
+    }
 
-        var row = new ShareGrantDbo { ShareId = shareId, GranteeDeviceId = granteeDeviceId };
-        _db.ShareGrants.Add(row);
-        try
+    public Task<ShareRecordVM> CreateAsync(NewShareRecordVM share, CancellationToken cancellationToken = default)
+    {
+        lock (_store.Lock)
         {
-            await _db.SaveChangesAsync(cancellationToken);
-            return row.ToRecord();
-        }
-        catch (DbUpdateException ex) when (ex.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation })
-        {
-            // A concurrent grant of the same pair won the unique index: return the winner.
-            _db.Entry(row).State = EntityState.Detached;
-            return await FindGrantAsync(shareId, granteeDeviceId, CancellationToken.None)
-                ?? throw new InvalidOperationException("Grant vanished right after a unique violation.");
+            var id = Guid.NewGuid();
+            _store.Shares.Add((id, share.DeviceId, share.Name, DateTime.UtcNow));
+            return Task.FromResult(Records().First(x => x.Id == id));
         }
     }
 
-    public async Task<bool> DeleteGrantAsync(Guid shareId, Guid granteeDeviceId, CancellationToken cancellationToken = default)
-        => await _db.ShareGrants.Where(x => x.ShareId == shareId && x.GranteeDeviceId == granteeDeviceId).ExecuteDeleteAsync(cancellationToken) > 0;
+    public Task<bool> HardDeleteAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        lock (_store.Lock)
+        {
+            _store.Grants.RemoveAll(x => x.ShareId == id);
+            return Task.FromResult(_store.Shares.RemoveAll(x => x.Id == id) > 0);
+        }
+    }
+
+    public Task<IReadOnlyList<ShareGrantRecordVM>> GetGrantsAsync(Guid shareId, CancellationToken cancellationToken = default)
+    {
+        lock (_store.Lock)
+            return Task.FromResult<IReadOnlyList<ShareGrantRecordVM>>(_store.Grants.Where(x => x.ShareId == shareId).ToList());
+    }
+
+    public Task<ShareGrantRecordVM> EnsureGrantAsync(Guid shareId, Guid granteeDeviceId, CancellationToken cancellationToken = default)
+    {
+        lock (_store.Lock)
+        {
+            var existing = _store.Grants.FirstOrDefault(x => x.ShareId == shareId && x.GranteeDeviceId == granteeDeviceId);
+            if (existing is not null)
+                return Task.FromResult(existing);
+            var grant = new ShareGrantRecordVM(shareId, granteeDeviceId, DateTime.UtcNow);
+            _store.Grants.Add(grant);
+            return Task.FromResult(grant);
+        }
+    }
+
+    public Task<bool> DeleteGrantAsync(Guid shareId, Guid granteeDeviceId, CancellationToken cancellationToken = default)
+    {
+        lock (_store.Lock)
+            return Task.FromResult(_store.Grants.RemoveAll(x => x.ShareId == shareId && x.GranteeDeviceId == granteeDeviceId) > 0);
+    }
 
     public Task<bool> GrantExistsAsync(Guid shareId, Guid granteeDeviceId, CancellationToken cancellationToken = default)
-        => _db.ShareGrants.AnyAsync(x => x.ShareId == shareId && x.GranteeDeviceId == granteeDeviceId, cancellationToken);
+    {
+        lock (_store.Lock)
+            return Task.FromResult(_store.Grants.Any(x => x.ShareId == shareId && x.GranteeDeviceId == granteeDeviceId));
+    }
 
-    public async Task<IReadOnlyList<AccessibleShareRecordVM>> GetAccessibleAsync(Guid granteeDeviceId, CancellationToken cancellationToken = default)
-        => await _db.ShareGrants.AsNoTracking()
-            .Where(x => x.GranteeDeviceId == granteeDeviceId
-                && x.GranteeDevice!.RevokedAt == null
-                && x.Share!.Device!.RevokedAt == null)
-            .OrderBy(x => x.Share!.Name)
-            .Select(ShareMapping.ToAccessibleRecordExpression)
-            .ToListAsync(cancellationToken);
+    public Task<IReadOnlyList<AccessibleShareRecordVM>> GetAccessibleAsync(Guid granteeDeviceId, CancellationToken cancellationToken = default)
+    {
+        lock (_store.Lock)
+        {
+            var devices = _store.Devices.Select(x => x.Device).ToDictionary(x => x.Id);
+            if (!devices.TryGetValue(granteeDeviceId, out var grantee) || grantee.RevokedAt is not null)
+                return Task.FromResult<IReadOnlyList<AccessibleShareRecordVM>>([]);
+            var result = _store.Grants
+                .Where(g => g.GranteeDeviceId == granteeDeviceId)
+                .Join(_store.Shares, g => g.ShareId, s => s.Id, (g, s) => s)
+                .Where(s => devices[s.DeviceId].RevokedAt is null)
+                .OrderBy(s => s.Name)
+                .Select(s => new AccessibleShareRecordVM(s.Id, s.Name, s.DeviceId, devices[s.DeviceId].Name, devices[s.DeviceId].PublicKey))
+                .ToList();
+            return Task.FromResult<IReadOnlyList<AccessibleShareRecordVM>>(result);
+        }
+    }
 
-    private async Task<ShareGrantRecordVM?> FindGrantAsync(Guid shareId, Guid granteeDeviceId, CancellationToken cancellationToken)
-        => await _db.ShareGrants.AsNoTracking()
-            .Where(x => x.ShareId == shareId && x.GranteeDeviceId == granteeDeviceId)
-            .Select(ShareMapping.ToGrantRecordExpression)
-            .FirstOrDefaultAsync(cancellationToken);
+    private IEnumerable<ShareRecordVM> Records()
+    {
+        var devices = _store.Devices.Select(x => x.Device).ToDictionary(x => x.Id);
+        return _store.Shares.Select(s => new ShareRecordVM(s.Id, s.DeviceId, devices[s.DeviceId].OwnerAccountId, s.Name, s.CreatedAt));
+    }
 }

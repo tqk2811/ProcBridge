@@ -10,16 +10,8 @@
     <PackageVersion Include="System.ServiceProcess.ServiceController" Version="10.0.0" />
   </ItemGroup>
 
-  <!-- Relay (src/relay): EF Core + PostgreSQL. -->
+  <!-- Relay (src/relay) and shared hosting libraries. -->
   <ItemGroup>
-    <PackageVersion Include="Microsoft.EntityFrameworkCore" Version="10.0.12" />
-    <PackageVersion Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.12" />
-    <!-- Pin Relational directly: Npgsql.EntityFrameworkCore.PostgreSQL 10.0.3 depends on Relational 10.0.4,
-         and that transitive version would otherwise sit next to EntityFrameworkCore 10.0.12 (MSB3277). -->
-    <PackageVersion Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.12" />
-    <!-- Npgsql 10.0.x follows EF Core 10.0.x. -->
-    <PackageVersion Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
-    <!-- Only for the design-time DbContext factory (reads efdesign.json when running dotnet ef). -->
     <PackageVersion Include="Microsoft.Extensions.Configuration.Json" Version="10.0.12" />
     <PackageVersion Include="Microsoft.Extensions.Configuration.EnvironmentVariables" Version="10.0.12" />
     <PackageVersion Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.12" />

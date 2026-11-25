@@ -17,8 +17,7 @@ using ProcBridge.Relay.ViewModels.Tunnel;
 namespace ProcBridge.Relay.Tests.EndToEnd;
 
 /// <summary>
-/// End-to-end scenarios through the in-process relay (REST + WebSocket). Run twice: on in-memory repositories and on
-/// real PostgreSQL (derived classes).
+/// End-to-end scenarios through the in-process relay (REST + WebSocket) on its in-memory store (derived class).
 /// </summary>
 public abstract class RelayEndToEndTestsBase
 {

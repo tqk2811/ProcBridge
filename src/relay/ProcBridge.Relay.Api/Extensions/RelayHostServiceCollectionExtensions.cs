@@ -8,7 +8,6 @@ using Microsoft.AspNetCore.Mvc;
 
 using ProcBridge.Relay.Api.Filters;
 using ProcBridge.Relay.Api.Infrastructure;
-using ProcBridge.Relay.Database.PostgreSql.EF;
 using ProcBridge.Relay.Repositories;
 using ProcBridge.Relay.Repositories.Abstractions.Interfaces;
 using ProcBridge.Relay.Services;
@@ -19,21 +18,15 @@ using ProcBridge.Relay.Shared.Auth;
 using ProcBridge.Relay.Shared.Common;
 using ProcBridge.Relay.Shared.Json;
 
-using Microsoft.EntityFrameworkCore;
-
 namespace ProcBridge.Relay.Api.Extensions;
 
 public static class RelayHostServiceCollectionExtensions
 {
-    /// <summary>Everything the relay host needs: database, repositories, services, auth, MVC.</summary>
+    /// <summary>Everything the relay host needs: in-memory store, repositories, services, auth, MVC.</summary>
     public static IServiceCollection AddRelayHost(this IServiceCollection services, IConfiguration configuration)
     {
-        // Required, no localhost fallback: a relay silently pointing at the wrong database is worse than not starting.
-        var connectionString = configuration.GetConnectionString("Relay");
-        if (string.IsNullOrWhiteSpace(connectionString))
-            throw new InvalidOperationException("Thiếu cấu hình bắt buộc ConnectionStrings:Relay.");
-
-        services.AddDbContext<RelayDbContext>(o => o.UseNpgsql(connectionString));
+        // All data lives in this process (see RelayStore): one store for the host, repositories are views of it.
+        services.AddSingleton<RelayStore>();
         services.AddScoped<IAccountRepository, AccountRepository>();
         services.AddScoped<IAccountSessionRepository, AccountSessionRepository>();
         services.AddScoped<IDeviceRepository, DeviceRepository>();
@@ -43,6 +36,7 @@ public static class RelayHostServiceCollectionExtensions
         services.Configure<AccountsOptions>(configuration.GetSection(AccountsOptions.SectionName));
         services.Configure<TunnelOptions>(configuration.GetSection(TunnelOptions.SectionName));
         services.AddApplicationServices();
+        services.AddHostedService<AccountSeedHostedService>();
 
         AddAuthRateLimiter(services, configuration);
         AddForwardedHeaders(services, configuration);
@@ -139,21 +133,5 @@ public static class RelayHostServiceCollectionExtensions
         if (!app.Services.GetRequiredService<ForwardedHeadersSettings>().IsEmpty)
             app.UseForwardedHeaders();
         return app;
-    }
-
-    /// <summary>
-    /// The relay Api is the ONLY host that migrates this database (see <c>PostgreSqlSchemaInitializer</c>).
-    /// </summary>
-    /// <remarks><c>Relay:Database:MigrateOnStartup=false</c> skips it (schema applied out of band, or tests on fake repositories).</remarks>
-    public static async Task InitializeDatabaseAsync(this WebApplication app)
-    {
-        if (!app.Configuration.GetValue("Relay:Database:MigrateOnStartup", true))
-        {
-            app.Logger.LogWarning("Bỏ qua migrate database lúc khởi động (Relay:Database:MigrateOnStartup=false).");
-            return;
-        }
-        await using var scope = app.Services.CreateAsyncScope();
-        var db = scope.ServiceProvider.GetRequiredService<RelayDbContext>();
-        await PostgreSqlSchemaInitializer.InitializeAsync(db);
     }
 }

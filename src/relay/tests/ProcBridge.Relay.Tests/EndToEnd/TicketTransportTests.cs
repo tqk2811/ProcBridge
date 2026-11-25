@@ -12,13 +12,13 @@ public sealed class TicketTransportTests
     [TestMethod]
     public async Task VéTrongUrlBịTừChốiMặcĐịnhVàChỉNhậnKhiBậtCờ()
     {
-        await using var strict = new RelayApiFactory(null);
+        await using var strict = new RelayApiFactory();
         var (relay, session) = await OpenSessionAsync(strict);
         var refused = await Assert.ThrowsAsync<InvalidOperationException>(() => relay.ConnectLaneWithTicketInQueryAsync(session.SessionId, session.Ticket, 0));
         StringAssert.Contains(refused.Message, "404");
         (await relay.ConnectLaneAsync(session.SessionId, session.Ticket, 0)).Abort();
 
-        await using var legacy = new RelayApiFactory(null, new Dictionary<string, string?> { ["Relay:Tunnel:AllowTicketInQuery"] = "true" });
+        await using var legacy = new RelayApiFactory(new Dictionary<string, string?> { ["Relay:Tunnel:AllowTicketInQuery"] = "true" });
         var (legacyRelay, legacySession) = await OpenSessionAsync(legacy);
         (await legacyRelay.ConnectLaneWithTicketInQueryAsync(legacySession.SessionId, legacySession.Ticket, 0)).Abort();
     }

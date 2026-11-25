@@ -44,18 +44,31 @@ public sealed class AccountService : IAccountService
     {
         if (!_options.AllowRegistration)
             throw ServiceException.Forbidden(RelayErrors.RegistrationDisabled, "Relay không cho tự đăng ký tài khoản.");
-        return await CreateByOperatorAsync(request, cancellationToken);
-    }
-
-    public async Task<AccountVM> CreateByOperatorAsync(RegisterAccountRequestVM request, CancellationToken cancellationToken = default)
-    {
-        var userName = NormalizeUserName(request.UserName);
-        if (userName.Length == 0 || userName.Length > MaxUserNameLength || !userName.All(IsUserNameChar))
-            throw ServiceException.BadRequest(RelayErrors.ValidationFailed, "Tên đăng nhập 1-64 ký tự: chữ, số, '.', '_', '-'.");
+        var userName = ValidateUserName(request.UserName);
         if (request.Password is null || request.Password.Length < MinPasswordLength)
             throw ServiceException.BadRequest(RelayErrors.ValidationFailed, $"Mật khẩu tối thiểu {MinPasswordLength} ký tự.");
+        return await CreateAsync(userName, _passwordHasher.Hash(request.Password), cancellationToken);
+    }
 
-        var created = await _accounts.CreateAsync(new NewAccountRecordVM(userName, _passwordHasher.Hash(request.Password)), cancellationToken)
+    public async Task<AccountVM> SeedAsync(string userName, string passwordHash, CancellationToken cancellationToken = default)
+    {
+        var name = ValidateUserName(userName);
+        if (string.IsNullOrWhiteSpace(passwordHash) || !_passwordHasher.IsWellFormed(passwordHash))
+            throw ServiceException.BadRequest(RelayErrors.ValidationFailed, "Hash mật khẩu không đúng định dạng pbkdf2-sha256$<vòng lặp>$<salt>$<hash>.");
+        return await CreateAsync(name, passwordHash, cancellationToken);
+    }
+
+    private static string ValidateUserName(string? userName)
+    {
+        var name = NormalizeUserName(userName ?? string.Empty);
+        if (name.Length == 0 || name.Length > MaxUserNameLength || !name.All(IsUserNameChar))
+            throw ServiceException.BadRequest(RelayErrors.ValidationFailed, "Tên đăng nhập 1-64 ký tự: chữ, số, '.', '_', '-'.");
+        return name;
+    }
+
+    private async Task<AccountVM> CreateAsync(string userName, string passwordHash, CancellationToken cancellationToken)
+    {
+        var created = await _accounts.CreateAsync(new NewAccountRecordVM(userName, passwordHash), cancellationToken)
             ?? throw ServiceException.Conflict(RelayErrors.UserNameTaken, "Tên đăng nhập đã có người dùng.");
         _logger.LogInformation("Đã tạo tài khoản {AccountId} ({UserName}).", created.Id, created.UserName);
         return ToVM(created);

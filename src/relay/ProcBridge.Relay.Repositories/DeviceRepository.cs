@@ -1,46 +1,50 @@
-using Microsoft.EntityFrameworkCore;
-
-using ProcBridge.Relay.Database.PostgreSql.EF;
 using ProcBridge.Relay.Repositories.Abstractions.Interfaces;
-using ProcBridge.Relay.Repositories.Mappings;
 using ProcBridge.Relay.ViewModels.Records;
 
 namespace ProcBridge.Relay.Repositories;
 
 public sealed class DeviceRepository : IDeviceRepository
 {
-    private readonly RelayDbContext _db;
+    private readonly RelayStore _store;
 
-    public DeviceRepository(RelayDbContext db) => _db = db;
+    public DeviceRepository(RelayStore store) => _store = store;
 
-    public async Task<DeviceRecordVM?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
-        => await _db.Devices.AsNoTracking().Where(x => x.Id == id).Select(DeviceMapping.ToRecordExpression).FirstOrDefaultAsync(cancellationToken);
-
-    public async Task<DeviceRecordVM?> GetByTokenHashAsync(string tokenHash, CancellationToken cancellationToken = default)
-        => await _db.Devices.AsNoTracking().Where(x => x.TokenHash == tokenHash).Select(DeviceMapping.ToRecordExpression).FirstOrDefaultAsync(cancellationToken);
-
-    public async Task<IReadOnlyList<DeviceRecordVM>> GetAllByOwnerAsync(Guid ownerAccountId, CancellationToken cancellationToken = default)
-        => await _db.Devices.AsNoTracking()
-            .Where(x => x.OwnerAccountId == ownerAccountId)
-            .OrderBy(x => x.CreatedAt)
-            .Select(DeviceMapping.ToRecordExpression)
-            .ToListAsync(cancellationToken);
-
-    public async Task<DeviceRecordVM> CreateAsync(NewDeviceRecordVM device, CancellationToken cancellationToken = default)
+    public Task<DeviceRecordVM?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
     {
-        var row = device.ToDbo();
-        _db.Devices.Add(row);
-        await _db.SaveChangesAsync(cancellationToken);
-        return row.ToRecord();
+        lock (_store.Lock)
+            return Task.FromResult(_store.Devices.Select(x => x.Device).FirstOrDefault(x => x.Id == id));
     }
 
-    public async Task<bool> RevokeAsync(Guid id, DateTime revokedAt, CancellationToken cancellationToken = default)
+    public Task<DeviceRecordVM?> GetByTokenHashAsync(string tokenHash, CancellationToken cancellationToken = default)
     {
-        var row = await _db.Devices.FirstOrDefaultAsync(x => x.Id == id && x.RevokedAt == null, cancellationToken);
-        if (row is null)
-            return false;
-        row.RevokedAt = revokedAt;
-        await _db.SaveChangesAsync(cancellationToken);
-        return true;
+        lock (_store.Lock)
+            return Task.FromResult<DeviceRecordVM?>(_store.Devices.FirstOrDefault(x => x.TokenHash == tokenHash).Device);
+    }
+
+    public Task<IReadOnlyList<DeviceRecordVM>> GetAllByOwnerAsync(Guid ownerAccountId, CancellationToken cancellationToken = default)
+    {
+        lock (_store.Lock)
+            return Task.FromResult<IReadOnlyList<DeviceRecordVM>>(_store.Devices.Select(x => x.Device).Where(x => x.OwnerAccountId == ownerAccountId).ToList());
+    }
+
+    public Task<DeviceRecordVM> CreateAsync(NewDeviceRecordVM device, CancellationToken cancellationToken = default)
+    {
+        var record = new DeviceRecordVM(Guid.NewGuid(), device.OwnerAccountId, device.Name, device.PublicKey, DateTime.UtcNow, null);
+        lock (_store.Lock)
+            _store.Devices.Add((record, device.TokenHash));
+        return Task.FromResult(record);
+    }
+
+    public Task<bool> RevokeAsync(Guid id, DateTime revokedAt, CancellationToken cancellationToken = default)
+    {
+        lock (_store.Lock)
+        {
+            var index = _store.Devices.FindIndex(x => x.Device.Id == id && x.Device.RevokedAt == null);
+            if (index < 0)
+                return Task.FromResult(false);
+            var row = _store.Devices[index];
+            _store.Devices[index] = (row.Device with { RevokedAt = revokedAt }, row.TokenHash);
+            return Task.FromResult(true);
+        }
     }
 }

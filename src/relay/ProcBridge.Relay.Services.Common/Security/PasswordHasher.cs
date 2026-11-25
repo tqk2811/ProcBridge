@@ -40,6 +40,22 @@ public class PasswordHasher
         return string.Join('$', Algorithm, _iterations.ToString(CultureInfo.InvariantCulture), Convert.ToBase64String(salt), Convert.ToBase64String(hash));
     }
 
+    /// <summary>True when <paramref name="stored"/> is a hash this class can verify (format, iteration count, base64 parts).</summary>
+    public bool IsWellFormed(string stored)
+    {
+        var parts = stored.Split('$');
+        if (parts.Length != 4 || parts[0] != Algorithm || !int.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out var iterations) || iterations < 1)
+            return false;
+        try
+        {
+            return Convert.FromBase64String(parts[2]).Length > 0 && Convert.FromBase64String(parts[3]).Length > 0;
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+    }
+
     public virtual bool Verify(string password, string stored)
     {
         var parts = stored.Split('$');

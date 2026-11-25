@@ -4,6 +4,5 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\ProcBridge.Relay.Repositories.Abstractions\ProcBridge.Relay.Repositories.Abstractions.csproj" />
-    <ProjectReference Include="..\ProcBridge.Relay.Database.PostgreSql\ProcBridge.Relay.Database.PostgreSql.csproj" />
   </ItemGroup>
 </Project>

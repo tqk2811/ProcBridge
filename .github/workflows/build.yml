@@ -25,23 +25,6 @@ jobs:
       - name: Build C#
         run: dotnet build ProcBridge.slnx -c Release
 
-      # Relay integration tests use the PostgreSQL service preinstalled on the runner image. The image exposes
-      # PGBIN/PGUSER/PGPASSWORD as environment variables, so no credential is written here. Starting a Windows service
-      # returns at once; the earlier `pg_ctl start | Out-Host` left postgres.exe holding the step's output pipe and the
-      # step never finished. The step must succeed: the test step sets PROCBRIDGE_REQUIRE_POSTGRES=1, so without a
-      # running PostgreSQL the Postgres tests fail instead of being skipped.
-      - name: Start PostgreSQL for relay tests
-        shell: pwsh
-        timeout-minutes: 3
-        run: |
-          $svc = Get-Service -Name 'postgresql*' -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $svc) { throw "No PostgreSQL service on this runner image." }
-          Set-Service -Name $svc.Name -StartupType Manual
-          Start-Service -Name $svc.Name
-          $svc.WaitForStatus('Running', [TimeSpan]::FromSeconds(60))
-          $user = if ($env:PGUSER) { $env:PGUSER } else { 'postgres' }
-          "PROCBRIDGE_TEST_POSTGRES=Host=localhost;Port=5432;Username=$user;Password=$env:PGPASSWORD" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
       - name: Build native x64
         run: msbuild ProcBridge.Native.sln -m -p:Configuration=Release -p:Platform=x64
 
@@ -53,7 +36,6 @@ jobs:
         timeout-minutes: 25
         env:
           PROCBRIDGE_REQUIRE_NATIVE: '1'
-          PROCBRIDGE_REQUIRE_POSTGRES: '1'
         run: dotnet test ProcBridge.slnx -c Release --no-build --logger trx --results-directory TestResults
 
       - name: Upload native binaries

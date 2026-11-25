@@ -1,17 +1,17 @@
-using ProcBridge.Relay.Services.Accounts.Interfaces;
-using ProcBridge.Relay.Services.Common.Common.Errors;
-using ProcBridge.Relay.ViewModels.Accounts;
+using ProcBridge.Relay.Services.Common.Security;
 
 namespace ProcBridge.Relay.Api.Infrastructure;
 
 /// <summary>
-/// Commands the operator runs on the relay host itself, against the relay database, instead of serving:
-/// <c>ProcBridge.Relay.Api account create &lt;user&gt;</c> creates an account even when self-registration is off
-/// (the default). The password comes from <see cref="PasswordEnvironmentVariable"/> or is read from the console.
+/// Commands the operator runs instead of serving: <c>ProcBridge.Relay.Api account hash</c> prints the password hash to
+/// put in <c>Relay:Accounts:Seed</c> (the relay stores no data on disk, so there is no "create account" command any
+/// more). The password comes from <see cref="PasswordEnvironmentVariable"/> or is read from the console.
 /// </summary>
 public static class OperatorCommands
 {
     public const string PasswordEnvironmentVariable = "PROCBRIDGE_RELAY_PASSWORD";
+
+    private const int MinPasswordLength = 8;
 
     /// <summary>True when <paramref name="args"/> start with an operator command (then the host must not serve).</summary>
     public static bool IsOperatorCommand(string[] args) => args.Length >= 1 && args[0] == "account";
@@ -24,12 +24,13 @@ public static class OperatorCommands
     }
 
     /// <returns>Process exit code: 0 done, 1 refused, 2 usage.</returns>
-    public static async Task<int> RunAsync(IServiceProvider services, string[] command, TextWriter output, TextWriter error)
+    public static async Task<int> RunAsync(string[] command, TextWriter output, TextWriter error)
     {
-        if (command.Length != 3 || command[0] != "account" || command[1] != "create")
+        if (command.Length != 2 || command[0] != "account" || command[1] != "hash")
         {
-            await error.WriteLineAsync("Usage: ProcBridge.Relay.Api account create <user> [--ConnectionStrings:Relay=...]");
+            await error.WriteLineAsync("Usage: ProcBridge.Relay.Api account hash");
             await error.WriteLineAsync($"  Password: environment variable {PasswordEnvironmentVariable}, or typed on the console.");
+            await error.WriteLineAsync("  Put the printed hash in Relay:Accounts:Seed (UserName + PasswordHash) of the relay configuration.");
             return 2;
         }
         var password = Environment.GetEnvironmentVariable(PasswordEnvironmentVariable);
@@ -38,20 +39,13 @@ public static class OperatorCommands
             await output.WriteAsync("Password: ");
             password = ReadHidden();
         }
-
-        await using var scope = services.CreateAsyncScope();
-        var accounts = scope.ServiceProvider.GetRequiredService<IAccountService>();
-        try
+        if (password.Length < MinPasswordLength)
         {
-            var created = await accounts.CreateByOperatorAsync(new RegisterAccountRequestVM { UserName = command[2], Password = password });
-            await output.WriteLineAsync($"Created account {created.UserName} ({created.Id}).");
-            return 0;
-        }
-        catch (ServiceException ex)
-        {
-            await error.WriteLineAsync($"{ex.Code}: {ex.Message}");
+            await error.WriteLineAsync($"Password must have at least {MinPasswordLength} characters.");
             return 1;
         }
+        await output.WriteLineAsync(new PasswordHasher().Hash(password));
+        return 0;
     }
 
     private static string ReadHidden()

@@ -107,8 +107,10 @@ crypto, không có .NET. Lỗi mạng hay crash Broker không kéo sập process
 ## 3. Cấu trúc thư mục src
 
 Theo quy tắc thư mục `src/`: gốc repo chỉ giữ `docs/`, `README.md`, file cấu hình repo và CI.
-Phần Relay theo kiến trúc ASP chuẩn (tách đủ `Database.Entities` / `Database.<Provider>` /
-`Repositories.Abstractions` / `Repositories`).
+Phần Relay theo kiến trúc ASP chuẩn nhưng KHÔNG có tầng database: dữ liệu chỉ nằm trong bộ nhớ nên không có
+`Database.Entities` / `Database.<Provider>` (không cần entity vì không còn bảng, không migration, không EF/Npgsql);
+còn `Repositories.Abstractions` (giao diện) và `Repositories` (cài đặt trong bộ nhớ, thread-safe, quanh `RelayStore`).
+Sau này muốn lưu bền thì thêm lại `Database.*` và cài đặt repository mới cho cùng giao diện.
 
 ```text
 src/
@@ -134,10 +136,8 @@ src/
 ├── relay/
 │   ├── ProcBridge.Relay.Shared/
 │   ├── ProcBridge.Relay.ViewModels/
-│   ├── ProcBridge.Relay.Database.Entities/
-│   ├── ProcBridge.Relay.Database.PostgreSql/
 │   ├── ProcBridge.Relay.Repositories.Abstractions/
-│   ├── ProcBridge.Relay.Repositories/
+│   ├── ProcBridge.Relay.Repositories/    # cài đặt trong bộ nhớ (RelayStore), không có database
 │   ├── ProcBridge.Relay.Services.Common/ # lỗi, băm token/mật khẩu, luật quyền (Rules), IDevicePresence
 │   ├── ProcBridge.Relay.Services.*/      # Accounts, Devices, Shares, Tunnel
 │   ├── ProcBridge.Relay.Services/        # facade đăng ký mọi feature
@@ -336,14 +336,18 @@ Broker kết nối TCP thẳng tới Agent (cổng cấu hình được). Tìm A
     --agent-fingerprint <fp>` (+ token như trên), Launcher WPF có mục "Kết nối qua relay" trong hồ sơ.
   - Thu hồi máy, thu hồi quyền hay xoá chia sẻ cắt luôn kênh điều khiển và các lane đang mở liên quan.
   - Tài khoản: mặc định tắt tự đăng ký (`Relay:Accounts:AllowRegistration=false`); người vận hành tạo
-    tài khoản bằng `ProcBridge.Relay.Api account create <user>` trên máy relay. `login`/`register` giới hạn
+    tài khoản bằng cấu hình `Relay:Accounts:Seed` (danh sách `UserName` + `PasswordHash`, hoặc biến môi trường
+    `Relay__Accounts__Seed__0__UserName` / `__PasswordHash`); lấy hash bằng `ProcBridge.Relay.Api account hash`
+    (đọc mật khẩu từ `PROCBRIDGE_RELAY_PASSWORD` hoặc gõ ở console, in hash ra, không lưu gì). `login`/`register` giới hạn
     tần suất theo địa chỉ máy khách và theo tên đăng nhập (`Relay:RateLimit`, mặc định 10 lần/phút, quá thì
     429); `POST api/tunnel/sessions` giới hạn theo máy (mặc định 60 phiên/phút). Relay chỉ tin
     `X-Forwarded-For` từ proxy khai trong `Relay:ForwardedHeaders:KnownProxies`/`KnownNetworks` (mặc định rỗng:
     không tin header nào).
   - Trạng thái phiên chỉ nằm trong bộ nhớ một tiến trình relay.
-- Lưu trữ: PostgreSQL (tài khoản, máy, khoá công khai của máy, chia sẻ, quyền, log phiên). Không lưu
-  nội dung file.
+- Lưu trữ: CHỈ TRONG BỘ NHỚ tiến trình relay (tài khoản, phiên đăng nhập, máy, khoá công khai của máy, chia sẻ,
+  quyền). **Khởi động lại relay là mất hết dữ liệu** (quyết định của người dùng dự án, 2026-11-25): máy phải đăng
+  ký lại, chia sẻ và quyền phải tạo lại, token máy và token phiên cũ vô hiệu. Chỉ tài khoản khai ở
+  `Relay:Accounts:Seed` được tạo lại mỗi lần khởi động. Không lưu nội dung file, không có log phiên bền.
 - Về sau có thể thử kết nối thẳng P2P (UDP hole punching) và chỉ dùng relay khi thất bại; không nằm
   trong các mốc đầu.
 
@@ -476,7 +480,7 @@ Mỗi mốc là một nhánh riêng, xong mốc nào build, test và commit mố
 | **M3** Ghi | Tạo, ghi, đổi tên, xoá, đặt thuộc tính, ghi ngược, phát hiện xung đột | Test so sánh xanh với bộ API ghi; sửa và lưu file trong VS Code |
 | **M4** Cây process | Hook `NtCreateUserProcess`, inject con, x86/x64, Job Object, chuyển bảng handle | `dotnet build` chạy trên solution ở máy B (nhiều process con) |
 | **M5** Mã hoá đầu cuối | Khoá định danh, ghép cặp, bắt tay Noise, mã hoá khung (áp cả LAN) | Bắt gói trên dây không thấy nội dung; ghép cặp sai khoá bị từ chối |
-| **M6** Relay ASP | Relay theo kiến trúc ASP chuẩn: tài khoản, máy, chia sẻ, quyền, tunnel WebSocket | Máy A và máy B ở hai mạng khác nhau làm được M4 qua Relay |
+| **M6** Relay ASP | Relay theo kiến trúc ASP chuẩn, lưu trong bộ nhớ (mất dữ liệu khi khởi động lại): tài khoản, máy, chia sẻ, quyền, tunnel WebSocket | Máy A và máy B ở hai mạng khác nhau làm được M4 qua Relay |
 | **M7** Theo dõi thay đổi và hiệu năng | `ReadDirectoryChangesW` phía B, `NtNotifyChangeDirectoryFile` phía A, lấy cây metadata một lần, đọc trước | IDE thấy file đổi trên máy B; đo thời gian build so với chạy cục bộ |
 | **M8** Hoàn thiện theo mục đích | Tải theo vùng cho file lớn, khoá file chuyển sang máy B, test app/game/debug | Danh sách test thực tế ở mục 12 chạy được |
 | **M9** Remote Explorer mở rộng | Danh sách process, registry, service, thông tin hệ thống (mục 14); thao tác ghi (kill process, sửa registry) sau cùng | Duyệt được cả bốn loại qua LAN và qua Relay; quyền bị tắt thì Agent từ chối |

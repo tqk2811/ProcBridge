@@ -42,7 +42,7 @@ public sealed class RelayHardeningTests
     [TestMethod]
     public async Task ĐăngNhậpCùngTênTừNhiềuĐịaChỉVẫnBịChặnTheoTênĐăngNhập()
     {
-        await using var factory = new RelayApiFactory(null, new Dictionary<string, string?>
+        await using var factory = new RelayApiFactory(new Dictionary<string, string?>
         {
             ["Relay:RateLimit:LoginUserNamePermitLimit"] = "3",
             ["Relay:RateLimit:AuthWindow"] = "00:10:00",
@@ -58,7 +58,7 @@ public sealed class RelayHardeningTests
     [TestMethod]
     public async Task MặcĐịnhKhôngTinHeaderXForwardedFor()
     {
-        await using var factory = new RelayApiFactory(null, new Dictionary<string, string?>
+        await using var factory = new RelayApiFactory(new Dictionary<string, string?>
         {
             ["Relay:RateLimit:AuthPermitLimit"] = "2",
             ["Relay:RateLimit:LoginUserNamePermitLimit"] = "1000",
@@ -74,7 +74,7 @@ public sealed class RelayHardeningTests
     [TestMethod]
     public async Task ProxyĐượcCấuHìnhThìHạnMứcTínhTheoĐịaChỉKháchThật()
     {
-        await using var factory = new RelayApiFactory(null, new Dictionary<string, string?>
+        await using var factory = new RelayApiFactory(new Dictionary<string, string?>
         {
             ["Relay:ForwardedHeaders:KnownProxies:0"] = "10.0.0.1",
             ["Relay:RateLimit:AuthPermitLimit"] = "2",
@@ -98,7 +98,7 @@ public sealed class RelayHardeningTests
     [TestMethod]
     public async Task MởPhiênTunnelBịGiớiHạnTheoMáy()
     {
-        await using var factory = new RelayApiFactory(null, new Dictionary<string, string?>
+        await using var factory = new RelayApiFactory(new Dictionary<string, string?>
         {
             ["Relay:RateLimit:TunnelSessionPermitLimit"] = "2",
             ["Relay:RateLimit:TunnelSessionWindow"] = "00:10:00",

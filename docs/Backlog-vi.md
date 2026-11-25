@@ -344,13 +344,13 @@ thêm MAC theo khoá phiên vào yêu cầu join. Ghi 2026-11-25.
 
 `TunnelHub` giữ kênh điều khiển và phiên trong bộ nhớ tiến trình. Chạy nhiều instance sau load balancer thì
 hai đầu của một phiên có thể rơi vào hai tiến trình khác nhau và không ghép được. Cần sổ đăng ký dùng chung
-(vd PostgreSQL LISTEN/NOTIFY hoặc Redis) và chuyển tiếp giữa instance, hoặc định tuyến dính theo phiên. Ghi
+(vd Redis hoặc một kho dùng chung; dữ liệu relay hiện chỉ nằm trong bộ nhớ nên nhiều instance còn không có chung tài khoản/máy) và chuyển tiếp giữa instance, hoặc định tuyến dính theo phiên. Ghi
 2026-11-25 (M6).
 
 ## [Vừa] Chưa có log phiên tunnel
 
-Plan 8.2 có "log phiên" trong PostgreSQL; M6 chỉ ghi log ứng dụng. Cần bảng phiên (ai mở, chia sẻ nào, lúc
-mở/đóng, số byte) và API/CLI xem. Ghi 2026-11-25 (M6).
+Relay chỉ lưu trong bộ nhớ và chỉ ghi log ứng dụng. Nếu cần log phiên (ai mở, chia sẻ nào, lúc mở/đóng, số
+byte) thì phải có kho bền trước, rồi API/CLI xem. Ghi 2026-11-25 (M6).
 
 ## [Thấp] Giới hạn tài nguyên tunnel
 
@@ -395,3 +395,10 @@ dần tham số. Ghi 2026-11-25.
 `ChildCreationTests.CrossArchitectureInjection_DoesNotLeakHandlesToSiblings` (x64/Win32 cả hai chiều) báo
 `leaked: 9..28` trên máy dev, kể cả ở commit chưa có thay đổi relay; CI (windows-latest) xanh. Chưa rõ do môi
 trường (phần mềm bảo vệ, tiến trình khác giữ handle) hay lỗi đua trong hook. Ghi 2026-11-25.
+
+## [Thấp] Relay mất dữ liệu khi khởi động lại
+
+Quyết định của người dùng dự án: relay chỉ lưu trong bộ nhớ (xem Plan 8.2). Mỗi lần relay khởi động lại, máy đã
+đăng ký, chia sẻ, quyền và token phiên mất hết; chỉ tài khoản trong `Relay:Accounts:Seed` được tạo lại. Nếu về sau
+cần bền: thêm lại tầng `Database.*` (entity, provider, migration) và cài đặt repository mới cho các giao diện trong
+`ProcBridge.Relay.Repositories.Abstractions`. Ghi 2026-11-25.

@@ -12,7 +12,7 @@ public sealed class InMemoryRelayEndToEndTests : RelayEndToEndTestsBase
     protected override RelayApiFactory Factory => _factory!;
 
     [ClassInitialize]
-    public static void Initialize(TestContext context) => _factory = new RelayApiFactory(null);
+    public static void Initialize(TestContext context) => _factory = new RelayApiFactory();
 
     [ClassCleanup]
     public static async Task CleanupAsync()

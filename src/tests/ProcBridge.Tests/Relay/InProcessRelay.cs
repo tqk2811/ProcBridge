@@ -13,19 +13,14 @@ using ProcBridge.Transport.Relay.Models;
 namespace ProcBridge.Tests.Relay;
 
 /// <summary>
-/// The real relay host (REST + WebSocket tunnel) in this test process. On PostgreSQL when
-/// <see cref="PostgresTestDatabase.EnvironmentVariable"/> is set (throw-away database, real EF repositories and
-/// migrations), otherwise on the in-memory repositories of ProcBridge.Relay.Testing. WebSockets go through
-/// <see cref="Sockets"/>, which also records every byte that crosses the relay on data lanes.
+/// The real relay host (REST + WebSocket tunnel) in this test process, on its in-memory store (the relay keeps no other
+/// storage). WebSockets go through <see cref="Sockets"/>, which also records every byte that crosses the relay on data lanes.
 /// </summary>
 internal sealed class InProcessRelay : IAsyncDisposable
 {
-    private readonly PostgresTestDatabase? _database;
-
-    private InProcessRelay(PostgresTestDatabase? database)
+    private InProcessRelay()
     {
-        _database = database;
-        Factory = new RelayApiFactory(database?.ConnectionString);
+        Factory = new RelayApiFactory();
         Sockets = new RecordingSocketFactory(Factory.Server);
     }
 
@@ -33,19 +28,7 @@ internal sealed class InProcessRelay : IAsyncDisposable
 
     public RecordingSocketFactory Sockets { get; }
 
-    /// <summary>True when the relay runs on real PostgreSQL.</summary>
-    public bool UsesPostgres => _database is not null;
-
-    /// <summary>
-    /// Fails (instead of quietly using the in-memory repositories) when <see cref="PostgresTestDatabase.RequireEnvironmentVariable"/>
-    /// is <c>1</c> and no PostgreSQL is configured: CI must run these tests on the real database.
-    /// </summary>
-    public static InProcessRelay Start()
-    {
-        if (PostgresTestDatabase.AdminConnectionString is null && PostgresTestDatabase.IsRequired)
-            Assert.Fail(PostgresTestDatabase.MissingMessage);
-        return new(PostgresTestDatabase.AdminConnectionString is null ? null : PostgresTestDatabase.Create());
-    }
+    public static InProcessRelay Start() => new();
 
     public RelayEndpoint Endpoint(string deviceToken) => new(Factory.Server.BaseAddress, deviceToken);
 
@@ -86,8 +69,6 @@ internal sealed class InProcessRelay : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await Factory.DisposeAsync();
-        if (_database is not null)
-            await _database.DisposeAsync();
     }
 }
 

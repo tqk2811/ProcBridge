@@ -3,8 +3,10 @@ using ProcBridge.Relay.Api.Extensions;
 using ProcBridge.Relay.Api.Infrastructure;
 using ProcBridge.Relay.Api.Middleware;
 
-// "account create <user>": operator command on the relay database instead of serving.
+// "account hash": operator command (prints a password hash for Relay:Accounts:Seed) instead of serving.
 var (operatorCommand, hostArgs) = OperatorCommands.IsOperatorCommand(args) ? OperatorCommands.Split(args) : ([], args);
+if (operatorCommand.Length > 0)
+    return await OperatorCommands.RunAsync(operatorCommand, Console.Out, Console.Error);
 
 var builder = WebApplication.CreateBuilder(hostArgs);
 builder.Services.AddRelayHost(builder.Configuration);
@@ -20,19 +22,6 @@ app.UseRateLimiter();
 app.MapControllers();
 app.MapTunnelEndpoints();
 app.MapGet("/health/live", () => Results.Text("ok"));
-
-try
-{
-    await app.InitializeDatabaseAsync();
-}
-catch (Exception ex)
-{
-    app.Logger.LogCritical(ex, "Không khởi tạo được database relay.");
-    throw;
-}
-
-if (operatorCommand.Length > 0)
-    return await OperatorCommands.RunAsync(app.Services, operatorCommand, Console.Out, Console.Error);
 
 await app.RunAsync();
 return 0;

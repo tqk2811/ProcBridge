@@ -1,36 +1,38 @@
-using Microsoft.EntityFrameworkCore;
-
-using ProcBridge.Relay.Database.PostgreSql.EF;
 using ProcBridge.Relay.Repositories.Abstractions.Interfaces;
-using ProcBridge.Relay.Repositories.Mappings;
 using ProcBridge.Relay.ViewModels.Records;
 
 namespace ProcBridge.Relay.Repositories;
 
 public sealed class AccountSessionRepository : IAccountSessionRepository
 {
-    private readonly RelayDbContext _db;
+    private readonly RelayStore _store;
 
-    public AccountSessionRepository(RelayDbContext db) => _db = db;
+    public AccountSessionRepository(RelayStore store) => _store = store;
 
-    public async Task<AccountSessionRecordVM> CreateAsync(NewAccountSessionRecordVM session, CancellationToken cancellationToken = default)
+    public Task<AccountSessionRecordVM> CreateAsync(NewAccountSessionRecordVM session, CancellationToken cancellationToken = default)
     {
-        var row = session.ToDbo();
-        _db.AccountSessions.Add(row);
-        await _db.SaveChangesAsync(cancellationToken);
-        return row.ToRecord();
+        var record = new AccountSessionRecordVM(Guid.NewGuid(), session.AccountId, session.ExpiresAt, null);
+        lock (_store.Lock)
+            _store.Sessions.Add((record, session.TokenHash));
+        return Task.FromResult(record);
     }
 
-    public async Task<AccountSessionRecordVM?> GetByTokenHashAsync(string tokenHash, CancellationToken cancellationToken = default)
-        => await _db.AccountSessions.AsNoTracking().Where(x => x.TokenHash == tokenHash).Select(AccountSessionMapping.ToRecordExpression).FirstOrDefaultAsync(cancellationToken);
-
-    public async Task<bool> RevokeAsync(Guid id, DateTime revokedAt, CancellationToken cancellationToken = default)
+    public Task<AccountSessionRecordVM?> GetByTokenHashAsync(string tokenHash, CancellationToken cancellationToken = default)
     {
-        var row = await _db.AccountSessions.FirstOrDefaultAsync(x => x.Id == id && x.RevokedAt == null, cancellationToken);
-        if (row is null)
-            return false;
-        row.RevokedAt = revokedAt;
-        await _db.SaveChangesAsync(cancellationToken);
-        return true;
+        lock (_store.Lock)
+            return Task.FromResult<AccountSessionRecordVM?>(_store.Sessions.FirstOrDefault(x => x.TokenHash == tokenHash).Session);
+    }
+
+    public Task<bool> RevokeAsync(Guid id, DateTime revokedAt, CancellationToken cancellationToken = default)
+    {
+        lock (_store.Lock)
+        {
+            var index = _store.Sessions.FindIndex(x => x.Session.Id == id && x.Session.RevokedAt == null);
+            if (index < 0)
+                return Task.FromResult(false);
+            var row = _store.Sessions[index];
+            _store.Sessions[index] = (row.Session with { RevokedAt = revokedAt }, row.TokenHash);
+            return Task.FromResult(true);
+        }
     }
 }
