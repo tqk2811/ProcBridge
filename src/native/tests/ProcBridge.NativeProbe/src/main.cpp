@@ -7,6 +7,7 @@
 //        ProcBridge.NativeProbe.<arch>.exe --write <new folder>     (M3 write scenario, see WriteScenario)
 //        ProcBridge.NativeProbe.<arch>.exe --notify <watched> <real> (M7 change notifications, see NotifyScenario)
 //        ProcBridge.NativeProbe.<arch>.exe --read-at|--map-hash|--load|--symbols|--lock|--lock-async ... (M8, see ReadAt and below)
+//        ProcBridge.NativeProbe.<arch>.exe --image [dll]            (started from a virtual folder, see ImageNames)
 // Expected tree under <root> (created by the test): a.txt, sub\b.txt, sub\deep\c.bin, empty\,
 // ro.txt (read-only), unicode file name. Last access times are never printed (they drift), nor the times
 // of ".." entries (the parent of a virtual root is not part of the virtual folder).
@@ -2388,6 +2389,34 @@ namespace
         return 0;
     }
 
+    /// --image [dll] (run from a virtual folder): prints the file name of this image and of dbghelp.dll (a static import,
+    /// taken from next to the image when a copy lies there), then loads dll by bare name (searched next to the image)
+    /// and prints its file name.
+    int ImageNames(const wchar_t* dll)
+    {
+        wchar_t name[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, name, MAX_PATH);
+        WriteLine(L"image " + std::wstring(name));
+        name[0] = L'\0';
+        GetModuleFileNameW(GetModuleHandleW(L"dbghelp.dll"), name, MAX_PATH);
+        WriteLine(L"dbghelp " + std::wstring(name));
+        if (dll == nullptr)
+        {
+            return 0;
+        }
+        const HMODULE module = LoadLibraryW(dll);
+        if (module == nullptr)
+        {
+            WriteLine(L"dynamic: " + Error(GetLastError()));
+            return 1;
+        }
+        name[0] = L'\0';
+        GetModuleFileNameW(module, name, MAX_PATH);
+        WriteLine(L"dynamic " + std::wstring(name));
+        FreeLibrary(module);
+        return 0;
+    }
+
     /// --symbols <exe> (M8, debugging): DbgHelp loads the exe's pdb from the exe's folder (the CodeView path is
     /// ignored) and resolves wmain; prints the symbol type, the pdb DbgHelp read and the lookup result.
     int Symbols(const wchar_t* exe)
@@ -2625,6 +2654,10 @@ namespace
         if (command == L"--load" && argc == 3)
         {
             return LoadDll(argv[2]);
+        }
+        if (command == L"--image" && (argc == 2 || argc == 3))
+        {
+            return ImageNames(argc == 3 ? argv[2] : nullptr);
         }
         if (command == L"--symbols" && argc == 3)
         {
