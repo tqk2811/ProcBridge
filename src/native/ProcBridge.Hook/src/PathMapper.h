@@ -21,6 +21,7 @@ namespace ProcBridge::Hook
         ACCESS_MASK DesiredAccess;
         ULONG CreateDisposition;
         ULONG CreateOptions;
+        ULONG FileAttributes = 0; // given to a file the open creates
     };
 
     /// How a path given to the resolver is spelled.
@@ -71,11 +72,16 @@ namespace ProcBridge::Hook
 
         /// Makes the backing file of path available for an open with these arguments and builds its NT path
         /// (freed by the caller with FreeString). Returns the NTSTATUS the hooked call fails with otherwise.
-        /// info (optional) receives machine B's metadata when the resolver has it (left untouched otherwise).
+        /// info (optional) receives machine B's metadata when the resolver has it (left untouched otherwise);
+        /// writeToken (optional) the Broker's write token of an open that may change content (0 when none, M3).
         /// M1 (local folder): a plain translation.
         virtual NTSTATUS Resolve(int mapping, const UNICODE_STRING& path, PathKind kind, const OpenIntent& /*intent*/,
-            UNICODE_STRING& realPath, HookIpc::FileInfo* /*info*/) const noexcept
+            UNICODE_STRING& realPath, HookIpc::FileInfo* /*info*/, uint64_t* writeToken = nullptr) const noexcept
         {
+            if (writeToken != nullptr)
+            {
+                *writeToken = 0;
+            }
             const bool translated = kind == PathKind::Nt ? TranslateToReal(mapping, path, realPath)
                                                          : TranslateDeviceToReal(mapping, path, realPath);
             return translated ? STATUS_SUCCESS : STATUS_NO_MEMORY;

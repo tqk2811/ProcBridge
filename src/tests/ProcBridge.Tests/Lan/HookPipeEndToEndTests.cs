@@ -18,51 +18,6 @@ public sealed class HookPipeEndToEndTests
 {
     private const string VirtualRoot = @"V:\Remote\Proj";
 
-    private delegate T BodyReader<T>(ref HookIpcReader reader);
-
-    /// <summary>Minimal stand-in for the C++ pipe client.</summary>
-    private sealed class FakeHook(NamedPipeClientStream pipe) : IAsyncDisposable
-    {
-        private readonly byte[] _buffer = new byte[HookIpcProtocol.MaxMessageSize];
-        private uint _nextId;
-
-        public static async Task<FakeHook> ConnectAsync(string pipeName)
-        {
-            var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
-            await pipe.ConnectAsync(5000);
-            pipe.ReadMode = PipeTransmissionMode.Message;
-            return new FakeHook(pipe);
-        }
-
-        public async Task<(uint Status, byte[] Reply)> CallAsync(IHookIpcMessage request)
-        {
-            uint id = ++_nextId;
-            int size = HookIpcCodec.Encode(_buffer, id, request);
-            await pipe.WriteAsync(_buffer.AsMemory(0, size));
-            int length = 0;
-            do
-            {
-                length += await pipe.ReadAsync(_buffer.AsMemory(length));
-            }
-            while (!pipe.IsMessageComplete);
-            byte[] reply = _buffer[..length];
-            HookIpcHeader header = HookIpcCodec.ReadHeader(reply);
-            Assert.AreEqual(id, header.RequestId);
-            Assert.AreEqual(request.MessageType, header.MessageType);
-            return (header.Status, reply);
-        }
-
-        public async Task<T> CallOkAsync<T>(IHookIpcMessage request, BodyReader<T> read)
-        {
-            (uint status, byte[] reply) = await CallAsync(request);
-            Assert.AreEqual(0u, status, $"status 0x{status:X8}");
-            var reader = new HookIpcReader(reply);
-            return read(ref reader);
-        }
-
-        public ValueTask DisposeAsync() => pipe.DisposeAsync();
-    }
-
     [TestMethod]
     public async Task HookRequests_AreServedThroughBroker()
     {
@@ -70,7 +25,7 @@ public sealed class HookPipeEndToEndTests
         share.WriteFile(@"proj\src\a.cs", "class A {}"u8.ToArray());
         share.WriteFile(@"proj\readme.md", "# hi"u8.ToArray());
         using var cacheDir = new TempFolder("cache");
-        await using var agent = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
+        await using var agent = new AgentServer([new AgentShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
         agent.Start();
 
         string session = Guid.NewGuid().ToString("N");
@@ -131,7 +86,7 @@ public sealed class HookPipeEndToEndTests
         using var share = new TempFolder("pipe");
         share.WriteFile("a.txt", "hello"u8.ToArray());
         using var cacheDir = new TempFolder("cache");
-        await using var agent = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
+        await using var agent = new AgentServer([new AgentShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
         agent.Start();
         string session = Guid.NewGuid().ToString("N");
         await using BrokerHost broker = BrokerHost.Start(new BrokerOptions
@@ -166,7 +121,7 @@ public sealed class HookPipeEndToEndTests
         for (int i = 0; i < 8; i++)
             share.WriteFile($"f{i}.txt", [(byte)('0' + i)]);
         using var cacheDir = new TempFolder("cache");
-        await using var agent = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
+        await using var agent = new AgentServer([new AgentShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
         agent.Start();
         string session = Guid.NewGuid().ToString("N");
         await using BrokerHost broker = BrokerHost.Start(new BrokerOptions

@@ -14,6 +14,10 @@ public static class NtStatusMapper
     private const int ErrorInvalidName = 123;
     private const int ErrorAlreadyExists = 183;
     private const int ErrorDirectory = 267;
+    private const int ErrorDirNotEmpty = 145;
+    private const int ErrorDiskFull = 112;
+    private const int ErrorHandleDiskFull = 39;
+    private const int ErrorNotSameDevice = 17;
 
     public static NtStatus FromException(Exception exception) => exception switch
     {
@@ -43,6 +47,9 @@ public static class NtStatusMapper
             ErrorFileExists or ErrorAlreadyExists => NtStatus.ObjectNameCollision,
             ErrorInvalidName => NtStatus.ObjectNameInvalid,
             ErrorDirectory => NtStatus.NotADirectory,
+            ErrorDirNotEmpty => NtStatus.DirectoryNotEmpty,
+            ErrorDiskFull or ErrorHandleDiskFull => NtStatus.DiskFull,
+            ErrorNotSameDevice => NtStatus.NotSameDevice,
             _ => NtStatus.Unsuccessful,
         };
     }

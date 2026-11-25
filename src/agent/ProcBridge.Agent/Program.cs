@@ -3,12 +3,12 @@ using ProcBridge.Agent.Models;
 
 namespace ProcBridge.Agent;
 
-/// <summary>Console host: <c>ProcBridge.Agent --share name=D:\folder [--share ...] [--port 47800] [--bind 0.0.0.0]</c>.</summary>
+/// <summary>Console host: <c>ProcBridge.Agent --share name=D:\folder [--share ...] [--write-share name=D:\folder] [--port 47800] [--bind 0.0.0.0]</c>.</summary>
 internal static class Program
 {
     private static async Task<int> Main(string[] args)
     {
-        var shares = new List<ReadOnlyShare>();
+        var shares = new List<AgentShare>();
         var options = new AgentOptions();
         try
         {
@@ -18,10 +18,11 @@ internal static class Program
                 switch (args[i])
                 {
                     case "--share":
+                    case "--write-share":
                         int separator = value.IndexOf('=');
                         if (separator <= 0)
-                            throw new ArgumentException("--share expects name=path.");
-                        shares.Add(new ReadOnlyShare(value[..separator], value[(separator + 1)..]));
+                            throw new ArgumentException($"{args[i]} expects name=path.");
+                        shares.Add(new AgentShare(value[..separator], value[(separator + 1)..], writable: args[i] == "--write-share"));
                         break;
                     case "--port":
                         options = options with { Port = int.Parse(value) };
@@ -40,15 +41,15 @@ internal static class Program
         catch (Exception e) when (e is ArgumentException or FormatException or DirectoryNotFoundException)
         {
             Console.Error.WriteLine(e.Message);
-            Console.Error.WriteLine(@"Usage: ProcBridge.Agent --share name=D:\folder [--share ...] [--port 47800] [--bind 0.0.0.0]");
+            Console.Error.WriteLine(@"Usage: ProcBridge.Agent --share name=D:\folder [--share ...] [--write-share name=D:\folder] [--port 47800] [--bind 0.0.0.0]");
             return 2;
         }
 
         await using var server = new AgentServer(shares, options);
         server.Start();
-        Console.WriteLine($"ProcBridge.Agent listening on {options.BindAddress}:{server.Port} (read only, NOT encrypted: trusted LAN only).");
-        foreach (ReadOnlyShare share in shares)
-            Console.WriteLine($"  share '{share.Name}' -> {share.RootPath}");
+        Console.WriteLine($"ProcBridge.Agent listening on {options.BindAddress}:{server.Port} (NOT encrypted: trusted LAN only).");
+        foreach (AgentShare share in shares)
+            Console.WriteLine($"  share '{share.Name}' -> {share.RootPath} ({(share.IsWritable ? "read/write" : "read only")})");
 
         var stop = new TaskCompletionSource();
         Console.CancelKeyPress += (_, e) =>

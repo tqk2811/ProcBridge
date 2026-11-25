@@ -14,7 +14,7 @@ namespace ProcBridge.HookIpc;
 /// </remarks>
 public static class HookIpcProtocol
 {
-    public const ushort Version = 1;
+    public const ushort Version = 2;
 
     public const int HeaderSize = 16;
 
@@ -29,6 +29,9 @@ public static class HookIpcProtocol
 
     /// <summary>Bit 0 of the ListReply flags: more entries after this page.</summary>
     public const ushort ListFlagHasMore = 1;
+
+    /// <summary>Bit 0 of the HelloReply flags: send Flush after every write on a handle with a write token.</summary>
+    public const ushort HelloFlagWriteThrough = 1;
 
     public static string GetPipeName(string sessionId) => PipeNamePrefix + sessionId;
 

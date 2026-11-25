@@ -112,7 +112,7 @@ namespace ProcBridge::Hook
             const OpenIntent rootIntent{ FILE_LIST_DIRECTORY | SYNCHRONIZE, FileOpen, FileDirectoryFile };
             UNICODE_STRING empty{};
             UNICODE_STRING realRoot{};
-            if (!NT_SUCCESS(ResolveRelative(index, empty, rootIntent, realRoot, nullptr)))
+            if (!NT_SUCCESS(ResolveRelative(index, empty, rootIntent, realRoot, nullptr, nullptr)))
             {
                 return ERROR_PATH_NOT_FOUND;
             }
@@ -144,7 +144,7 @@ namespace ProcBridge::Hook
     }
 
     NTSTATUS BrokerResolver::ResolveRelative(int mapping, const UNICODE_STRING& relative, const OpenIntent& intent,
-        UNICODE_STRING& realPath, HookIpc::FileInfo* info) const noexcept
+        UNICODE_STRING& realPath, HookIpc::FileInfo* info, uint64_t* writeToken) const noexcept
     {
         BrokerClient::Call call(_client, HookIpc::MessageType::Resolve);
         HookIpc::ResolveRequest request{};
@@ -152,6 +152,7 @@ namespace ProcBridge::Hook
         request.DesiredAccess = intent.DesiredAccess;
         request.CreateDisposition = intent.CreateDisposition;
         request.CreateOptions = intent.CreateOptions;
+        request.FileAttributes = intent.FileAttributes;
         call.Put(&request, sizeof(request));
         call.PutString(relative.Buffer, relative.Length);
         BrokerReply reply;
@@ -162,9 +163,11 @@ namespace ProcBridge::Hook
         }
         MessageReader reader(reply.Body, reply.BodySize);
         HookIpc::FileInfo received{};
+        uint64_t token = 0;
         const BYTE* cachePath = nullptr;
         USHORT chars = 0;
-        if (!reader.Read(&received, sizeof(received)) || !reader.ReadString(cachePath, chars) || chars == 0)
+        if (!reader.Read(&received, sizeof(received)) || !reader.Read(&token, sizeof(token)) || !reader.ReadString(cachePath, chars)
+            || chars == 0)
         {
             return STATUS_INVALID_NETWORK_RESPONSE;
         }
@@ -181,13 +184,17 @@ namespace ProcBridge::Hook
         {
             *info = received;
         }
+        if (writeToken != nullptr)
+        {
+            *writeToken = token;
+        }
         return STATUS_SUCCESS;
     }
 
     NTSTATUS BrokerResolver::Resolve(int mapping, const UNICODE_STRING& path, PathKind kind, const OpenIntent& intent,
-        UNICODE_STRING& realPath, HookIpc::FileInfo* info) const noexcept
+        UNICODE_STRING& realPath, HookIpc::FileInfo* info, uint64_t* writeToken) const noexcept
     {
-        return ResolveRelative(mapping, RelativePath(mapping, path, kind), intent, realPath, info);
+        return ResolveRelative(mapping, RelativePath(mapping, path, kind), intent, realPath, info, writeToken);
     }
 
     NTSTATUS BrokerResolver::Stat(int mapping, const UNICODE_STRING& path, PathKind kind, HookIpc::FileInfo& info) const noexcept

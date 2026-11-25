@@ -10,6 +10,8 @@ namespace ProcBridge.Broker;
 /// Local cache of one share (plan 4.4 and 10). Stat and list results live for a short TTL; file contents are
 /// downloaded whole, get machine B's times and attributes, and are reused while the remote version
 /// (last write time + size) stays the same. Concurrent requests for the same file share one download.
+/// On a writable share (M3) cache copies keep machine B's attributes (a read-only share forces read-only), and the
+/// write operations below change machine B first, then bring the cache and its metadata in line.
 /// Does not own the <see cref="AgentClient"/>.
 /// </summary>
 public sealed class FileCache
@@ -28,12 +30,14 @@ public sealed class FileCache
     private readonly ConcurrentDictionary<string, FsVersion> _versions = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, Lazy<Task<CachedItem>>> _downloads = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, Lazy<Task<FsEntry>>> _pendingStats = new(StringComparer.OrdinalIgnoreCase);
+    private Lazy<Task<bool>> _writable;
 
     public FileCache(AgentClient client, string cacheRoot, TimeSpan metadataTtl)
     {
         _client = client;
         _cacheRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(cacheRoot));
         _ttlMilliseconds = (long)metadataTtl.TotalMilliseconds;
+        _writable = new Lazy<Task<bool>>(() => client.IsWritableAsync(CancellationToken.None));
         Directory.CreateDirectory(_cacheRoot);
         DeleteLeftoverTempFiles();
     }
@@ -47,6 +51,22 @@ public sealed class FileCache
     }
 
     public string CacheRoot => _cacheRoot;
+
+    /// <summary>True when the share accepts writes; asked once per Broker (Hello answer).</summary>
+    public async Task<bool> IsWritableAsync(CancellationToken cancellationToken)
+    {
+        Lazy<Task<bool>> current = _writable;
+        try
+        {
+            return await current.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception) when (current.Value.IsFaulted)
+        {
+            // A failed first connect must not stick: ask again next time.
+            Interlocked.CompareExchange(ref _writable, new Lazy<Task<bool>>(() => _client.IsWritableAsync(CancellationToken.None)), current);
+            throw;
+        }
+    }
 
     public async Task<FsEntry> StatAsync(string remotePath, CancellationToken cancellationToken)
     {
@@ -142,8 +162,9 @@ public sealed class FileCache
                 if (File.Exists(localPath))
                     File.SetAttributes(localPath, FileAttributes.Normal);
                 File.Move(temp, localPath, overwrite: true);
-                // The share is read only, so the cached copy is too, whatever machine B says.
-                File.SetAttributes(localPath, Mirrored(entry.Attributes) | FileAttributes.ReadOnly);
+                // A read-only share makes the cached copy read only, whatever machine B says.
+                bool writable = await IsWritableAsync(cancellationToken).ConfigureAwait(false);
+                File.SetAttributes(localPath, Mirrored(entry.Attributes) | (writable ? 0 : FileAttributes.ReadOnly));
                 _versions[remotePath] = entry.Version;
                 return new CachedItem(entry, localPath);
             }
@@ -158,6 +179,164 @@ public sealed class FileCache
             {
                 TryDelete(temp);
             }
+        }
+    }
+
+    /// <summary>Forgets stat and list results of <paramref name="remotePath"/> and of its parent's listing.</summary>
+    public void Invalidate(string remotePath)
+    {
+        _stats.TryRemove(remotePath, out _);
+        _lists.TryRemove(remotePath, out _);
+        _lists.TryRemove(GetParent(remotePath), out _);
+    }
+
+    /// <summary>Forgets everything cached at or below <paramref name="remotePath"/> (a directory renamed or deleted).</summary>
+    private void InvalidateTree(string remotePath)
+    {
+        Invalidate(remotePath);
+        _versions.TryRemove(remotePath, out _);
+        string prefix = remotePath + "/";
+        foreach (string key in _stats.Keys.Concat(_lists.Keys).Concat(_versions.Keys))
+        {
+            if (key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                _stats.TryRemove(key, out _);
+                _lists.TryRemove(key, out _);
+                _versions.TryRemove(key, out _);
+            }
+        }
+    }
+
+    private static string GetParent(string remotePath)
+    {
+        int slash = remotePath.LastIndexOf('/');
+        return slash < 0 ? string.Empty : remotePath[..slash];
+    }
+
+    /// <summary>Records machine B's new metadata of <paramref name="remotePath"/> after a change made through the Broker.</summary>
+    public void Update(string remotePath, FsEntry entry)
+    {
+        Invalidate(remotePath);
+        _stats[remotePath] = new Timed<FsEntry>(entry, Environment.TickCount64 + _ttlMilliseconds);
+    }
+
+    /// <summary>The cache copy now holds exactly <paramref name="version"/> of machine B (after a write-back).</summary>
+    public void MarkContent(string remotePath, FsVersion version) => _versions[remotePath] = version;
+
+    /// <summary>The cache copy no longer matches any version of machine B.</summary>
+    public void ForgetContent(string remotePath) => _versions.TryRemove(remotePath, out _);
+
+    /// <summary>
+    /// Creates <paramref name="remotePath"/> on machine B (collision if it exists there), then clears the cache name so
+    /// the hook's real NtCreateFile creates the cache copy itself, under an existing parent folder.
+    /// </summary>
+    public async Task<CachedItem> CreateAsync(string remotePath, bool isDirectory, uint attributes, CancellationToken cancellationToken)
+    {
+        FsEntry entry = await _client.CreateAsync(remotePath, isDirectory, attributes, cancellationToken).ConfigureAwait(false);
+        string localPath = GetLocalPath(remotePath);
+        RemoveLocal(localPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
+        _versions.TryRemove(remotePath, out _);
+        Update(remotePath, entry);
+        return new CachedItem(entry, localPath);
+    }
+
+    /// <summary>
+    /// An existing remote file is opened to be overwritten: no download (the open truncates it), only a cache file with
+    /// machine B's attributes so the real open behaves as on machine B (hidden/system/read-only checks).
+    /// </summary>
+    public CachedItem PrepareOverwrite(string remotePath, FsEntry entry)
+    {
+        string localPath = GetLocalPath(remotePath);
+        if (!File.Exists(localPath))
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
+            RemoveLocal(localPath);
+            File.WriteAllBytes(localPath, []);
+            ApplyMetadata(localPath, entry);
+            File.SetAttributes(localPath, Mirrored(entry.Attributes) is var a && a != 0 ? a : FileAttributes.Normal);
+            _versions.TryRemove(remotePath, out _);
+        }
+        return new CachedItem(entry, localPath);
+    }
+
+    public async Task<FsEntry> SetInfoAsync(FsSetInfoRequest request, CancellationToken cancellationToken)
+    {
+        FsEntry entry = await _client.SetInfoAsync(request, cancellationToken).ConfigureAwait(false);
+        Update(request.Path, entry);
+        return entry;
+    }
+
+    /// <summary>
+    /// Renames on machine B, then prepares the cache for the hook, which renames its open cache handle: the new cache
+    /// folder exists and a stale cache file at the new name is gone.
+    /// </summary>
+    public async Task<CachedItem> RenameAsync(string remotePath, string newRemotePath, bool replaceIfExists, CancellationToken cancellationToken)
+    {
+        FsEntry entry = await _client.RenameAsync(remotePath, newRemotePath, replaceIfExists, cancellationToken).ConfigureAwait(false);
+        bool hadVersion = _versions.TryRemove(remotePath, out FsVersion version);
+        InvalidateTree(remotePath);
+        InvalidateTree(newRemotePath);
+        string newLocalPath = GetLocalPath(newRemotePath);
+        Directory.CreateDirectory(Path.GetDirectoryName(newLocalPath)!);
+        if (!GetLocalPath(remotePath).Equals(newLocalPath, StringComparison.OrdinalIgnoreCase))
+            RemoveLocal(newLocalPath);
+        if (hadVersion && !entry.IsDirectory)
+            _versions[newRemotePath] = version;
+        Update(newRemotePath, entry);
+        return new CachedItem(entry, newLocalPath);
+    }
+
+    /// <summary>Deletes on machine B, then drops the cache copy (best effort: the hook deletes an open one through its handle).</summary>
+    public async Task DeleteAsync(string remotePath, CancellationToken cancellationToken)
+    {
+        await _client.DeleteAsync(remotePath, cancellationToken).ConfigureAwait(false);
+        InvalidateTree(remotePath);
+        string localPath = GetLocalPath(remotePath);
+        if (Directory.Exists(localPath))
+        {
+            // Machine B's directory was empty: leftovers in the placeholder are stale cache copies. The placeholder
+            // itself may be held open by the caller, which deletes it.
+            foreach (string child in Directory.EnumerateFileSystemEntries(localPath))
+                RemoveLocal(child);
+            TryDeleteDirectory(localPath);
+        }
+        else
+        {
+            RemoveLocal(localPath);
+        }
+    }
+
+    /// <summary>Removes a stale cache file or folder tree; in-use entries stay.</summary>
+    private static void RemoveLocal(string localPath)
+    {
+        if (Directory.Exists(localPath))
+        {
+            foreach (string child in Directory.EnumerateFileSystemEntries(localPath))
+                RemoveLocal(child);
+            TryDeleteDirectory(localPath);
+            return;
+        }
+        if (!File.Exists(localPath))
+            return;
+        try
+        {
+            File.SetAttributes(localPath, FileAttributes.Normal);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+        }
+        TryDelete(localPath);
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try
+        {
+            Directory.Delete(path, recursive: false);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
         }
     }
 

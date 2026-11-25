@@ -40,7 +40,7 @@ public sealed class AgentServerTests
 
     private static (AgentServer Server, ConnectionPool Pool) Start(TempFolder share, string shareName = "src", string requestedShare = "src")
     {
-        var server = new AgentServer([new ReadOnlyShare(shareName, share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0, MaxReadSize = 64 * 1024 });
+        var server = new AgentServer([new AgentShare(shareName, share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0, MaxReadSize = 64 * 1024 });
         server.Start();
         var hello = new HelloRequest { ProtocolVersion = ProtocolInfo.Version, ClientName = "test", ShareName = requestedShare };
         var pool = new ConnectionPool(new TcpConnectionFactory("127.0.0.1", server.Port, new TransportOptions()), hello, new TransportOptions());
@@ -53,7 +53,7 @@ public sealed class AgentServerTests
         using var share = new TempFolder("agent");
         share.WriteFile("big.bin", new byte[1024 * 1024]);
         var options = new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0, SendTimeout = TimeSpan.FromMilliseconds(500) };
-        await using var server = new AgentServer([new ReadOnlyShare("src", share.Path)], options);
+        await using var server = new AgentServer([new AgentShare("src", share.Path)], options);
         server.Start();
 
         using var client = new System.Net.Sockets.TcpClient { ReceiveBufferSize = 4096 };
@@ -78,7 +78,7 @@ public sealed class AgentServerTests
     public async Task ClientsThatDisconnectAtOnce_LeaveNoSessionBehind()
     {
         using var share = new TempFolder("agent");
-        await using var server = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
+        await using var server = new AgentServer([new AgentShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
         server.Start();
         for (int i = 0; i < 200; i++)
         {

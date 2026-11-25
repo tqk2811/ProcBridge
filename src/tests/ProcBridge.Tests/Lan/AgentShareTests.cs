@@ -6,7 +6,7 @@ using ProcBridge.Protocol.Models;
 namespace ProcBridge.Tests.Lan;
 
 [TestClass]
-public sealed class ReadOnlyShareTests
+public sealed class AgentShareTests
 {
     [TestMethod]
     [DataRow("NUL")]
@@ -27,7 +27,7 @@ public sealed class ReadOnlyShareTests
     public void DosDeviceNames_AreRejected(string path)
     {
         using var folder = new TempFolder("share");
-        var share = new ReadOnlyShare("src", folder.Path);
+        var share = new AgentShare("src", folder.Path);
         var e = Assert.ThrowsExactly<ProtocolStatusException>(() => share.ResolvePath(path));
         Assert.AreEqual(NtStatus.ObjectNameInvalid, e.Status);
     }
@@ -39,7 +39,7 @@ public sealed class ReadOnlyShareTests
         folder.WriteFile(@"sub\a.txt", "hello"u8.ToArray());
         string path = System.IO.Path.Combine(folder.Path, "sub", "a.txt");
         File.SetLastWriteTimeUtc(path, new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Utc));
-        var share = new ReadOnlyShare("src", folder.Path);
+        var share = new AgentShare("src", folder.Path);
 
         FsEntry stat = share.Stat("sub/a.txt");
         FsEntry listed = share.List("sub", 0, 0).Entries.Single();
@@ -61,7 +61,7 @@ public sealed class ReadOnlyShareTests
         string[] names = Enumerable.Range(0, 200).Select(i => i.ToString("D3") + new string('x', 150)).ToArray();
         foreach (string name in names)
             folder.WriteFile(name, [1]);
-        var share = new ReadOnlyShare("src", folder.Path);
+        var share = new AgentShare("src", folder.Path);
 
         const int Budget = 8 * 1024;
         var seen = new List<string>();
@@ -92,7 +92,7 @@ public sealed class ReadOnlyShareTests
     public void NamesThatOnlyResembleDevices_AreAccepted(string path)
     {
         using var folder = new TempFolder("share");
-        var share = new ReadOnlyShare("src", folder.Path);
+        var share = new AgentShare("src", folder.Path);
         Assert.AreEqual(share.RootPath + "\\" + path, share.ResolvePath(path));
     }
 }

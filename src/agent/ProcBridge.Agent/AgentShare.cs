@@ -8,11 +8,11 @@ using ProcBridge.Protocol.Models;
 namespace ProcBridge.Agent;
 
 /// <summary>
-/// One folder on machine B served read only. Every request path is share relative and is checked so it can
+/// One folder on machine B, read only unless created writable (M3, see AgentShare.Write.cs). Every request path is share relative and is checked so it can
 /// never leave the folder: no "..", no drive or stream syntax, and links/junctions inside the share must point
 /// back inside it (plan 4.3).
 /// </summary>
-public sealed class ReadOnlyShare
+public sealed partial class AgentShare
 {
     private const int DefaultListPage = 1024;
     private const uint FileTypeDisk = 1;
@@ -46,8 +46,9 @@ public sealed class ReadOnlyShare
 
     private readonly string[] _allowedRoots;
 
-    public ReadOnlyShare(string name, string rootPath)
+    public AgentShare(string name, string rootPath, bool writable = false)
     {
+        IsWritable = writable;
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         Name = name;
         RootPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootPath));
@@ -62,6 +63,9 @@ public sealed class ReadOnlyShare
     }
 
     public string Name { get; }
+
+    /// <summary>True when machine A may create, write, rename and delete inside the share; off by default.</summary>
+    public bool IsWritable { get; }
 
     /// <summary>Full local path of the share root, without trailing separator.</summary>
     public string RootPath { get; }
@@ -166,6 +170,7 @@ public sealed class ReadOnlyShare
 
         // Sorted so paging by index is stable between pages.
         FileSystemInfo[] all = directory.EnumerateFileSystemInfos("*", ListOptions)
+            .Where(x => !IsStagingName(x.Name))
             .OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
             .ToArray();
         int start = Math.Clamp(startIndex, 0, all.Length);

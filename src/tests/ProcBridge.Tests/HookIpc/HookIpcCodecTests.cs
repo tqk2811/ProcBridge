@@ -104,7 +104,7 @@ public sealed class HookIpcCodecTests
         // header(16) + u16 + u16 + u16 len + 2 chars
         Assert.AreEqual(16 + 2 + 2 + 2 + 4, size);
         CollectionAssert.AreEqual(
-            new byte[] { 26, 0, 0, 0, 1, 0, 2, 0, 4, 3, 2, 1, 0, 0, 0, 0, 0x0B, 0x0A, 0, 0, 2, 0, (byte)'a', 0, (byte)'b', 0 },
+            new byte[] { 26, 0, 0, 0, 2, 0, 2, 0, 4, 3, 2, 1, 0, 0, 0, 0, 0x0B, 0x0A, 0, 0, 2, 0, (byte)'a', 0, (byte)'b', 0 },
             buffer[..size]);
 
         size = HookIpcCodec.Encode(buffer, 0, new HookStatReply { Info = SampleInfo });

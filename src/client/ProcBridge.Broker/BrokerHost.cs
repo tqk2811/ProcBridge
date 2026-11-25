@@ -12,10 +12,11 @@ namespace ProcBridge.Broker;
 [SupportedOSPlatform("windows")]
 public sealed class BrokerHost : IAsyncDisposable
 {
-    private BrokerHost(AgentClient client, FileCache cache, HookIpcServer pipe)
+    private BrokerHost(AgentClient client, FileCache cache, WriteBackQueue writeBack, HookIpcServer pipe)
     {
         Client = client;
         Cache = cache;
+        WriteBack = writeBack;
         Pipe = pipe;
     }
 
@@ -23,20 +24,27 @@ public sealed class BrokerHost : IAsyncDisposable
 
     public FileCache Cache { get; }
 
+    /// <summary>Write-back of changed cache copies and its persistent queue (M3).</summary>
+    public WriteBackQueue WriteBack { get; }
+
     public HookIpcServer Pipe { get; }
 
     public static BrokerHost Start(BrokerOptions options)
     {
         var client = new AgentClient(new TcpConnectionFactory(options.AgentHost, options.AgentPort, options.Transport), options.ShareName, options.Transport);
         var cache = new FileCache(client, options.GetCacheRoot(), options.MetadataTtl);
-        var pipe = new HookIpcServer(HookIpcProtocol.GetPipeName(options.SessionId), new HookRequestHandler(cache, options.Mappings));
+        var writeBack = new WriteBackQueue(client, cache, options.GetWriteQueueRoot(), options.GetWriteTarget(), options.ConflictPolicy, options.WriteRetryDelay);
+        var handler = new HookRequestHandler(cache, options.Mappings, writeBack, options.WriteThrough);
+        var pipe = new HookIpcServer(HookIpcProtocol.GetPipeName(options.SessionId), handler);
         pipe.Start();
-        return new BrokerHost(client, cache, pipe);
+        writeBack.StartRecovery();
+        return new BrokerHost(client, cache, writeBack, pipe);
     }
 
     public async ValueTask DisposeAsync()
     {
         await Pipe.DisposeAsync().ConfigureAwait(false);
+        await WriteBack.DisposeAsync().ConfigureAwait(false);
         await Client.DisposeAsync().ConfigureAwait(false);
     }
 }

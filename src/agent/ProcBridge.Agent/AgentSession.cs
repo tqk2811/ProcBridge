@@ -17,12 +17,12 @@ internal sealed class AgentSession
 {
     private readonly IFrameChannel _channel;
     private readonly TcpClient _client;
-    private readonly IReadOnlyDictionary<string, ReadOnlyShare> _shares;
+    private readonly IReadOnlyDictionary<string, AgentShare> _shares;
     private readonly AgentOptions _options;
     private readonly SemaphoreSlim _concurrency;
-    private ReadOnlyShare? _share;
+    private AgentShare? _share;
 
-    public AgentSession(IFrameChannel channel, TcpClient client, IReadOnlyDictionary<string, ReadOnlyShare> shares, AgentOptions options)
+    public AgentSession(IFrameChannel channel, TcpClient client, IReadOnlyDictionary<string, AgentShare> shares, AgentOptions options)
     {
         _channel = channel;
         _client = client;
@@ -85,6 +85,7 @@ internal sealed class AgentSession
                 ServerName = _options.ServerName,
                 MaxFrameSize = _options.MaxFrameSize,
                 MaxReadSize = _options.MaxReadSize,
+                Writable = _share.IsWritable,
             };
             await SendAsync(FrameKind.Response, hello, ProtocolSerializer.Serialize(response), default).ConfigureAwait(false);
             return true;
@@ -119,6 +120,45 @@ internal sealed class AgentSession
                 case MessageType.FsRead:
                     await HandleReadAsync(request).ConfigureAwait(false);
                     break;
+                case MessageType.FsCreate:
+                {
+                    FsCreateRequest create = ProtocolSerializer.Deserialize<FsCreateRequest>(request.Header);
+                    await SendStatAsync(request, _share!.Create(create.Path, create.IsDirectory, create.Attributes)).ConfigureAwait(false);
+                    break;
+                }
+                case MessageType.FsWrite:
+                {
+                    FsWriteRequest write = ProtocolSerializer.Deserialize<FsWriteRequest>(request.Header);
+                    int count = _share!.WriteBlock(write.Path, write.UploadId, write.Offset, request.Payload.Span);
+                    await SendAsync(FrameKind.Response, request, ProtocolSerializer.Serialize(new FsWriteResponse { Count = count }), default).ConfigureAwait(false);
+                    break;
+                }
+                case MessageType.FsCommit:
+                {
+                    FsCommitRequest commit = ProtocolSerializer.Deserialize<FsCommitRequest>(request.Header);
+                    FsCommitResponse response = _share!.Commit(commit.Path, commit.UploadId, commit.Size, commit.ExpectedVersion, commit.LastWriteTime, commit.Policy);
+                    await SendAsync(FrameKind.Response, request, ProtocolSerializer.Serialize(response), default).ConfigureAwait(false);
+                    break;
+                }
+                case MessageType.FsSetInfo:
+                {
+                    FsSetInfoRequest set = ProtocolSerializer.Deserialize<FsSetInfoRequest>(request.Header);
+                    await SendStatAsync(request, _share!.SetInfo(set.Path, set.Attributes, set.CreationTime, set.LastAccessTime, set.LastWriteTime, set.EndOfFile)).ConfigureAwait(false);
+                    break;
+                }
+                case MessageType.FsRename:
+                {
+                    FsRenameRequest rename = ProtocolSerializer.Deserialize<FsRenameRequest>(request.Header);
+                    await SendStatAsync(request, _share!.Rename(rename.Path, rename.NewPath, rename.ReplaceIfExists)).ConfigureAwait(false);
+                    break;
+                }
+                case MessageType.FsDelete:
+                {
+                    FsDeleteRequest delete = ProtocolSerializer.Deserialize<FsDeleteRequest>(request.Header);
+                    var response = new FsDeleteResponse { Deleted = _share!.Delete(delete.Path) };
+                    await SendAsync(FrameKind.Response, request, ProtocolSerializer.Serialize(response), default).ConfigureAwait(false);
+                    break;
+                }
                 default:
                     throw new ProtocolStatusException(NtStatus.NotImplemented, $"Message {request.MessageType} is not supported.");
             }
@@ -158,6 +198,9 @@ internal sealed class AgentSession
             ArrayPool<byte>.Shared.Return(buffer);
         }
     }
+
+    private Task SendStatAsync(Frame request, FsEntry entry)
+        => SendAsync(FrameKind.Response, request, ProtocolSerializer.Serialize(new FsStatResponse { Entry = entry }), default);
 
     private Task SendErrorAsync(Frame request, Exception exception)
     {

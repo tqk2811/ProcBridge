@@ -13,6 +13,9 @@ namespace ProcBridge.Broker;
 /// <summary>
 /// Answers one Hook IPC request: maps (mapping index, relative path) to a share path and asks the
 /// <see cref="FileCache"/>. Every failure becomes the NTSTATUS the hooked call should return.
+/// On a writable share (M3) a missing name is created on machine B before the hook creates the cache copy, opens that
+/// may change content get a write token for the <see cref="WriteBackQueue"/>, and rename, delete and attribute changes
+/// go to machine B synchronously (plan 4.5).
 /// </summary>
 public sealed class HookRequestHandler
 {
@@ -21,22 +24,35 @@ public sealed class HookRequestHandler
         0x0040 /* FILE_DELETE_CHILD */ | 0x0100 /* FILE_WRITE_ATTRIBUTES */ | 0x00010000 /* DELETE */ |
         0x00040000 /* WRITE_DAC */ | 0x00080000 /* WRITE_OWNER */ | 0x02000000 /* MAXIMUM_ALLOWED */ |
         0x10000000 /* GENERIC_ALL */ | 0x40000000 /* GENERIC_WRITE */;
+    /// <summary>Access that can change the content of a file: such opens get a write token.</summary>
+    private const uint ContentWriteMask =
+        0x0002 /* FILE_WRITE_DATA */ | 0x0004 /* FILE_APPEND_DATA */ | 0x02000000 /* MAXIMUM_ALLOWED */ |
+        0x10000000 /* GENERIC_ALL */ | 0x40000000 /* GENERIC_WRITE */;
+    private const uint FileSupersede = 0;
     private const uint FileOpen = 1;
     private const uint FileCreate = 2;
     private const uint FileOpenIf = 3;
+    private const uint FileOverwrite = 4;
     private const uint FileOverwriteIf = 5;
+    private const uint FileDirectoryFile = 0x00000001;
     private const uint FileDeleteOnClose = 0x00001000;
     private const long AllocationUnit = 4096;
 
     private readonly FileCache _cache;
     private readonly IReadOnlyList<VirtualMapping> _mappings;
+    private readonly WriteBackQueue? _writeBack;
+    private readonly bool _writeThrough;
 
-    public HookRequestHandler(FileCache cache, IReadOnlyList<VirtualMapping> mappings)
+    /// <param name="writeBack">Write-back queue; null serves the share read only whatever the Agent allows (tests).</param>
+    /// <param name="writeThrough">Tell hooks to flush after every write (<see cref="Models.BrokerOptions.WriteThrough"/>).</param>
+    public HookRequestHandler(FileCache cache, IReadOnlyList<VirtualMapping> mappings, WriteBackQueue? writeBack = null, bool writeThrough = false)
     {
         if (mappings.Count > ushort.MaxValue)
             throw new ArgumentException("Too many mappings.", nameof(mappings));
         _cache = cache;
         _mappings = mappings;
+        _writeBack = writeBack;
+        _writeThrough = writeThrough;
     }
 
     /// <summary>Handles <paramref name="request"/> and writes the reply into <paramref name="reply"/>; returns its size.</summary>
@@ -81,7 +97,11 @@ public sealed class HookRequestHandler
         {
             case HookIpcMessageType.Hello:
                 Read(request, HookHelloRequest.Read);
-                return new HookHelloReply { VirtualRoots = _mappings.Select(x => x.VirtualRoot).ToArray() };
+                return new HookHelloReply
+                {
+                    VirtualRoots = _mappings.Select(x => x.VirtualRoot).ToArray(),
+                    Flags = _writeThrough ? HookIpcProtocol.HelloFlagWriteThrough : (ushort)0,
+                };
 
             case HookIpcMessageType.Stat:
             {
@@ -94,6 +114,8 @@ public sealed class HookRequestHandler
             {
                 HookResolveRequest resolve = Read(request, HookResolveRequest.Read);
                 string remotePath = ToRemotePath(resolve.MappingIndex, resolve.RelativePath);
+                if (_writeBack is not null && await _cache.IsWritableAsync(cancellationToken).ConfigureAwait(false))
+                    return await ResolveWritableAsync(resolve, remotePath, cancellationToken).ConfigureAwait(false);
                 bool mayCreate = resolve.CreateDisposition is FileCreate or FileOpenIf or FileOverwriteIf;
                 if ((resolve.DesiredAccess & WriteAccessMask) != 0
                     || (resolve.CreateOptions & FileDeleteOnClose) != 0
@@ -134,9 +156,142 @@ public sealed class HookRequestHandler
                 return BuildListPage(entries, (int)Math.Min(list.StartIndex, int.MaxValue));
             }
 
+            case HookIpcMessageType.Close:
+            {
+                HookTokenRequest close = Read(request, (ref HookIpcReader r) => HookTokenRequest.Read(ref r, type));
+                if (_writeBack is not null)
+                    await _writeBack.CloseAsync(close.WriteToken, cancellationToken).ConfigureAwait(false);
+                return new HookEmptyReply { Type = type };
+            }
+
+            case HookIpcMessageType.Flush:
+            {
+                HookTokenRequest flush = Read(request, (ref HookIpcReader r) => HookTokenRequest.Read(ref r, type));
+                if (_writeBack is not null)
+                    await _writeBack.FlushAsync(flush.WriteToken, cancellationToken).ConfigureAwait(false);
+                return new HookEmptyReply { Type = type };
+            }
+
+            case HookIpcMessageType.SetInfo:
+            {
+                HookSetInfoRequest set = Read(request, HookSetInfoRequest.Read);
+                string remotePath = ToRemotePath(set.MappingIndex, set.RelativePath);
+                await RequireWritableAsync(cancellationToken).ConfigureAwait(false);
+                var change = new FsSetInfoRequest
+                {
+                    Path = remotePath,
+                    Attributes = set.Fields.HasFlag(HookSetInfoFields.Attributes) ? set.Attributes : null,
+                    CreationTime = set.Fields.HasFlag(HookSetInfoFields.CreationTime) ? set.CreationTime : null,
+                    LastAccessTime = set.Fields.HasFlag(HookSetInfoFields.LastAccessTime) ? set.LastAccessTime : null,
+                    LastWriteTime = set.Fields.HasFlag(HookSetInfoFields.LastWriteTime) ? set.LastWriteTime : null,
+                    EndOfFile = set.Fields.HasFlag(HookSetInfoFields.EndOfFile) ? set.EndOfFile : null,
+                };
+                FsEntry entry = await _cache.SetInfoAsync(change, cancellationToken).ConfigureAwait(false);
+                _writeBack!.InfoChanged(remotePath, entry);
+                return new HookStatReply { Info = ToFileInfo(entry), Type = type };
+            }
+
+            case HookIpcMessageType.Rename:
+            {
+                HookRenameRequest rename = Read(request, HookRenameRequest.Read);
+                string remotePath = ToRemotePath(rename.MappingIndex, rename.RelativePath);
+                string newRemotePath = ToRemotePath(rename.NewMappingIndex, rename.NewRelativePath);
+                await RequireWritableAsync(cancellationToken).ConfigureAwait(false);
+                if (remotePath.Length == 0 || newRemotePath.Length == 0)
+                    throw new ProtocolStatusException(NtStatus.AccessDenied, "The share root cannot be renamed.");
+                bool replace = (rename.Flags & HookRenameRequest.FlagReplaceIfExists) != 0;
+                CachedItem item = await _cache.RenameAsync(remotePath, newRemotePath, replace, cancellationToken).ConfigureAwait(false);
+                _writeBack!.Renamed(remotePath, newRemotePath);
+                return new HookRenameReply { Info = ToFileInfo(item.Entry), NewCachePath = item.LocalPath };
+            }
+
+            case HookIpcMessageType.Delete:
+            {
+                HookDeleteRequest delete = Read(request, HookDeleteRequest.Read);
+                string remotePath = ToRemotePath(delete.MappingIndex, delete.RelativePath);
+                await RequireWritableAsync(cancellationToken).ConfigureAwait(false);
+                _writeBack!.Deleted(remotePath);
+                await _cache.DeleteAsync(remotePath, cancellationToken).ConfigureAwait(false);
+                return new HookEmptyReply { Type = type };
+            }
+
             default:
                 throw new ProtocolStatusException(NtStatus.NotImplemented, $"IPC message {type} is not supported.");
         }
+    }
+
+    private async Task RequireWritableAsync(CancellationToken cancellationToken)
+    {
+        if (_writeBack is null || !await _cache.IsWritableAsync(cancellationToken).ConfigureAwait(false))
+            throw new ProtocolStatusException(NtStatus.MediaWriteProtected, "Share is read only.");
+    }
+
+    /// <summary>
+    /// NtCreateFile semantics on a writable share. Missing names are created on machine B first (collision and missing
+    /// folder errors come from there); the cache name is then left free for the hook's real call to create. Existing
+    /// files opened to be overwritten are not downloaded. Opens that may change content get a write token.
+    /// </summary>
+    private async Task<IHookIpcMessage> ResolveWritableAsync(HookResolveRequest resolve, string remotePath, CancellationToken cancellationToken)
+    {
+        bool mayChange = (resolve.DesiredAccess & WriteAccessMask) != 0 || (resolve.CreateOptions & FileDeleteOnClose) != 0
+            || resolve.CreateDisposition is not (FileOpen or FileOpenIf);
+        if (mayChange)
+            _cache.Invalidate(remotePath); // decide on machine B's current state, not a cached stat
+
+        FsEntry? entry;
+        try
+        {
+            entry = await _cache.StatAsync(remotePath, cancellationToken).ConfigureAwait(false);
+        }
+        catch (ProtocolStatusException e) when (e.Status == NtStatus.ObjectNameNotFound)
+        {
+            entry = null;
+        }
+
+        CachedItem item;
+        bool created = false;
+        if (entry is null)
+        {
+            if (resolve.CreateDisposition is FileOpen or FileOverwrite)
+                throw new ProtocolStatusException(NtStatus.ObjectNameNotFound, "Not found.");
+            if (resolve.CreateDisposition > FileOverwriteIf)
+                throw new ProtocolStatusException(NtStatus.InvalidParameter, "Unknown disposition.");
+            bool isDirectory = (resolve.CreateOptions & FileDirectoryFile) != 0;
+            try
+            {
+                item = await _cache.CreateAsync(remotePath, isDirectory, resolve.FileAttributes, cancellationToken).ConfigureAwait(false);
+                created = true;
+            }
+            catch (ProtocolStatusException e) when (e.Status == NtStatus.ObjectNameCollision && resolve.CreateDisposition != FileCreate)
+            {
+                // Created on machine B since the stat: open it instead.
+                return await ResolveWritableAsync(resolve, remotePath, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        else if (resolve.CreateDisposition == FileCreate)
+        {
+            throw new ProtocolStatusException(NtStatus.ObjectNameCollision, "Name already exists.");
+        }
+        else if (!entry.IsDirectory && resolve.CreateDisposition is FileSupersede or FileOverwrite or FileOverwriteIf)
+        {
+            item = _writeBack!.IsBusy(remotePath) ? new CachedItem(entry, _cache.GetLocalPath(remotePath)) : _cache.PrepareOverwrite(remotePath, entry);
+        }
+        else if (!entry.IsDirectory && _writeBack!.IsBusy(remotePath))
+        {
+            // Another writer has the cache copy open with changes machine B does not have yet: keep them.
+            item = new CachedItem(entry, _cache.GetLocalPath(remotePath));
+        }
+        else
+        {
+            item = await _cache.EnsureAsync(remotePath, cancellationToken).ConfigureAwait(false);
+        }
+
+        ulong token = 0;
+        bool contentWrite = (resolve.DesiredAccess & ContentWriteMask) != 0 || resolve.CreateDisposition is FileSupersede or FileOverwrite or FileOverwriteIf
+            || (created && resolve.CreateDisposition != FileOpen);
+        if (contentWrite && !item.Entry.IsDirectory)
+            token = _writeBack!.Open(remotePath, item.Entry.Version);
+        return new HookResolveReply { Info = ToFileInfo(item.Entry), CachePath = item.LocalPath, WriteToken = token };
     }
 
     private static HookListReply BuildListPage(IReadOnlyList<FsEntry> entries, int start)

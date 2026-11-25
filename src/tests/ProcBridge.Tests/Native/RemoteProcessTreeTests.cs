@@ -117,7 +117,7 @@ public sealed class RemoteProcessTreeTests
         // The target exits at once; a detached grandchild writes the marker (outside the virtual folder) two seconds
         // later with the variables it got.
         using HookSandbox sandbox = new("x64");
-        await using var agent = new AgentServer([new ReadOnlyShare("share", sandbox.RealRoot)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
+        await using var agent = new AgentServer([new AgentShare("share", sandbox.RealRoot)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
         agent.Start();
         string marker = Path.Combine(sandbox.BaseDirectory, "marker.txt");
         var options = new LauncherOptions

@@ -11,4 +11,6 @@ public sealed class HelloResponse
     [Key(2)] public required int MaxFrameSize { get; init; }
     /// <summary>Largest <see cref="FsReadRequest.Length"/> the server serves in one response.</summary>
     [Key(3)] public required int MaxReadSize { get; init; }
+    /// <summary>True when the share accepts writes (M3); a read-only share answers them with MediaWriteProtected.</summary>
+    [Key(4)] public bool Writable { get; init; }
 }

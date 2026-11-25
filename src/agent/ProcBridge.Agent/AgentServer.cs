@@ -12,7 +12,7 @@ namespace ProcBridge.Agent;
 /// </summary>
 public sealed class AgentServer : IAsyncDisposable
 {
-    private readonly IReadOnlyDictionary<string, ReadOnlyShare> _shares;
+    private readonly IReadOnlyDictionary<string, AgentShare> _shares;
     private readonly AgentOptions _options;
     private readonly TcpListener _listener;
     private readonly CancellationTokenSource _stopping = new();
@@ -20,7 +20,7 @@ public sealed class AgentServer : IAsyncDisposable
     private Task _acceptLoop = Task.CompletedTask;
     private int _disposed;
 
-    public AgentServer(IEnumerable<ReadOnlyShare> shares, AgentOptions options)
+    public AgentServer(IEnumerable<AgentShare> shares, AgentOptions options)
     {
         _shares = shares.ToDictionary(x => x.Name, StringComparer.OrdinalIgnoreCase);
         _options = options;

@@ -46,7 +46,7 @@ namespace ProcBridge::Hook
         }
 
         NTSTATUS Resolve(int mapping, const UNICODE_STRING& path, PathKind kind, const OpenIntent& intent,
-            UNICODE_STRING& realPath, HookIpc::FileInfo* info) const noexcept override;
+            UNICODE_STRING& realPath, HookIpc::FileInfo* info, uint64_t* writeToken = nullptr) const noexcept override;
         bool IsRemote() const noexcept override { return true; }
         NTSTATUS Stat(int mapping, const UNICODE_STRING& path, PathKind kind, HookIpc::FileInfo& info) const noexcept override;
         NTSTATUS List(int mapping, const UNICODE_STRING& ntPath, uint32_t startIndex, BYTE* buffer,
@@ -57,7 +57,7 @@ namespace ProcBridge::Hook
         UNICODE_STRING RelativePath(int mapping, const UNICODE_STRING& path, PathKind kind) const noexcept;
 
         NTSTATUS ResolveRelative(int mapping, const UNICODE_STRING& relative, const OpenIntent& intent,
-            UNICODE_STRING& realPath, HookIpc::FileInfo* info) const noexcept;
+            UNICODE_STRING& realPath, HookIpc::FileInfo* info, uint64_t* writeToken) const noexcept;
 
         PathMapper _paths;
         // Calls are const for IPathResolver; the pool is internally synchronized.

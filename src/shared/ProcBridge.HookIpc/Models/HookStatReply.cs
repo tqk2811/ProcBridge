@@ -3,12 +3,15 @@ using ProcBridge.HookIpc.Interfaces;
 
 namespace ProcBridge.HookIpc.Models;
 
-/// <summary>Body: <c>FileInfo</c>.</summary>
+/// <summary>Body: <c>FileInfo</c>. Also the reply of SetInfo (machine B's metadata after the change).</summary>
 public sealed class HookStatReply : IHookIpcMessage
 {
     public required HookFileInfo Info { get; init; }
 
-    public HookIpcMessageType MessageType => HookIpcMessageType.Stat;
+    /// <summary>Stat, or SetInfo for the reply of a SetInfo request.</summary>
+    public HookIpcMessageType Type { get; init; } = HookIpcMessageType.Stat;
+
+    public HookIpcMessageType MessageType => Type;
 
     public void WriteBody(ref HookIpcWriter writer) => Info.Write(ref writer);
 

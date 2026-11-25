@@ -35,7 +35,7 @@ internal sealed class RemoteSession : IAsyncDisposable
 
     public static RemoteSession Start(HookSandbox sandbox)
     {
-        var agent = new AgentServer([new ReadOnlyShare("share", sandbox.RealRoot)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
+        var agent = new AgentServer([new AgentShare("share", sandbox.RealRoot)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = 0 });
         agent.Start();
         string sessionId = HookIpcProtocol.NewSessionId();
         BrokerHost broker = BrokerHost.Start(new BrokerOptions

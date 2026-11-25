@@ -5,9 +5,9 @@ namespace ProcBridge.HookIpc.Models;
 
 /// <summary>
 /// Body: <c>u16 MappingIndex | u16 Flags | u32 DesiredAccess | u32 CreateDisposition | u32 CreateOptions |
-/// string RelativePath</c>. Access, disposition and options are the raw NtCreateFile arguments. While shares are
-/// read only (M2) the Broker answers STATUS_MEDIA_WRITE_PROTECTED for write access, delete-on-close or a
-/// disposition that would create or overwrite.
+/// u32 FileAttributes | u32 Reserved | string RelativePath</c>. Access, disposition, options and attributes are the raw
+/// NtCreateFile arguments. A read-only share answers STATUS_MEDIA_WRITE_PROTECTED for write access, delete-on-close
+/// or a disposition that would create or overwrite; a writable share creates missing names on machine B first (M3).
 /// </summary>
 public sealed class HookResolveRequest : IHookIpcMessage
 {
@@ -16,6 +16,7 @@ public sealed class HookResolveRequest : IHookIpcMessage
     public uint DesiredAccess { get; init; }
     public uint CreateDisposition { get; init; }
     public uint CreateOptions { get; init; }
+    public uint FileAttributes { get; init; }
     public required string RelativePath { get; init; }
 
     public HookIpcMessageType MessageType => HookIpcMessageType.Resolve;
@@ -27,7 +28,16 @@ public sealed class HookResolveRequest : IHookIpcMessage
         writer.WriteUInt32(DesiredAccess);
         writer.WriteUInt32(CreateDisposition);
         writer.WriteUInt32(CreateOptions);
+        writer.WriteUInt32(FileAttributes);
+        writer.WriteUInt32(0);
         writer.WriteString(RelativePath);
+    }
+
+    private static uint ReadAttributes(ref HookIpcReader reader)
+    {
+        uint attributes = reader.ReadUInt32();
+        reader.ReadUInt32();
+        return attributes;
     }
 
     public static HookResolveRequest Read(ref HookIpcReader reader) => new()
@@ -37,6 +47,7 @@ public sealed class HookResolveRequest : IHookIpcMessage
         DesiredAccess = reader.ReadUInt32(),
         CreateDisposition = reader.ReadUInt32(),
         CreateOptions = reader.ReadUInt32(),
+        FileAttributes = ReadAttributes(ref reader),
         RelativePath = reader.ReadString(),
     };
 }

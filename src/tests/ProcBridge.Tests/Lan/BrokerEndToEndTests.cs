@@ -26,7 +26,7 @@ public sealed class BrokerEndToEndTests
 
     private static AgentServer StartAgent(TempFolder share, int port = 0)
     {
-        var server = new AgentServer([new ReadOnlyShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = port });
+        var server = new AgentServer([new AgentShare("src", share.Path)], new AgentOptions { BindAddress = IPAddress.Loopback, Port = port });
         server.Start();
         return server;
     }
