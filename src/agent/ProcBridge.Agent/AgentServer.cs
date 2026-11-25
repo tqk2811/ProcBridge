@@ -87,6 +87,15 @@ public sealed class AgentServer : IAsyncDisposable
 
     public int ActiveSessionCount => _connections.Count;
 
+    /// <summary>Snapshot of the open connections (one machine A usually holds several: the pool).</summary>
+    public IReadOnlyList<AgentConnectionInfo> GetConnections()
+        => _connections.Values.Select(x => new AgentConnectionInfo
+        {
+            RemoteAddress = x.RemoteAddress,
+            PeerFingerprint = x.PeerFingerprint,
+            ConnectedAtUtc = x.ConnectedAtUtc,
+        }).ToList();
+
     /// <summary>The watcher of <paramref name="share"/>, created on first use and shared by every connection.</summary>
     internal ShareWatcher GetWatcher(ReadOnlyShare share)
         => _watchers.GetOrAdd(share.Name, _ => new Lazy<ShareWatcher>(() => new ShareWatcher(share.RootPath, _options.WatchBufferSize, _options.WatchBatchDelay))).Value;
@@ -257,6 +266,10 @@ public sealed class AgentServer : IAsyncDisposable
         private volatile string? _peerFingerprint;
 
         public TcpClient Client { get; } = client;
+
+        public string RemoteAddress { get; } = client.Client.RemoteEndPoint?.ToString() ?? string.Empty;
+
+        public DateTime ConnectedAtUtc { get; } = DateTime.UtcNow;
 
         public Task Run { get; set; } = Task.CompletedTask;
 

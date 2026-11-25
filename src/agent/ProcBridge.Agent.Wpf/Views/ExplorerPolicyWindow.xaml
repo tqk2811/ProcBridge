@@ -1,0 +1,79 @@
+<Window x:Class="ProcBridge.Agent.Wpf.Views.ExplorerPolicyWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:vm="clr-namespace:ProcBridge.Agent.Wpf.Core.ViewModels;assembly=ProcBridge.Agent.Wpf.Core"
+        mc:Ignorable="d"
+        d:DataContext="{d:DesignInstance Type=vm:ExplorerPolicyViewModel}"
+        Title="Quyền Remote Explorer" Width="640" Height="620" MinWidth="480" MinHeight="480"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+    <DockPanel Margin="12">
+        <StackPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+            <TextBlock>
+                <Run Text="Máy" />
+                <Run Text="{Binding MachineName, Mode=OneWay}" FontWeight="Bold" />
+            </TextBlock>
+            <TextBox Text="{Binding Fingerprint, Mode=OneWay}" Style="{StaticResource Mono}" />
+        </StackPanel>
+        <StackPanel DockPanel.Dock="Bottom">
+            <TextBlock Text="{Binding ErrorText}" Style="{StaticResource ErrorText}" />
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
+                <Button Content="Lưu" Command="{Binding SaveCommand}" IsDefault="True" />
+                <Button Content="Huỷ" Command="{Binding CancelCommand}" IsCancel="True" Margin="0" />
+            </StackPanel>
+        </StackPanel>
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <DockPanel Grid.Row="0" Margin="0,0,0,4">
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                    <Button Content="Thêm..." Command="{Binding AddFileRootCommand}" />
+                    <Button Content="Xoá" Command="{Binding RemoveFileRootCommand}" Margin="0" />
+                </StackPanel>
+                <TextBlock Text="Gốc file (thư mục máy A được duyệt)" FontWeight="SemiBold" VerticalAlignment="Center" />
+            </DockPanel>
+            <ListBox Grid.Row="1" ItemsSource="{Binding FileRoots}" SelectedItem="{Binding SelectedFileRoot}" MinHeight="60" />
+
+            <DockPanel Grid.Row="2" Margin="0,10,0,4">
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                    <TextBox Text="{Binding NewRegistryRoot, UpdateSourceTrigger=PropertyChanged}" Width="220" Margin="0,0,6,0"
+                             ToolTip="Vd HKCU\Software\Vendor" />
+                    <Button Content="Thêm" Command="{Binding AddRegistryRootCommand}" />
+                    <Button Content="Xoá" Command="{Binding RemoveRegistryRootCommand}" Margin="0" />
+                </StackPanel>
+                <TextBlock Text="Gốc registry" FontWeight="SemiBold" VerticalAlignment="Center" />
+            </DockPanel>
+            <ListBox Grid.Row="3" ItemsSource="{Binding RegistryRoots}" SelectedItem="{Binding SelectedRegistryRoot}" MinHeight="60" />
+
+            <TextBlock Grid.Row="4" Text="Quyền (mặc định tắt hết; dòng đỏ là thao tác thay đổi máy này)" FontWeight="SemiBold" Margin="0,10,0,4" />
+            <ItemsControl Grid.Row="5" ItemsSource="{Binding Permissions}">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <CheckBox IsChecked="{Binding IsChecked}" Margin="0,2">
+                            <CheckBox.Style>
+                                <Style TargetType="CheckBox">
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsWrite}" Value="True">
+                                            <Setter Property="Foreground" Value="Firebrick" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </CheckBox.Style>
+                            <TextBlock>
+                                <Run Text="{Binding Label, Mode=OneWay}" />
+                                <Run Text="{Binding Name, Mode=OneWay, StringFormat=({0})}" Foreground="Gray" />
+                            </TextBlock>
+                        </CheckBox>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </Grid>
+    </DockPanel>
+</Window>

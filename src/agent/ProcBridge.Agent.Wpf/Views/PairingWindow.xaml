@@ -1,0 +1,53 @@
+<Window x:Class="ProcBridge.Agent.Wpf.Views.PairingWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:vm="clr-namespace:ProcBridge.Agent.Wpf.Core.ViewModels;assembly=ProcBridge.Agent.Wpf.Core"
+        mc:Ignorable="d"
+        d:DataContext="{d:DesignInstance Type=vm:PairingViewModel}"
+        Title="Yêu cầu ghép cặp" Width="560" SizeToContent="Height" ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False" Topmost="True">
+    <StackPanel Margin="16">
+        <TextBlock TextWrapping="Wrap">
+            <Run Text="Máy" />
+            <Run Text="{Binding PeerName, Mode=OneWay}" FontWeight="Bold" />
+            <Run Text="(" /><Run Text="{Binding RemoteAddress, Mode=OneWay}" /><Run Text=") xin ghép cặp với máy này." />
+        </TextBlock>
+
+        <TextBlock Text="1. Nhập mã này trên máy A:" Margin="0,12,0,4" />
+        <TextBox Text="{Binding Code, Mode=OneWay}" Style="{StaticResource Mono}" FontSize="32" FontWeight="Bold" HorizontalAlignment="Center" />
+
+        <TextBlock Margin="0,12,0,4" TextWrapping="Wrap">
+            <Run Text="2. So vân tay máy A hiện trên màn hình máy A. Nhóm thứ" />
+            <Run Text="{Binding HiddenGroupNumber, Mode=OneWay}" FontWeight="Bold" />
+            <Run Text="đã được che: chọn đúng nhóm đó như máy A đang hiện." />
+        </TextBlock>
+        <TextBox Text="{Binding MaskedFingerprint, Mode=OneWay}" Style="{StaticResource Mono}" FontSize="15" HorizontalAlignment="Center" />
+        <ItemsControl ItemsSource="{Binding Choices}" HorizontalAlignment="Center" Margin="0,8,0,0"
+                      IsEnabled="{Binding IsFingerprintConfirmed, Converter={StaticResource InverseBool}}">
+            <ItemsControl.ItemsPanel>
+                <ItemsPanelTemplate>
+                    <StackPanel Orientation="Horizontal" />
+                </ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                    <Button Content="{Binding}" FontFamily="Consolas" FontSize="15" MinWidth="80"
+                            Command="{Binding DataContext.ChooseCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                            CommandParameter="{Binding}" />
+                </DataTemplate>
+            </ItemsControl.ItemTemplate>
+        </ItemsControl>
+        <TextBlock Text="Vân tay khớp. Có thể chấp nhận." Foreground="SeaGreen" HorizontalAlignment="Center" Margin="0,8,0,0"
+                   Visibility="{Binding IsFingerprintConfirmed, Converter={StaticResource BoolToVisibility}}" />
+        <TextBlock Text="{Binding ErrorText}" Style="{StaticResource ErrorText}" />
+
+        <TextBlock TextWrapping="Wrap" Foreground="Gray" Margin="0,12,0,0"
+                   Text="Chấp nhận chỉ có hiệu lực khi máy A nhập đúng mã. Máy mới ghép cặp chưa có quyền Explorer nào." />
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button Content="Chấp nhận" Command="{Binding AcceptCommand}" />
+            <Button Content="Từ chối" Command="{Binding RejectCommand}" IsCancel="True" Margin="0" />
+        </StackPanel>
+    </StackPanel>
+</Window>

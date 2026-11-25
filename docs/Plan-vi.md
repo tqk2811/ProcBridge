@@ -128,7 +128,9 @@ src/
 │   ├── ProcBridge.Launcher/              # CLI + về sau là UI
 │   └── ProcBridge.Broker/
 ├── agent/
-│   └── ProcBridge.Agent/                 # chạy dạng Windows Service hoặc console
+│   ├── ProcBridge.Agent/                 # thư viện + console (app người dùng, mục 15 câu 4)
+│   ├── ProcBridge.Agent.Wpf.Core/        # ViewModel + dịch vụ của app WPF (không phụ thuộc WPF, test được)
+│   └── ProcBridge.Agent.Wpf/             # app WPF máy B: host Agent, chia sẻ, ghép cặp, máy đã ghép cặp, hồ sơ quyền Explorer
 ├── relay/
 │   ├── ProcBridge.Relay.Shared/
 │   ├── ProcBridge.Relay.ViewModels/
@@ -140,7 +142,8 @@ src/
 │   ├── ProcBridge.Relay.Api/             # REST quản lý + endpoint WebSocket /tunnel
 │   └── tests/
 └── tests/
-    └── ProcBridge.Tests/                 # test C# (protocol, crypto, broker, agent, end-to-end)
+    ├── ProcBridge.Tests/                 # test C# (protocol, crypto, broker, agent, end-to-end)
+    └── ProcBridge.Agent.Wpf.Tests/       # test ViewModel của app WPF máy B
 ```
 
 ---

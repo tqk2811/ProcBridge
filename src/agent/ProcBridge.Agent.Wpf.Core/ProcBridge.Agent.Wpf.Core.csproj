@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>ProcBridge.Agent.Wpf.Core</RootNamespace>
+    <!-- ViewModels and services of the Agent WPF app, kept free of WPF types so tests run them without a window. -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ProcBridge.Agent\ProcBridge.Agent.csproj" />
+  </ItemGroup>
+</Project>

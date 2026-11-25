@@ -1,0 +1,100 @@
+using System.Net;
+using ProcBridge.Agent.Models;
+using ProcBridge.Agent.Wpf.Core.Interfaces;
+using ProcBridge.Agent.Wpf.Core.Models;
+using ProcBridge.Crypto.Identity;
+using ProcBridge.Transport.Secure;
+
+namespace ProcBridge.Agent.Wpf.Core;
+
+/// <summary>
+/// Runs an <see cref="AgentServer"/> inside the app, always encrypted. The identity key and both stores are borrowed
+/// (the app owns them); the server is created on <see cref="Start"/> and disposed on <see cref="StopAsync"/>.
+/// Called from the UI thread only.
+/// </summary>
+public sealed class AgentHost : IAgentHost
+{
+    private readonly IdentityKey _identity;
+    private readonly PairedMachineStore _pairedMachines;
+    private readonly ExplorerPolicyStore _explorerPolicies;
+    private AgentServer? _server;
+    private bool _allowPairing;
+
+    public AgentHost(IdentityKey identity, PairedMachineStore pairedMachines, ExplorerPolicyStore explorerPolicies)
+    {
+        _identity = identity;
+        _pairedMachines = pairedMachines;
+        _explorerPolicies = explorerPolicies;
+        Fingerprint = KeyFingerprint.Compute(identity.PublicKey);
+    }
+
+    public event Action<IPairingPrompt>? PairingRequested;
+
+    public bool IsRunning => _server is not null;
+
+    public int Port => _server?.Port ?? 0;
+
+    public string Fingerprint { get; }
+
+    public bool AllowPairing
+    {
+        get => _allowPairing;
+        set
+        {
+            _allowPairing = value;
+            if (_server is not null)
+                _server.AllowPairing = value;
+        }
+    }
+
+    public void Start(IReadOnlyList<ShareSettings> shares, IPAddress bindAddress, int port)
+    {
+        if (_server is not null)
+            throw new InvalidOperationException("The Agent is already running.");
+        // Write is not served yet (M3): ShareSettings.AllowWrite is only saved.
+        var readOnlyShares = shares.Select(x => new ReadOnlyShare(x.Name, x.Path)).ToList();
+        var security = new AgentSecurity
+        {
+            Identity = _identity,
+            PairedMachines = _pairedMachines,
+            ExplorerPolicies = _explorerPolicies,
+            AllowPairing = _allowPairing,
+        };
+        var server = new AgentServer(readOnlyShares, new AgentOptions { BindAddress = bindAddress, Port = port }, security);
+        server.PairingRequested += OnPairingRequested;
+        try
+        {
+            server.Start();
+        }
+        catch
+        {
+            server.PairingRequested -= OnPairingRequested;
+            server.DisposeAsync().AsTask().GetAwaiter().GetResult(); // Nothing accepted yet, so this completes at once.
+            throw;
+        }
+        _server = server;
+    }
+
+    public async Task StopAsync()
+    {
+        AgentServer? server = _server;
+        if (server is null)
+            return;
+        _server = null;
+        server.PairingRequested -= OnPairingRequested;
+        await server.DisposeAsync();
+    }
+
+    public IReadOnlyList<AgentConnectionInfo> GetConnections() => _server?.GetConnections() ?? [];
+
+    private void OnPairingRequested(PairingRequest request)
+    {
+        Action<IPairingPrompt>? handler = PairingRequested;
+        if (handler is null)
+            request.Reject();
+        else
+            handler(new PairingRequestPrompt(request));
+    }
+
+    public ValueTask DisposeAsync() => new(StopAsync());
+}

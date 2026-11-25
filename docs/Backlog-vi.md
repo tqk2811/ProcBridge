@@ -199,20 +199,26 @@ một `IConnectionFactory` chèn độ trễ/băng thông giả lập (hoặc ch
 tiền cảnh (chưa có ưu tiên, liên quan mục cửa sổ tín dụng; mặc định đã hạ xuống 2 tải song song cho toàn cache) và
 không bị huỷ khi `BrokerHost` dừng.
 
-## [Vừa] UI ghép cặp phía B phải bắt so vân tay A
+## [Thấp] Đổi tên máy đã ghép cặp
 
-- Kênh người dùng của mã 6 số chỉ đi B→A, nên thông điệp confirm chỉ chứng minh mã khớp ở phía A chứ
-  không chứng minh người gửi là A thật (kẻ đứng giữa cũng có mã của riêng nó).
-- Transport đã có API: `AgentServer.PairingRequested` đưa `PairingRequest` (mã 6 số, `PeerFingerprint`, tên A) và
-  `Accept`/`Reject` ([PairingRequest.cs](../src/shared/ProcBridge.Transport.Secure/PairingRequest.cs)); Agent console
-  hiện mã + vân tay và hỏi y/N. WPF của Agent phải bắt người dùng so `PeerFingerprint` với vân tay A hiển thị,
-  không để nút chấp nhận bấm được ngay. Phương án khác: SAS hai chiều (A cũng hiện mã để nhập ở B).
-- Ghi từ review bảo mật M5 (2026-11-25).
+App WPF của Agent (`ProcBridge.Agent.Wpf`) đã liệt kê máy đã ghép cặp (vân tay, tên, lần cuối) và thu hồi; còn thiếu đổi
+tên máy (`PairedMachineStore` chưa có API đổi tên) và màn hình tương tự phía Launcher (máy A).
 
-## [Vừa] Giao diện quản lý máy đã ghép cặp
+## [Vừa] Cờ "Cho ghi" của thư mục chia sẻ chưa nối vào Agent
 
-Kho `PairedMachineStore` (file bọc DPAPI, liệt kê, thu hồi) đã có cho cả A và B, và CLI tạm (`--list-paired`,
-`--revoke` ở Agent và Launcher). Còn thiếu màn hình WPF liệt kê vân tay, đổi tên máy và thu hồi.
+- App WPF lưu `ShareSettings.AllowWrite` cho từng chia sẻ nhưng `AgentHost` vẫn dựng `ReadOnlyShare`: Agent chưa có
+  đường ghi phía máy chủ (M3). Khi M3 có share ghi được thì truyền cờ này vào, mặc định tắt; Agent console cũng cần
+  cú pháp tương ứng (vd `--share name=path;write`).
+- Ghi 2026-11-25.
+
+## [Thấp] App WPF của Agent: phần còn thiếu
+
+- Chưa có icon riêng (khay hệ thống dùng icon mặc định), chưa tách chuỗi giao diện ra tài nguyên i18n.
+- "Lần cuối" của máy đã ghép cặp chỉ ghi khi app WPF đang chạy và thấy kết nối (Agent console không ghi), độ mịn 1 giây.
+- Hộp thoại ghép cặp mới test ở tầng ViewModel; chưa có test UI thật (UIA) và chưa chạy thử ghép cặp với máy A thật.
+- Agent console và app WPF dùng chung thư mục dữ liệu; chạy cả hai cùng lúc với cùng cổng thì cái sau không nghe được
+  cổng, và hai bên không thấy thay đổi kho của nhau cho tới khi mở lại (kho nạp file một lần lúc khởi tạo).
+- Ghi 2026-11-25.
 
 ## [Thấp] Giới hạn thử ghép cặp
 
@@ -224,11 +230,11 @@ người dùng tại một thời điểm và giới hạn kết nối đang b�
 
 Chưa có cách thay khoá định danh của một máy mà không ghép cặp lại từ đầu.
 
-## [Vừa] Explorer: audit log, UI hồ sơ quyền và tách model dùng chung
+## [Vừa] Explorer: audit log và tách model dùng chung
 
 - Đã nối giao thức (`ExplorerDispatcher` ở Agent, `ExplorerClient` ở A, message `0x11xx`-`0x14xx`) và có
-  `ExplorerPolicyStore` theo vân tay A. Còn thiếu: audit log mới là interface (chưa ghi ra file/Event Log), chưa có
-  UI WPF đặt hồ sơ quyền, và CLI của Agent chưa có lệnh đặt quyền.
+  `ExplorerPolicyStore` theo vân tay A (lưu file DPAPI `explorer-policies.bin`, đặt qua app WPF hoặc `--explorer` của
+  Agent console). Còn thiếu: audit log mới là interface (chưa ghi ra file/Event Log).
 - Model request/response nằm trong `ProcBridge.Agent.Explorer` (thư viện phía B) nên `ProcBridge.Explorer.Client`
   phía A phải tham chiếu cả provider. Nên tách model ra project dùng chung (vd `ProcBridge.Explorer.Contracts`).
 - Hồ sơ quyền đọc lúc mở kết nối: đổi quyền chỉ áp cho kết nối mới (test `ProfileChange_AppliesToNewConnections`).
