@@ -68,6 +68,14 @@ internal sealed class ExplorerDispatcher
                 return Reply(_session.Services.Control(Read<ServiceControlRequest>(request)));
             case MessageType.ExplorerSysInfo:
                 return Reply(_session.SystemInfo.Get(Read<SystemInfoRequest>(request)));
+            case MessageType.ExplorerSysPolicy:
+                Read<ExplorerPolicyRequest>(request);
+                return Reply(new ExplorerPolicyResponse
+                {
+                    Permissions = _session.Policy.Permissions,
+                    FileRoots = _session.Policy.FileRoots,
+                    RegistryRoots = _session.Policy.RegistryRoots,
+                });
             default:
                 throw new ProtocolStatusException(NtStatus.NotImplemented, $"Message {request.MessageType} is not supported.");
         }
