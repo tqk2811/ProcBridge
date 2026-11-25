@@ -23,6 +23,7 @@
 #include "DirectoryNameCache.h"
 #include "DirectoryWatches.h"
 #include "HandleInheritance.h"
+#include "HandleInbox.h"
 #include "HandleTable.h"
 #include "HookGuard.h"
 #include "ParentScans.h"
@@ -50,6 +51,7 @@ namespace ProcBridge::Hook
         RemoteHandleTable g_remoteHandles;
         DirectoryWatches g_watches;
         ParentScans g_parentScans;
+        HandleInbox g_inbox;
 
         using NtQueryDirectoryFileFn = NTSTATUS(NTAPI*)(HANDLE, HANDLE, PIO_APC_ROUTINE, PVOID, PIO_STATUS_BLOCK, PVOID, ULONG,
             ULONG, BOOLEAN, PUNICODE_STRING, BOOLEAN);
@@ -89,6 +91,35 @@ namespace ProcBridge::Hook
         NtUnlockFileFn g_ntUnlockFile = nullptr;
         // M8: set once a ranged cache copy was opened (or inherited); until then reads and mappings skip the table.
         std::atomic<bool> g_anyRange{ false };
+
+        /// Tracks the virtual handles other hooked processes duplicated into this one since the last call (HandleInbox).
+        /// Runs first in every hook that looks a handle up; one shared memory read when nothing arrived.
+        void AdoptIncomingHandles() noexcept
+        {
+            g_inbox.Drain([](const DuplicatedHandle& entry)
+                {
+                    const HANDLE handle = ULongToHandle(entry.Handle);
+                    g_directoryNames.Remove(handle);
+                    g_parentScans.Remove(handle);
+                    if (entry.Mapping < 0 || entry.Mapping >= g_resolver->Count())
+                    {
+                        return;
+                    }
+                    g_handles.Add(handle, entry.Mapping);
+                    if (entry.Remote && g_resolver->IsRemote())
+                    {
+                        g_remoteHandles.Add(handle, entry.Mapping, entry.Path, entry.Info, entry.WriteToken, entry.DeleteOnClose);
+                        if (entry.Info.RangeId != 0)
+                        {
+                            g_anyRange.store(true, std::memory_order_relaxed);
+                        }
+                    }
+                    else
+                    {
+                        g_remoteHandles.Remove(handle);
+                    }
+                });
+        }
 
         /// Calls visitor(const UNICODE_STRING& name) with the NT device name of a real directory handle
         /// (\Device\HarddiskVolume3\dir, no trailing '\'; empty when it cannot be read), cached per handle.
@@ -364,6 +395,10 @@ namespace ProcBridge::Hook
                 if (!CopyName(name))
                 {
                     return;
+                }
+                if (_attributes.RootDirectory != nullptr)
+                {
+                    AdoptIncomingHandles();
                 }
                 if (_attributes.RootDirectory != nullptr && _intent != nullptr && (_intent->CreateOptions & FileOpenByFileIdOption) != 0)
                 {
@@ -819,6 +854,7 @@ namespace ProcBridge::Hook
         NTSTATUS NTAPI HookNtReadFile(HANDLE fileHandle, HANDLE event, PIO_APC_ROUTINE apcRoutine, PVOID apcContext,
             PIO_STATUS_BLOCK ioStatusBlock, PVOID buffer, ULONG length, PLARGE_INTEGER byteOffset, PULONG key)
         {
+            AdoptIncomingHandles();
             if (g_anyRange.load(std::memory_order_relaxed))
             {
                 ReentryGuard guard;
@@ -844,6 +880,7 @@ namespace ProcBridge::Hook
         NTSTATUS NTAPI HookNtReadFileScatter(HANDLE fileHandle, HANDLE event, PIO_APC_ROUTINE apcRoutine, PVOID apcContext,
             PIO_STATUS_BLOCK ioStatusBlock, PVOID segments, ULONG length, PLARGE_INTEGER byteOffset, PULONG key)
         {
+            AdoptIncomingHandles();
             if (g_anyRange.load(std::memory_order_relaxed))
             {
                 ReentryGuard guard;
@@ -881,6 +918,7 @@ namespace ProcBridge::Hook
         NTSTATUS NTAPI HookNtCreateSection(PHANDLE sectionHandle, ACCESS_MASK desiredAccess, POBJECT_ATTRIBUTES objectAttributes,
             PLARGE_INTEGER maximumSize, ULONG pageProtection, ULONG allocationAttributes, HANDLE fileHandle)
         {
+            AdoptIncomingHandles();
             const NTSTATUS fetched = EnsureWholeForSection(fileHandle);
             if (!NT_SUCCESS(fetched))
             {
@@ -893,6 +931,7 @@ namespace ProcBridge::Hook
             PLARGE_INTEGER maximumSize, ULONG pageProtection, ULONG allocationAttributes, HANDLE fileHandle, PVOID extendedParameters,
             ULONG extendedParameterCount)
         {
+            AdoptIncomingHandles();
             const NTSTATUS fetched = EnsureWholeForSection(fileHandle);
             if (!NT_SUCCESS(fetched))
             {
@@ -954,6 +993,7 @@ namespace ProcBridge::Hook
             PIO_STATUS_BLOCK ioStatusBlock, PLARGE_INTEGER byteOffset, PLARGE_INTEGER length, ULONG key, BOOLEAN failImmediately,
             BOOLEAN exclusiveLock)
         {
+            AdoptIncomingHandles();
             ReentryGuard guard;
             uint64_t token = 0;
             LARGE_INTEGER offset{};
@@ -976,6 +1016,7 @@ namespace ProcBridge::Hook
         NTSTATUS NTAPI HookNtUnlockFile(HANDLE fileHandle, PIO_STATUS_BLOCK ioStatusBlock, PLARGE_INTEGER byteOffset, PLARGE_INTEGER length,
             ULONG key)
         {
+            AdoptIncomingHandles();
             ReentryGuard guard;
             uint64_t token = 0;
             LARGE_INTEGER offset{};
@@ -1340,6 +1381,7 @@ namespace ProcBridge::Hook
         NTSTATUS NTAPI HookNtQueryInformationFile(HANDLE fileHandle, PIO_STATUS_BLOCK ioStatusBlock, PVOID information,
             ULONG length, ULONG informationClass)
         {
+            AdoptIncomingHandles();
             const NTSTATUS status = QueryInformationFileNames(fileHandle, ioStatusBlock, information, length, informationClass);
             // STATUS_BUFFER_OVERFLOW (FileAllInformation with a long name) still filled the fixed part.
             if ((NT_SUCCESS(status) || (status == STATUS_BUFFER_OVERFLOW && informationClass == FileAllInformation))
@@ -1709,6 +1751,7 @@ namespace ProcBridge::Hook
         NTSTATUS NTAPI HookNtSetInformationFile(HANDLE fileHandle, PIO_STATUS_BLOCK ioStatusBlock, PVOID information,
             ULONG length, ULONG informationClass)
         {
+            AdoptIncomingHandles();
             constexpr size_t headerBytes = offsetof(FileRenameInfo, FileName);
             ReentryGuard guard;
             if (!guard.IsOutermost() || information == nullptr)
@@ -1781,6 +1824,7 @@ namespace ProcBridge::Hook
 
         NTSTATUS NTAPI HookNtQueryObject(HANDLE handle, ULONG informationClass, PVOID information, ULONG length, PULONG returnLength)
         {
+            AdoptIncomingHandles();
             if (informationClass != ObjectNameInformation)
             {
                 return g_ntQueryObject(handle, informationClass, information, length, returnLength);
@@ -1829,6 +1873,7 @@ namespace ProcBridge::Hook
 
         NTSTATUS NTAPI HookNtClose(HANDLE handle)
         {
+            AdoptIncomingHandles();
             // Remove only after the close succeeded (a failed close keeps the handle open). Once closed,
             // another thread may already have received the same value and a new entry: the generation
             // check leaves that entry alone.
@@ -1876,6 +1921,7 @@ namespace ProcBridge::Hook
         /// A flush of a handle with a write token writes the cache copy back to machine B (plan 4.5).
         NTSTATUS NTAPI HookNtFlushBuffersFile(HANDLE fileHandle, PIO_STATUS_BLOCK ioStatusBlock)
         {
+            AdoptIncomingHandles();
             const NTSTATUS status = g_ntFlushBuffersFile(fileHandle, ioStatusBlock);
             ReentryGuard guard;
             if (NT_SUCCESS(status) && guard.IsOutermost())
@@ -1893,6 +1939,7 @@ namespace ProcBridge::Hook
         NTSTATUS NTAPI HookNtWriteFile(HANDLE fileHandle, HANDLE event, PIO_APC_ROUTINE apcRoutine, PVOID apcContext,
             PIO_STATUS_BLOCK ioStatusBlock, PVOID buffer, ULONG length, PLARGE_INTEGER byteOffset, PULONG key)
         {
+            AdoptIncomingHandles();
             const NTSTATUS status = g_ntWriteFile(fileHandle, event, apcRoutine, apcContext, ioStatusBlock, buffer, length, byteOffset, key);
             ReentryGuard guard;
             if (status == STATUS_SUCCESS && guard.IsOutermost())
@@ -2220,12 +2267,39 @@ namespace ProcBridge::Hook
             return process == GetCurrentProcess() || (process != nullptr && GetProcessId(process) == GetCurrentProcessId());
         }
 
+        /// A virtual handle duplicated into another process: its entry goes to the hook of that process (HandleInbox), which
+        /// tracks the copy at its next handle lookup. The receiver holds the write token too, so the Broker is told to expect
+        /// its close (RetainWrite); with DUPLICATE_CLOSE_SOURCE the sender's reference moves over instead.
+        void SendDuplicate(HANDLE targetProcess, HANDLE copy, int mapping, bool remote, const UNICODE_STRING& path,
+            const HookIpc::FileInfo& info, uint64_t writeToken, bool deleteOnClose, bool closeSource) noexcept
+        {
+            const DWORD processId = GetProcessId(targetProcess); // 0 without query access: the copy stays untracked
+            if (processId == 0)
+            {
+                return;
+            }
+            DuplicatedHandle entry;
+            entry.Handle = HandleToULong(copy);
+            entry.Mapping = mapping;
+            entry.Remote = remote;
+            entry.DeleteOnClose = remote && deleteOnClose;
+            entry.Info = info;
+            entry.Path = path;
+            const bool retained = remote && writeToken != 0 && !closeSource && NT_SUCCESS(g_resolver->RetainWrite(writeToken));
+            entry.WriteToken = remote && (retained || closeSource) ? writeToken : 0;
+            if (!HandleInbox::Send(processId, entry) && retained)
+            {
+                g_resolver->CloseWrite(writeToken);
+            }
+        }
+
         /// DuplicateHandle inside the process: the copy of a virtual handle is virtual too, a copy that
         /// lands on a stale value replaces its entry, and DUPLICATE_CLOSE_SOURCE closes like NtClose.
-        /// Duplicates into other processes are not tracked (backlog).
+        /// Duplicates into other hooked processes go through SendDuplicate.
         NTSTATUS NTAPI HookNtDuplicateObject(HANDLE sourceProcess, HANDLE sourceHandle, HANDLE targetProcess, PHANDLE targetHandle,
             ACCESS_MASK desiredAccess, ULONG handleAttributes, ULONG options)
         {
+            AdoptIncomingHandles();
             ReentryGuard guard;
             if (!guard.IsOutermost())
             {
@@ -2261,8 +2335,8 @@ namespace ProcBridge::Hook
                 g_watches.Closed(sourceHandle);
             }
             HANDLE copy = nullptr;
-            if (targetHandle != nullptr && targetProcess != nullptr && SafeCopy(&copy, targetHandle, sizeof(copy))
-                && IsCurrentProcess(targetProcess))
+            const bool copied = targetHandle != nullptr && targetProcess != nullptr && SafeCopy(&copy, targetHandle, sizeof(copy));
+            if (copied && IsCurrentProcess(targetProcess))
             {
                 g_directoryNames.Remove(copy);
                 g_parentScans.Remove(copy);
@@ -2284,6 +2358,11 @@ namespace ProcBridge::Hook
                     g_remoteHandles.Remove(copy);
                 }
             }
+            else if (copied && mapping >= 0)
+            {
+                SendDuplicate(targetProcess, copy, mapping, remote, remotePath, remoteInfo, remoteToken, remoteDeleteOnClose,
+                    (options & DUPLICATE_CLOSE_SOURCE) != 0);
+            }
             FreeString(remotePath);
             return status;
         }
@@ -2292,6 +2371,7 @@ namespace ProcBridge::Hook
             PIO_STATUS_BLOCK ioStatusBlock, PVOID information, ULONG length, ULONG informationClass, BOOLEAN returnSingleEntry,
             PUNICODE_STRING fileName, BOOLEAN restartScan)
         {
+            AdoptIncomingHandles();
             ReentryGuard guard;
             if (!guard.IsOutermost())
             {
@@ -2316,6 +2396,7 @@ namespace ProcBridge::Hook
             PIO_STATUS_BLOCK ioStatusBlock, PVOID information, ULONG length, ULONG informationClass, ULONG queryFlags,
             PUNICODE_STRING fileName)
         {
+            AdoptIncomingHandles();
             constexpr ULONG RestartScanFlag = 0x1;       // SL_RESTART_SCAN
             constexpr ULONG ReturnSingleEntryFlag = 0x2; // SL_RETURN_SINGLE_ENTRY
             ReentryGuard guard;
@@ -2388,6 +2469,7 @@ namespace ProcBridge::Hook
         NTSTATUS NTAPI HookNtNotifyChangeDirectoryFile(HANDLE fileHandle, HANDLE event, PIO_APC_ROUTINE apcRoutine, PVOID apcContext,
             PIO_STATUS_BLOCK ioStatusBlock, PVOID buffer, ULONG length, ULONG completionFilter, BOOLEAN watchTree)
         {
+            AdoptIncomingHandles();
             constexpr ULONG DirectoryNotifyInformation = 1;
             ReentryGuard guard;
             if (guard.IsOutermost())
@@ -2408,6 +2490,7 @@ namespace ProcBridge::Hook
             PIO_STATUS_BLOCK ioStatusBlock, PVOID buffer, ULONG length, ULONG completionFilter, BOOLEAN watchTree,
             ULONG informationClass)
         {
+            AdoptIncomingHandles();
             ReentryGuard guard;
             if (guard.IsOutermost())
             {
@@ -2623,6 +2706,8 @@ namespace ProcBridge::Hook
     {
         g_resolver = &resolver;
         CollectParentRoots();
+        // Without an inbox, virtual handles duplicated into this process stay untracked (as before): not fatal.
+        g_inbox.Open();
         const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
         if (ntdll == nullptr)
         {

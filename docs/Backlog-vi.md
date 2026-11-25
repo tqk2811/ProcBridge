@@ -25,11 +25,13 @@ Plan 4.3 cho phép thư mục ảo nằm trên ổ không tồn tại. M1 chưa 
 - Mở theo file ID dưới handle ảo qua Broker trả `STATUS_NOT_SUPPORTED`: cần Agent tra file theo ID của máy B.
 - Test tên 8.3 báo Inconclusive khi volume của `%TEMP%` tắt tên 8.3. Ghi 2026-11-26.
 
-## [Vừa] Handle nhân bản sang process khác không được theo dõi
+## [Thấp] Handle nhân bản sang process khác: các ca chưa phủ
 
-M4 theo dõi `NtDuplicateObject` trong cùng process và handle kế thừa khi tạo con. Nhân bản handle ảo sang
-process khác (`DuplicateHandle` với process đích là con, vd truyền handle qua IPC) chưa được chuyển bảng nên
-bên nhận thấy tên thật. Cần bên nhận hỏi Broker theo `(pid nguồn, handle)` ở M2. Ghi 2026-11-25.
+Process có hook nhân bản handle ảo vào process khác có hook thì mục được chuyển qua hộp thư chung (Plan 13.8). Chưa phủ:
+bên nhận tự kéo handle về (`DuplicateHandle(nguồn khác, ..., chính nó)`, bên gửi không chạy hook); handle process đích
+thiếu quyền query (`GetProcessId` lỗi); hộp thư đầy (16 ô chưa đọc) hoặc đường dẫn ảo dài hơn 1024 ký tự; nhân bản kèm
+`DUPLICATE_CLOSE_SOURCE` khi bên gửi còn bản sao khác giữ write token (Broker có thể nhận thừa một `CloseWrite`); process
+khác chiếm trước tên section `Local\ProcBridge-HandleInbox-<pid>`. Ghi 2026-11-26.
 
 ## [Vừa] Inject con: các đường chưa phủ
 
@@ -94,8 +96,8 @@ vào) vẫn có thể dùng tên cũ. Ghi 2026-11-25.
 Khi con kế thừa handle thư mục ảo (chế độ Broker), khối khởi tạo chỉ mang metadata máy B và đường dẫn ảo; con
 dựng lại danh sách từ `List` và bắt đầu từ đầu. Trên hệ thống file thật, cha và con dùng chung file object nên
 chung con trỏ liệt kê. Ca cha đang liệt kê dở rồi giao handle cho con đọc tiếp rất hiếm. Nếu cần: chuyển con trỏ
-(và pattern) qua bản ghi extra, chấp nhận lệch khi hai bên cùng đọc. Handle nhân bản sang process khác
-(`DuplicateHandle` vào process khác) vẫn không mang mục `RemoteHandleTable`. Ghi 2026-11-25.
+(và pattern) qua bản ghi extra, chấp nhận lệch khi hai bên cùng đọc. Handle nhân bản sang process khác cũng bắt đầu lượt
+liệt kê mới. Ghi 2026-11-25.
 
 ## [Vừa] Liệt kê thư mục ảo trên handle bất đồng bộ
 

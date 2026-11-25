@@ -2985,6 +2985,94 @@ namespace
         return 0;
     }
 
+    /// --read-handle: reads a handle value (decimal) from stdin and prints the final path and identity of that handle,
+    /// which the parent duplicated into this process.
+    int ReadHandle()
+    {
+        char text[32] = {};
+        DWORD read = 0;
+        if (!ReadFile(GetStdHandle(STD_INPUT_HANDLE), text, sizeof(text) - 1, &read, nullptr) || read == 0)
+        {
+            WriteLine(L"child: read " + Error(GetLastError()));
+            return 1;
+        }
+        const HANDLE handle = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(std::strtoull(text, nullptr, 10)));
+        WriteLine(L"child: " + FinalPath(handle) + L" " + Identity(handle));
+        return CloseHandle(handle) ? 0 : 1;
+    }
+
+    /// --dup-to-child <file>: opens file without inheritance, starts a child (--read-handle) that inherits nothing but
+    /// its standard handles, duplicates the handle into the child with DuplicateHandle and sends the value through the
+    /// child's stdin (as a process passes a handle over IPC). Prints its own view of the handle, then the child's.
+    int DuplicateToChild(const wchar_t* file)
+    {
+        Handle opened(OpenRead(file));
+        if (!opened.IsValid())
+        {
+            WriteLine(L"open: " + Error(GetLastError()));
+            return 1;
+        }
+        SECURITY_ATTRIBUTES inherit{ sizeof(inherit), nullptr, TRUE };
+        HANDLE readEnd = nullptr;
+        HANDLE writeEnd = nullptr;
+        if (!CreatePipe(&readEnd, &writeEnd, &inherit, 0) || !SetHandleInformation(writeEnd, HANDLE_FLAG_INHERIT, 0))
+        {
+            WriteLine(L"pipe: " + Error(GetLastError()));
+            return 1;
+        }
+        Handle childInput(readEnd);
+        Handle input(writeEnd);
+        AttributeList attributes;
+        HANDLE standard[] = { readEnd, GetStdHandle(STD_OUTPUT_HANDLE), GetStdHandle(STD_ERROR_HANDLE) };
+        std::vector<HANDLE> inherited;
+        for (HANDLE handle : standard)
+        {
+            if (handle != nullptr && handle != INVALID_HANDLE_VALUE && std::find(inherited.begin(), inherited.end(), handle) == inherited.end())
+            {
+                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+                inherited.push_back(handle);
+            }
+        }
+        const std::wstring path = SelfPath();
+        std::wstring commandLine = L"\"" + path + L"\" --read-handle";
+        STARTUPINFOEXW startup{};
+        startup.StartupInfo.cb = sizeof(startup);
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup.StartupInfo.hStdInput = readEnd;
+        startup.StartupInfo.hStdOutput = standard[1];
+        startup.StartupInfo.hStdError = standard[2];
+        if (!attributes.Set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited.data(), inherited.size() * sizeof(HANDLE)))
+        {
+            WriteLine(L"attributes: " + Error(GetLastError()));
+            return 1;
+        }
+        startup.lpAttributeList = attributes.Get();
+        PROCESS_INFORMATION info{};
+        if (!CreateProcessW(path.c_str(), commandLine.data(), nullptr, nullptr, TRUE, EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr,
+            &startup.StartupInfo, &info))
+        {
+            WriteLine(L"create: " + Error(GetLastError()));
+            return 1;
+        }
+        ChildProcess child;
+        child.Process = info.hProcess;
+        child.Thread = info.hThread;
+        childInput.Reset();
+        WriteLine(L"parent: " + FinalPath(opened.Get()) + L" " + Identity(opened.Get()));
+        HANDLE copy = nullptr;
+        if (!DuplicateHandle(GetCurrentProcess(), opened.Get(), child.Process, &copy, 0, FALSE, DUPLICATE_SAME_ACCESS))
+        {
+            WriteLine(L"duplicate: " + Error(GetLastError()));
+            TerminateProcess(child.Process, 1);
+            return 1;
+        }
+        const std::string value = std::to_string(reinterpret_cast<ULONG_PTR>(copy)) + "\n";
+        DWORD written = 0;
+        WriteFile(input.Get(), value.data(), static_cast<DWORD>(value.size()), &written, nullptr);
+        input.Reset();
+        return static_cast<int>(WaitExitCode(child.Process));
+    }
+
     int RunCommand(int argc, wchar_t** argv)
     {
         const std::wstring command = argv[1];
@@ -3067,6 +3155,14 @@ namespace
         if (command == L"--open-by-id" && argc == 4)
         {
             return OpenById(argv[2], argv[3]);
+        }
+        if (command == L"--dup-to-child" && argc == 3)
+        {
+            return DuplicateToChild(argv[2]);
+        }
+        if (command == L"--read-handle" && argc == 2)
+        {
+            return ReadHandle();
         }
         if (command == L"--stdin-id" && argc == 2)
         {

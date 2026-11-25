@@ -865,6 +865,18 @@ Nhận xét:
   để nguyên.
 - Kiểm (`PathSpellingTests.cs`, x64 và Win32): mở bằng `\DosDevices\`, `\GLOBAL??\`; đường dẫn và gốc khai báo bằng tên
   8.3 (thư mục tên dài trong `%TEMP%`); `OpenFileById` dưới thư mục ảo và thư mục thật, và qua Agent. Ba bài đỏ trên Hook cũ.
+- **Handle nhân bản sang process khác** (`DuplicateHandle` với process đích khác, vd cha truyền handle cho con qua pipe):
+  thay cho ý "bên nhận hỏi Broker theo `(pid nguồn, handle)`", không cần Broker nên chạy cả với ánh xạ cục bộ. Mỗi process có
+  hook tạo lúc khởi động một section tên `Local\ProcBridge-HandleInbox-<pid>` (`HandleInbox`, 16 ô). Bên gửi, ngay khi
+  `NtDuplicateObject` thành công và trước khi trả về cho bên gọi (nên trước khi giá trị handle kịp tới bên nhận), ghi vào một
+  ô trống của bên nhận: giá trị handle bên nhận, chỉ số ánh xạ, đường dẫn NT ảo, `FileInfo` của máy B, write token và
+  delete-on-close; rồi tăng số thứ tự của hộp thư. Bên nhận đọc số thứ tự (một lần đọc bộ nhớ) ở đầu mọi hook tra handle
+  (`NtClose`, các hook theo handle, mở tương đối theo `RootDirectory`), có thay đổi thì nhận các ô vào `HandleTable`/
+  `RemoteHandleTable`. Write token: bên gửi gọi `RetainWrite` để Broker chờ thêm một `CloseWrite` của bên nhận; kèm
+  `DUPLICATE_CLOSE_SOURCE` thì phần của bên gửi chuyển sang. Bên nhận không có hook (không có hộp thư), hộp thư đầy hay đường
+  dẫn quá dài thì bản sao không được theo dõi như trước. Kiểm (`HandleDuplicationTests.cs`, x64 và Win32): con chỉ kế thừa
+  handle chuẩn, cha nhân bản handle ảo vào con rồi gửi giá trị qua stdin; con thấy tên ảo, file ID và thời gian giống cha
+  (qua Agent là của máy B, không phải bản cache); đỏ trên Hook cũ.
 
 ---
 
