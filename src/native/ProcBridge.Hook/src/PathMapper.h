@@ -1,5 +1,6 @@
 #pragma once
 #include "NtApi.h"
+#include <ProcBridge/HookIpc.h>
 
 namespace ProcBridge::Hook
 {
@@ -12,6 +13,30 @@ namespace ProcBridge::Hook
         UNICODE_STRING RealVolumeRelative;    // \Cache\real
         UNICODE_STRING VirtualDevicePath;     // \Device\HarddiskVolume3\Work\virtual (empty if unknown)
         UNICODE_STRING RealDevicePath;        // \Device\HarddiskVolume3\Cache\real
+    };
+
+    /// Arguments of the open a path is resolved for (NtCreateFile semantics).
+    struct OpenIntent
+    {
+        ACCESS_MASK DesiredAccess;
+        ULONG CreateDisposition;
+        ULONG CreateOptions;
+    };
+
+    /// How a path given to the resolver is spelled.
+    enum class PathKind
+    {
+        Nt,     // \??\D:\Work\virtual\a.txt, matched by FindMapping
+        Device, // \Device\HarddiskVolume3\Work\virtual\a.txt, matched by FindMappingByDevicePath
+    };
+
+    /// One page of a directory listing: Count x (FileInfo, String Name) as in a HookIpc List reply.
+    struct DirectoryPage
+    {
+        const BYTE* Entries;
+        ULONG Bytes;
+        USHORT Count;
+        bool HasMore;
     };
 
     /// Decides whether an NT path is virtual and where its backing file lives.
@@ -40,6 +65,35 @@ namespace ProcBridge::Hook
 
         /// Like TranslateToReal, for a device path matched by FindMappingByDevicePath.
         virtual bool TranslateDeviceToReal(int mapping, const UNICODE_STRING& devicePath, UNICODE_STRING& realPath) const noexcept = 0;
+
+        /// Makes the backing file of path available for an open with these arguments and builds its NT path
+        /// (freed by the caller with FreeString). Returns the NTSTATUS the hooked call fails with otherwise.
+        /// info (optional) receives machine B's metadata when the resolver has it (left untouched otherwise).
+        /// M1 (local folder): a plain translation.
+        virtual NTSTATUS Resolve(int mapping, const UNICODE_STRING& path, PathKind kind, const OpenIntent& /*intent*/,
+            UNICODE_STRING& realPath, HookIpc::FileInfo* /*info*/) const noexcept
+        {
+            const bool translated = kind == PathKind::Nt ? TranslateToReal(mapping, path, realPath)
+                                                         : TranslateDeviceToReal(mapping, path, realPath);
+            return translated ? STATUS_SUCCESS : STATUS_NO_MEMORY;
+        }
+
+        /// True when metadata and listings come from machine B (Stat/List below), not from the backing folder.
+        virtual bool IsRemote() const noexcept { return false; }
+
+        /// Metadata of path without downloading it. STATUS_NOT_SUPPORTED for a local resolver.
+        virtual NTSTATUS Stat(int /*mapping*/, const UNICODE_STRING& /*path*/, PathKind /*kind*/, HookIpc::FileInfo& /*info*/) const noexcept
+        {
+            return STATUS_NOT_SUPPORTED;
+        }
+
+        /// One page of the listing of the directory ntPath, starting at entry startIndex. The entries live in
+        /// buffer (HookIpc::MaxMessageSize bytes). STATUS_NOT_SUPPORTED for a local resolver.
+        virtual NTSTATUS List(int /*mapping*/, const UNICODE_STRING& /*ntPath*/, uint32_t /*startIndex*/, BYTE* /*buffer*/,
+            DirectoryPage& /*page*/) const noexcept
+        {
+            return STATUS_NOT_SUPPORTED;
+        }
     };
 
     /// Mappings read from the PROCBRIDGE_MAP environment variable:
@@ -62,8 +116,10 @@ namespace ProcBridge::Hook
         int FindMappingByDevicePath(const UNICODE_STRING& devicePath) const noexcept override;
         bool TranslateDeviceToReal(int mapping, const UNICODE_STRING& devicePath, UNICODE_STRING& realPath) const noexcept override;
 
-    private:
+        /// Adds "virtual DOS folder -> real DOS folder"; the Broker resolver passes the cache folder as real.
         DWORD AddMapping(const wchar_t* virtualDos, const wchar_t* realDos) noexcept;
+
+    private:
 
         PathMapping _mappings[MaxMappings] = {};
         int _count = 0;

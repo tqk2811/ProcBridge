@@ -2,6 +2,7 @@
 // DllMain does nothing heavy (plan 4.6). The injector calls the exported ProcBridgeHookInitialize on
 // a remote thread after LoadLibraryW, before the target's main thread is resumed.
 #include "NtApi.h"
+#include "BrokerResolver.h"
 #include "FileHooks.h"
 #include "PathMapper.h"
 #include <MinHook.h>
@@ -12,16 +13,32 @@ namespace
     SRWLOCK g_initLock = SRWLOCK_INIT;
     bool g_initDone = false;
     DWORD g_initResult = ERROR_SUCCESS;
+    // M1 local mapping (PROCBRIDGE_MAP) or M2 Broker session (PROCBRIDGE_SESSION); the session wins.
     ProcBridge::Hook::PathMapper g_mapper;
+    ProcBridge::Hook::BrokerResolver g_broker;
 
     DWORD InitializeOnce() noexcept
     {
-        const DWORD loaded = g_mapper.LoadFromEnvironment();
-        if (loaded != ERROR_SUCCESS)
+        const ProcBridge::Hook::IPathResolver* resolver = nullptr;
+        if (ProcBridge::Hook::BrokerResolver::IsConfigured())
         {
-            return loaded;
+            const DWORD connected = g_broker.Initialize();
+            if (connected != ERROR_SUCCESS)
+            {
+                return connected;
+            }
+            resolver = g_broker.Count() > 0 ? &g_broker : nullptr;
         }
-        if (g_mapper.Count() == 0)
+        else
+        {
+            const DWORD loaded = g_mapper.LoadFromEnvironment();
+            if (loaded != ERROR_SUCCESS)
+            {
+                return loaded;
+            }
+            resolver = g_mapper.Count() > 0 ? &g_mapper : nullptr;
+        }
+        if (resolver == nullptr)
         {
             return ERROR_SUCCESS; // nothing to redirect, stay passive
         }
@@ -30,7 +47,7 @@ namespace
             return ERROR_GEN_FAILURE;
         }
         g_minHookInitialized = true;
-        return ProcBridge::Hook::InstallFileHooks(g_mapper);
+        return ProcBridge::Hook::InstallFileHooks(*resolver);
     }
 }
 

@@ -54,7 +54,7 @@
       <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary Condition="'$(Configuration)' == 'Debug'">MultiThreadedDebug</RuntimeLibrary>
       <RuntimeLibrary Condition="'$(Configuration)' == 'Release'">MultiThreaded</RuntimeLibrary>
-      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..\external\minhook\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..\external\minhook\include;$(MSBuildThisFileDirectory)..\..\shared\ProcBridge.HookIpc\native;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <ClCompile Condition="'$(Configuration)' == 'Release'">
       <Optimization>MaxSpeed</Optimization>
@@ -70,11 +70,14 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="src\dllmain.cpp" />
+    <ClCompile Include="src\BrokerClient.cpp" />
+    <ClCompile Include="src\BrokerResolver.cpp" />
     <ClCompile Include="src\DirectoryNameCache.cpp" />
     <ClCompile Include="src\FileHooks.cpp" />
     <ClCompile Include="src\HandleTable.cpp" />
     <ClCompile Include="src\PathMapper.cpp" />
     <ClCompile Include="src\PathString.cpp" />
+    <ClCompile Include="src\RemoteHandles.cpp" />
     <ClCompile Include="..\external\minhook\src\buffer.c">
       <CompileAs>CompileAsC</CompileAs>
       <WarningLevel>Level3</WarningLevel>
@@ -103,12 +106,16 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\external\minhook\include\MinHook.h" />
+    <ClInclude Include="..\..\shared\ProcBridge.HookIpc\native\ProcBridge\HookIpc.h" />
+    <ClInclude Include="src\BrokerClient.h" />
+    <ClInclude Include="src\BrokerResolver.h" />
     <ClInclude Include="src\DirectoryNameCache.h" />
     <ClInclude Include="src\FileHooks.h" />
     <ClInclude Include="src\HandleTable.h" />
     <ClInclude Include="src\NtApi.h" />
     <ClInclude Include="src\PathMapper.h" />
     <ClInclude Include="src\PathString.h" />
+    <ClInclude Include="src\RemoteHandles.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="ProcBridge.Hook.def" />

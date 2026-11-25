@@ -6,11 +6,14 @@
 // (NtQueryInformationFile name classes, NtQueryObject) for handles recorded in the handle table.
 //
 // Directory listings (NtQueryDirectoryFile[Ex]) return leaf names only, so with a local backing
-// folder they need no rewriting in M1; M2 replaces them with listings built from machine B.
+// folder they need no rewriting in M1. With the Broker (M2) a virtual directory handle is a handle to an
+// empty placeholder folder: its listings are built from machine B (RemoteHandleTable), attributes
+// by path come from Stat, and every open asks the Broker to bring the file into the cache first.
 #include "FileHooks.h"
 #include "DirectoryNameCache.h"
 #include "HandleTable.h"
 #include "PathString.h"
+#include "RemoteHandles.h"
 #include <MinHook.h>
 #include <cstring>
 
@@ -28,6 +31,19 @@ namespace ProcBridge::Hook
         const IPathResolver* g_resolver = nullptr;
         HandleTable g_handles;
         DirectoryNameCache g_directoryNames;
+        RemoteHandleTable g_remoteHandles;
+
+        using NtQueryDirectoryFileFn = NTSTATUS(NTAPI*)(HANDLE, HANDLE, PIO_APC_ROUTINE, PVOID, PIO_STATUS_BLOCK, PVOID, ULONG,
+            ULONG, BOOLEAN, PUNICODE_STRING, BOOLEAN);
+        using NtQueryDirectoryFileExFn = NTSTATUS(NTAPI*)(HANDLE, HANDLE, PIO_APC_ROUTINE, PVOID, PIO_STATUS_BLOCK, PVOID, ULONG,
+            ULONG, ULONG, PUNICODE_STRING);
+        NtQueryDirectoryFileFn g_ntQueryDirectoryFile = nullptr;
+        NtQueryDirectoryFileExFn g_ntQueryDirectoryFileEx = nullptr;
+
+        // NtCreateFile dispositions used to describe opens to the resolver.
+        constexpr ULONG FileOpenDisposition = 1;
+        constexpr ULONG FileCreateDisposition = 2;
+        const OpenIntent ReadAttributesIntent{ FILE_READ_ATTRIBUTES | SYNCHRONIZE, FileOpenDisposition, 0 };
 
         NtCreateFileFn g_ntCreateFile = nullptr;
         NtOpenFileFn g_ntOpenFile = nullptr;
@@ -93,11 +109,13 @@ namespace ProcBridge::Hook
         /// Resolves OBJECT_ATTRIBUTES against the virtual roots and owns the rewritten name.
         /// The caller's structures are read once into a snapshot (SEH-guarded); an unreadable pointer
         /// makes Error() STATUS_ACCESS_VIOLATION, as the kernel would answer.
+        /// intent describes the open the path is resolved for; nullptr only matches (MatchedPath) without
+        /// resolving, for callers that answer from metadata (Stat).
         class RedirectedAttributes final
         {
         public:
-            explicit RedirectedAttributes(POBJECT_ATTRIBUTES source) noexcept
-                : _source(source)
+            RedirectedAttributes(POBJECT_ATTRIBUTES source, const OpenIntent* intent) noexcept
+                : _source(source), _intent(intent)
             {
                 if (source == nullptr)
                 {
@@ -127,6 +145,12 @@ namespace ProcBridge::Hook
                     {
                         ResolveBelowRealDirectory(_attributes.RootDirectory, _nameCopy);
                     }
+                    else if (g_resolver->IsRemote())
+                    {
+                        // The placeholder folder behind the handle may not hold the file yet: resolve the
+                        // full virtual path instead.
+                        ResolveBelowVirtualDirectory(_attributes.RootDirectory, _nameCopy);
+                    }
                 }
                 else
                 {
@@ -136,7 +160,7 @@ namespace ProcBridge::Hook
                         return;
                     }
                     _mapping = mapping;
-                    SetTranslated(g_resolver->TranslateToReal(mapping, _nameCopy, _name));
+                    Translate(_nameCopy, PathKind::Nt);
                 }
                 if (_rewritten)
                 {
@@ -156,6 +180,7 @@ namespace ProcBridge::Hook
                 {
                     HeapFree(GetProcessHeap(), 0, _heapName);
                 }
+                FreeString(_ownedMatch);
             }
 
             RedirectedAttributes(const RedirectedAttributes&) = delete;
@@ -166,6 +191,11 @@ namespace ProcBridge::Hook
             NTSTATUS Error() const noexcept { return _error; }
             int Mapping() const noexcept { return _mapping; }
             POBJECT_ATTRIBUTES Get() noexcept { return _rewritten ? &_attributes : _source; }
+            /// The virtual path that matched (empty when the match came from a virtual file handle).
+            const UNICODE_STRING& MatchedPath() const noexcept { return _matched; }
+            PathKind MatchedKind() const noexcept { return _kind; }
+            /// Machine B's metadata from the resolve (Attributes 0 when the resolver has none).
+            const HookIpc::FileInfo& Info() const noexcept { return _info; }
 
         private:
             /// Copies the caller's name text; short names stay in the inline buffer.
@@ -192,10 +222,50 @@ namespace ProcBridge::Hook
                 return true;
             }
 
-            void SetTranslated(bool translated) noexcept
+            /// Records path (a view that must outlive this object, or _ownedMatch) as the match and, unless
+            /// only matching, resolves it into _name.
+            void Translate(const UNICODE_STRING& path, PathKind kind) noexcept
             {
-                _rewritten = translated;
-                _error = translated ? STATUS_SUCCESS : STATUS_NO_MEMORY;
+                _matched = path;
+                _kind = kind;
+                if (_intent == nullptr)
+                {
+                    return;
+                }
+                const NTSTATUS status = g_resolver->Resolve(_mapping, path, kind, *_intent, _name, &_info);
+                _rewritten = NT_SUCCESS(status);
+                _error = _rewritten ? STATUS_SUCCESS : status;
+            }
+
+            /// RootDirectory is a virtual directory handle of a remote resolver: join its virtual path with
+            /// the relative name. File handles (no recorded path) keep the M1 behaviour.
+            void ResolveBelowVirtualDirectory(HANDLE root, const UNICODE_STRING& relative) noexcept
+            {
+                int mapping = -1;
+                UNICODE_STRING directory{};
+                if (!g_remoteHandles.GetDirectoryPath(root, mapping, directory))
+                {
+                    return;
+                }
+                const size_t joinedBytes = static_cast<size_t>(directory.Length) + sizeof(wchar_t) + relative.Length;
+                if (joinedBytes > MaxUnicodeStringBytes || !AllocateString(_ownedMatch, joinedBytes))
+                {
+                    FreeString(directory);
+                    _error = joinedBytes > MaxUnicodeStringBytes ? STATUS_OBJECT_NAME_INVALID : STATUS_NO_MEMORY;
+                    return;
+                }
+                BYTE* cursor = reinterpret_cast<BYTE*>(_ownedMatch.Buffer);
+                memcpy(cursor, directory.Buffer, directory.Length);
+                _ownedMatch.Length = directory.Length;
+                if (relative.Length > 0)
+                {
+                    *reinterpret_cast<wchar_t*>(cursor + directory.Length) = L'\\';
+                    memcpy(cursor + directory.Length + sizeof(wchar_t), relative.Buffer, relative.Length);
+                    _ownedMatch.Length = static_cast<USHORT>(joinedBytes);
+                }
+                FreeString(directory);
+                _mapping = mapping;
+                Translate(_ownedMatch, PathKind::Nt);
             }
 
             /// RootDirectory is a real directory (typically the current directory handle): join its name
@@ -258,24 +328,58 @@ namespace ProcBridge::Hook
                     joined.Length = static_cast<USHORT>(joinedBytes);
                 }
                 const int mapping = g_resolver->FindMappingByDevicePath(joined);
-                if (mapping >= 0)
+                if (mapping < 0)
                 {
-                    _mapping = mapping;
-                    SetTranslated(g_resolver->TranslateDeviceToReal(mapping, joined, _name));
+                    FreeString(joined);
+                    return;
                 }
-                FreeString(joined);
+                _mapping = mapping;
+                _ownedMatch = joined; // kept as the matched path
+                Translate(_ownedMatch, PathKind::Device);
             }
 
             POBJECT_ATTRIBUTES _source;
+            const OpenIntent* _intent;
             OBJECT_ATTRIBUTES _attributes{};
             UNICODE_STRING _name{};
             UNICODE_STRING _nameCopy{};
+            UNICODE_STRING _matched{};
+            UNICODE_STRING _ownedMatch{};
+            PathKind _kind = PathKind::Nt;
+            HookIpc::FileInfo _info{};
             wchar_t _inlineName[260];
             wchar_t* _heapName = nullptr;
             int _mapping = -1;
             bool _rewritten = false;
             NTSTATUS _error = STATUS_SUCCESS;
         };
+
+        /// Remote resolver: a handle opened through a virtual path reports machine B's metadata, and a directory
+        /// gets its listings from machine B.
+        void TrackRemoteHandle(HANDLE handle, const RedirectedAttributes& redirect) noexcept
+        {
+            const UNICODE_STRING& matched = redirect.MatchedPath();
+            if (!g_resolver->IsRemote() || !redirect.Matched() || matched.Length == 0)
+            {
+                g_remoteHandles.Remove(handle);
+                return;
+            }
+            if (redirect.MatchedKind() == PathKind::Nt)
+            {
+                g_remoteHandles.Add(handle, redirect.Mapping(), matched, redirect.Info());
+                return;
+            }
+            // Device spelling (joined with the current directory): the same path under the NT root.
+            const PathMapping& map = g_resolver->GetMapping(redirect.Mapping());
+            UNICODE_STRING ntPath{};
+            if (ConcatString(ntPath, map.VirtualNt,
+                    reinterpret_cast<const wchar_t*>(reinterpret_cast<const BYTE*>(matched.Buffer) + map.VirtualDevicePath.Length),
+                    static_cast<size_t>(matched.Length) - map.VirtualDevicePath.Length))
+            {
+                g_remoteHandles.Add(handle, redirect.Mapping(), ntPath, redirect.Info());
+                FreeString(ntPath);
+            }
+        }
 
         /// A new handle value may equal a handle that was closed without NtClose (NtDuplicateObject with
         /// DUPLICATE_CLOSE_SOURCE, kernel): replace or drop stale entries.
@@ -295,6 +399,7 @@ namespace ProcBridge::Hook
             {
                 g_handles.Remove(handle);
             }
+            TrackRemoteHandle(handle, redirect);
         }
 
         NTSTATUS NTAPI HookNtCreateFile(PHANDLE fileHandle, ACCESS_MASK desiredAccess, POBJECT_ATTRIBUTES objectAttributes,
@@ -307,7 +412,8 @@ namespace ProcBridge::Hook
                 return g_ntCreateFile(fileHandle, desiredAccess, objectAttributes, ioStatusBlock, allocationSize,
                     fileAttributes, shareAccess, createDisposition, createOptions, eaBuffer, eaLength);
             }
-            RedirectedAttributes redirect(objectAttributes);
+            const OpenIntent intent{ desiredAccess, createDisposition, createOptions };
+            RedirectedAttributes redirect(objectAttributes, &intent);
             if (redirect.Error() != STATUS_SUCCESS)
             {
                 return redirect.Error();
@@ -329,7 +435,8 @@ namespace ProcBridge::Hook
             {
                 return g_ntOpenFile(fileHandle, desiredAccess, objectAttributes, ioStatusBlock, shareAccess, openOptions);
             }
-            RedirectedAttributes redirect(objectAttributes);
+            const OpenIntent intent{ desiredAccess, FileOpenDisposition, openOptions };
+            RedirectedAttributes redirect(objectAttributes, &intent);
             if (redirect.Error() != STATUS_SUCCESS)
             {
                 return redirect.Error();
@@ -342,29 +449,159 @@ namespace ProcBridge::Hook
             return status;
         }
 
-        NTSTATUS QueryAttributes(NtQueryAttributesFileFn original, POBJECT_ATTRIBUTES objectAttributes, PVOID information)
+        /// FILE_NETWORK_OPEN_INFORMATION; its first five fields are FILE_BASIC_INFORMATION.
+        struct NetworkOpenInfo
+        {
+            LARGE_INTEGER CreationTime;
+            LARGE_INTEGER LastAccessTime;
+            LARGE_INTEGER LastWriteTime;
+            LARGE_INTEGER ChangeTime;
+            LARGE_INTEGER AllocationSize;
+            LARGE_INTEGER EndOfFile;
+            ULONG FileAttributes;
+        };
+        constexpr size_t BasicInfoSize = 40;
+        static_assert(sizeof(NetworkOpenInfo) == 56);
+
+        NetworkOpenInfo ToNetworkOpenInfo(const HookIpc::FileInfo& info) noexcept
+        {
+            NetworkOpenInfo result{};
+            result.CreationTime.QuadPart = info.CreationTime;
+            result.LastAccessTime.QuadPart = info.LastAccessTime;
+            result.LastWriteTime.QuadPart = info.LastWriteTime;
+            result.ChangeTime.QuadPart = info.ChangeTime;
+            result.AllocationSize.QuadPart = info.AllocationSize;
+            result.EndOfFile.QuadPart = info.Size;
+            result.FileAttributes = info.Attributes;
+            return result;
+        }
+
+        NTSTATUS QueryAttributes(NtQueryAttributesFileFn original, bool full, POBJECT_ATTRIBUTES objectAttributes, PVOID information)
         {
             ReentryGuard guard;
             if (!guard.IsOutermost())
             {
                 return original(objectAttributes, information);
             }
-            RedirectedAttributes redirect(objectAttributes);
+            const bool remote = g_resolver->IsRemote();
+            RedirectedAttributes redirect(objectAttributes, remote ? nullptr : &ReadAttributesIntent);
             if (redirect.Error() != STATUS_SUCCESS)
             {
                 return redirect.Error();
             }
-            return original(redirect.Get(), information);
+            if (!remote || redirect.MatchedPath().Length == 0)
+            {
+                return original(redirect.Get(), information);
+            }
+            // Machine B's metadata, without downloading the file.
+            HookIpc::FileInfo info{};
+            const NTSTATUS status = g_resolver->Stat(redirect.Mapping(), redirect.MatchedPath(), redirect.MatchedKind(), info);
+            if (!NT_SUCCESS(status))
+            {
+                return status;
+            }
+            const NetworkOpenInfo answer = ToNetworkOpenInfo(info);
+            if (full)
+            {
+                return SafeCopy(information, &answer, sizeof(answer)) ? STATUS_SUCCESS : STATUS_ACCESS_VIOLATION;
+            }
+            BYTE basic[BasicInfoSize] = {};
+            memcpy(basic, &answer, 32);
+            memcpy(basic + 32, &answer.FileAttributes, sizeof(ULONG));
+            return SafeCopy(information, basic, sizeof(basic)) ? STATUS_SUCCESS : STATUS_ACCESS_VIOLATION;
         }
 
         NTSTATUS NTAPI HookNtQueryAttributesFile(POBJECT_ATTRIBUTES objectAttributes, PVOID information)
         {
-            return QueryAttributes(g_ntQueryAttributesFile, objectAttributes, information);
+            return QueryAttributes(g_ntQueryAttributesFile, false, objectAttributes, information);
         }
 
         NTSTATUS NTAPI HookNtQueryFullAttributesFile(POBJECT_ATTRIBUTES objectAttributes, PVOID information)
         {
-            return QueryAttributes(g_ntQueryFullAttributesFile, objectAttributes, information);
+            return QueryAttributes(g_ntQueryFullAttributesFile, true, objectAttributes, information);
+        }
+
+        /// Remote NtQueryInformationByName: metadata classes come from Stat; the others open the cache copy.
+        NTSTATUS QueryRemoteByName(const RedirectedAttributes& match, PIO_STATUS_BLOCK ioStatusBlock, PVOID information,
+            ULONG length, ULONG informationClass)
+        {
+            constexpr ULONG FileBasicInformationClass = 4;
+            constexpr ULONG FileStandardInformationClass = 5;
+            constexpr ULONG FileNetworkOpenInformationClass = 34;
+            constexpr ULONG FileAttributeTagInformationClass = 35;
+            constexpr ULONG FileStatInformationClass = 68;
+            BYTE answer[72] = {};
+            ULONG size = 0;
+            switch (informationClass)
+            {
+            case FileBasicInformationClass: size = BasicInfoSize; break;
+            case FileStandardInformationClass: size = 24; break;
+            case FileNetworkOpenInformationClass: size = sizeof(NetworkOpenInfo); break;
+            case FileAttributeTagInformationClass: size = 8; break;
+            case FileStatInformationClass: size = 72; break;
+            default:
+            {
+                UNICODE_STRING realPath{};
+                const NTSTATUS status = g_resolver->Resolve(match.Mapping(), match.MatchedPath(), match.MatchedKind(),
+                    ReadAttributesIntent, realPath, nullptr);
+                if (!NT_SUCCESS(status))
+                {
+                    return status;
+                }
+                OBJECT_ATTRIBUTES attributes{};
+                InitializeObjectAttributes(&attributes, &realPath, OBJ_CASE_INSENSITIVE, nullptr, nullptr);
+                const NTSTATUS result = g_ntQueryInformationByName(&attributes, ioStatusBlock, information, length, informationClass);
+                FreeString(realPath);
+                return result;
+            }
+            }
+            if (length < size)
+            {
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+            HookIpc::FileInfo info{};
+            const NTSTATUS status = g_resolver->Stat(match.Mapping(), match.MatchedPath(), match.MatchedKind(), info);
+            if (!NT_SUCCESS(status))
+            {
+                return status;
+            }
+            const NetworkOpenInfo open = ToNetworkOpenInfo(info);
+            const bool directory = (info.Attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            const ULONG links = 1;
+            switch (informationClass)
+            {
+            case FileBasicInformationClass:
+                memcpy(answer, &open, 32);
+                memcpy(answer + 32, &open.FileAttributes, sizeof(ULONG));
+                break;
+            case FileStandardInformationClass: // AllocationSize, EndOfFile, NumberOfLinks, DeletePending, Directory
+                memcpy(answer, &open.AllocationSize, 16);
+                memcpy(answer + 16, &links, sizeof(links));
+                answer[21] = directory ? 1 : 0;
+                break;
+            case FileNetworkOpenInformationClass:
+                memcpy(answer, &open, sizeof(open));
+                break;
+            case FileAttributeTagInformationClass:
+                memcpy(answer, &open.FileAttributes, sizeof(ULONG));
+                break;
+            default: // FILE_STAT_INFORMATION
+            {
+                const ACCESS_MASK access = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE; // read-only share
+                memcpy(answer, &info.FileId, 8);
+                memcpy(answer + 8, &open, 32);
+                memcpy(answer + 40, &open.AllocationSize, 16);
+                memcpy(answer + 56, &open.FileAttributes, sizeof(ULONG));
+                memcpy(answer + 64, &links, sizeof(links));
+                memcpy(answer + 68, &access, sizeof(access));
+                break;
+            }
+            }
+            if (!SafeCopy(information, answer, size) || !SafeSetIoStatus(ioStatusBlock, STATUS_SUCCESS, size))
+            {
+                return STATUS_ACCESS_VIOLATION;
+            }
+            return STATUS_SUCCESS;
         }
 
         /// Path-based query without a handle (GetFileInformationByName, newer kernelbase attribute paths).
@@ -376,10 +613,15 @@ namespace ProcBridge::Hook
             {
                 return g_ntQueryInformationByName(objectAttributes, ioStatusBlock, information, length, informationClass);
             }
-            RedirectedAttributes redirect(objectAttributes);
+            const bool remote = g_resolver->IsRemote();
+            RedirectedAttributes redirect(objectAttributes, remote ? nullptr : &ReadAttributesIntent);
             if (redirect.Error() != STATUS_SUCCESS)
             {
                 return redirect.Error();
+            }
+            if (remote && redirect.MatchedPath().Length != 0)
+            {
+                return QueryRemoteByName(redirect, ioStatusBlock, information, length, informationClass);
             }
             return g_ntQueryInformationByName(redirect.Get(), ioStatusBlock, information, length, informationClass);
         }
@@ -391,7 +633,8 @@ namespace ProcBridge::Hook
             {
                 return g_ntDeleteFile(objectAttributes);
             }
-            RedirectedAttributes redirect(objectAttributes);
+            const OpenIntent intent{ DELETE, FileOpenDisposition, 0 };
+            RedirectedAttributes redirect(objectAttributes, &intent);
             if (redirect.Error() != STATUS_SUCCESS)
             {
                 return redirect.Error();
@@ -415,7 +658,77 @@ namespace ProcBridge::Hook
             }
         }
 
+        /// Remote handles: the cache copy has its own times, attributes (read-only), allocation size and file id;
+        /// replace them with machine B's in the metadata classes. The volume (serial, flags) stays the cache's.
+        void PatchRemoteMetadata(HANDLE fileHandle, PVOID information, ULONG length, ULONG informationClass) noexcept
+        {
+            constexpr ULONG FileBasicInformationClass = 4;
+            constexpr ULONG FileStandardInformationClass = 5;
+            constexpr ULONG FileInternalInformationClass = 6;
+            constexpr ULONG FileNetworkOpenInformationClass = 34;
+            constexpr ULONG FileAttributeTagInformationClass = 35;
+            constexpr ULONG FileIdInformationClass = 59;
+            constexpr ULONG FileStatInformationClass = 68;
+            // Field offsets in each class; -1 = not in the class.
+            int times = -1;
+            int attributes = -1;
+            int allocation = -1;
+            int fileId = -1;
+            bool fileId128 = false;
+            switch (informationClass)
+            {
+            case FileBasicInformationClass: times = 0; attributes = 32; break;
+            case FileStandardInformationClass: allocation = 0; break;
+            case FileInternalInformationClass: fileId = 0; break;
+            case FileAllInformation: times = 0; attributes = 32; allocation = 40; fileId = 64; break; // Basic, Standard, Internal
+            case FileNetworkOpenInformationClass: times = 0; allocation = 32; attributes = 48; break;
+            case FileAttributeTagInformationClass: attributes = 0; break;
+            case FileIdInformationClass: fileId = 8; fileId128 = true; break; // after the volume serial number
+            case FileStatInformationClass: fileId = 0; times = 8; allocation = 40; attributes = 56; break;
+            default: return;
+            }
+            HookIpc::FileInfo info{};
+            if (!g_remoteHandles.GetInfo(fileHandle, info))
+            {
+                return;
+            }
+            BYTE* target = static_cast<BYTE*>(information);
+            const auto patch = [&](int offset, const void* value, ULONG bytes) noexcept
+            {
+                if (offset >= 0 && static_cast<ULONG>(offset) + bytes <= length)
+                {
+                    SafeCopy(target + offset, value, bytes);
+                }
+            };
+            const int64_t fileTimes[4] = { info.CreationTime, info.LastAccessTime, info.LastWriteTime, info.ChangeTime };
+            patch(times, fileTimes, sizeof(fileTimes));
+            patch(attributes, &info.Attributes, sizeof(info.Attributes));
+            patch(allocation, &info.AllocationSize, sizeof(info.AllocationSize));
+            if (info.FileId != 0) // unknown on machine B: keep the cache's
+            {
+                const uint64_t id[2] = { info.FileId, 0 };
+                patch(fileId, id, fileId128 ? sizeof(id) : sizeof(id[0]));
+            }
+        }
+
+        NTSTATUS QueryInformationFileNames(HANDLE fileHandle, PIO_STATUS_BLOCK ioStatusBlock, PVOID information,
+            ULONG length, ULONG informationClass);
+
         NTSTATUS NTAPI HookNtQueryInformationFile(HANDLE fileHandle, PIO_STATUS_BLOCK ioStatusBlock, PVOID information,
+            ULONG length, ULONG informationClass)
+        {
+            const NTSTATUS status = QueryInformationFileNames(fileHandle, ioStatusBlock, information, length, informationClass);
+            // STATUS_BUFFER_OVERFLOW (FileAllInformation with a long name) still filled the fixed part.
+            if ((NT_SUCCESS(status) || (status == STATUS_BUFFER_OVERFLOW && informationClass == FileAllInformation))
+                && !g_remoteHandles.IsEmpty())
+            {
+                PatchRemoteMetadata(fileHandle, information, length, informationClass);
+            }
+            return status;
+        }
+
+        /// Name classes of virtual handles report the virtual name; the rest goes to the system.
+        NTSTATUS QueryInformationFileNames(HANDLE fileHandle, PIO_STATUS_BLOCK ioStatusBlock, PVOID information,
             ULONG length, ULONG informationClass)
         {
             ULONG nameOffset = 0;
@@ -507,9 +820,11 @@ namespace ProcBridge::Hook
                 return g_ntSetInformationFile(fileHandle, ioStatusBlock, information, length, informationClass);
             }
             UNICODE_STRING realTarget{};
-            if (!g_resolver->TranslateToReal(mapping, target, realTarget))
+            const OpenIntent intent{ DELETE, FileCreateDisposition, 0 }; // the rename creates the target name
+            const NTSTATUS resolved = g_resolver->Resolve(mapping, target, PathKind::Nt, intent, realTarget, nullptr);
+            if (!NT_SUCCESS(resolved))
             {
-                return STATUS_NO_MEMORY;
+                return resolved;
             }
             const size_t newLength = headerBytes + realTarget.Length;
             HeapBuffer buffer(newLength + sizeof(wchar_t));
@@ -591,8 +906,113 @@ namespace ProcBridge::Hook
                 // A cached directory name is only a cache: a stale entry for a reused value is also
                 // dropped by the next hooked open that returns it.
                 g_directoryNames.Remove(handle);
+                g_remoteHandles.Remove(handle);
             }
             return status;
+        }
+
+        /// NtQueryDirectoryFile[Ex] on a virtual directory of a remote resolver: answered from machine B's
+        /// listing. The answer is complete when the hook returns (no STATUS_PENDING); the event is signalled,
+        /// an APC or completion port is not used (see docs/Backlog-vi.md).
+        NTSTATUS QueryVirtualDirectory(HANDLE fileHandle, HANDLE event, PIO_STATUS_BLOCK ioStatusBlock, PVOID information,
+            ULONG length, ULONG informationClass, bool returnSingleEntry, PUNICODE_STRING fileName, bool restartScan, bool& handled)
+        {
+            handled = false;
+            UNICODE_STRING pattern{};
+            HeapBuffer patternText(fileName != nullptr ? 0x10000 : 1);
+            if (fileName != nullptr)
+            {
+                if (!SafeCopy(&pattern, fileName, sizeof(pattern)))
+                {
+                    handled = true;
+                    return STATUS_ACCESS_VIOLATION;
+                }
+                if (pattern.Length % sizeof(wchar_t) != 0 || (pattern.Length > 0 && pattern.Buffer == nullptr))
+                {
+                    handled = true;
+                    return STATUS_INVALID_PARAMETER;
+                }
+                if (!patternText || !SafeCopy(patternText.Get(), pattern.Buffer, pattern.Length))
+                {
+                    handled = true;
+                    return patternText ? STATUS_ACCESS_VIOLATION : STATUS_NO_MEMORY;
+                }
+                pattern.Buffer = reinterpret_cast<PWSTR>(patternText.Get());
+                pattern.MaximumLength = pattern.Length;
+            }
+            // Directory buffers are small in practice; a huge one is answered in a bounded scratch buffer.
+            constexpr ULONG MaxScratch = 4 * 1024 * 1024;
+            const ULONG scratchBytes = length < MaxScratch ? length : MaxScratch;
+            HeapBuffer scratch(scratchBytes > 0 ? scratchBytes : 1);
+            if (!scratch)
+            {
+                handled = true;
+                return STATUS_NO_MEMORY;
+            }
+            DirectoryQuery query{};
+            query.Output = scratch.Get();
+            query.Length = scratchBytes;
+            query.InformationClass = informationClass;
+            query.ReturnSingleEntry = returnSingleEntry;
+            query.RestartScan = restartScan;
+            query.FileName = fileName != nullptr ? &pattern : nullptr;
+            NTSTATUS status = STATUS_SUCCESS;
+            ULONG written = 0;
+            if (!g_remoteHandles.Query(fileHandle, *g_resolver, query, status, written))
+            {
+                return STATUS_SUCCESS; // not a virtual directory
+            }
+            handled = true;
+            if ((written > 0 && !SafeCopy(information, scratch.Get(), written))
+                || !SafeSetIoStatus(ioStatusBlock, status, NT_SUCCESS(status) || status == STATUS_BUFFER_OVERFLOW ? written : 0))
+            {
+                return STATUS_ACCESS_VIOLATION;
+            }
+            if (event != nullptr)
+            {
+                SetEvent(event);
+            }
+            return status;
+        }
+
+        NTSTATUS NTAPI HookNtQueryDirectoryFile(HANDLE fileHandle, HANDLE event, PIO_APC_ROUTINE apcRoutine, PVOID apcContext,
+            PIO_STATUS_BLOCK ioStatusBlock, PVOID information, ULONG length, ULONG informationClass, BOOLEAN returnSingleEntry,
+            PUNICODE_STRING fileName, BOOLEAN restartScan)
+        {
+            ReentryGuard guard;
+            if (guard.IsOutermost())
+            {
+                bool handled = false;
+                const NTSTATUS status = QueryVirtualDirectory(fileHandle, event, ioStatusBlock, information, length, informationClass,
+                    returnSingleEntry != FALSE, fileName, restartScan != FALSE, handled);
+                if (handled)
+                {
+                    return status;
+                }
+            }
+            return g_ntQueryDirectoryFile(fileHandle, event, apcRoutine, apcContext, ioStatusBlock, information, length,
+                informationClass, returnSingleEntry, fileName, restartScan);
+        }
+
+        NTSTATUS NTAPI HookNtQueryDirectoryFileEx(HANDLE fileHandle, HANDLE event, PIO_APC_ROUTINE apcRoutine, PVOID apcContext,
+            PIO_STATUS_BLOCK ioStatusBlock, PVOID information, ULONG length, ULONG informationClass, ULONG queryFlags,
+            PUNICODE_STRING fileName)
+        {
+            constexpr ULONG RestartScanFlag = 0x1;       // SL_RESTART_SCAN
+            constexpr ULONG ReturnSingleEntryFlag = 0x2; // SL_RETURN_SINGLE_ENTRY
+            ReentryGuard guard;
+            if (guard.IsOutermost())
+            {
+                bool handled = false;
+                const NTSTATUS status = QueryVirtualDirectory(fileHandle, event, ioStatusBlock, information, length, informationClass,
+                    (queryFlags & ReturnSingleEntryFlag) != 0, fileName, (queryFlags & RestartScanFlag) != 0, handled);
+                if (handled)
+                {
+                    return status;
+                }
+            }
+            return g_ntQueryDirectoryFileEx(fileHandle, event, apcRoutine, apcContext, ioStatusBlock, information, length,
+                informationClass, queryFlags, fileName);
         }
 
         struct HookEntry
@@ -624,6 +1044,9 @@ namespace ProcBridge::Hook
             { "NtDeleteFile", reinterpret_cast<void*>(&HookNtDeleteFile), reinterpret_cast<void**>(&g_ntDeleteFile) },
             { "NtQueryInformationByName", reinterpret_cast<void*>(&HookNtQueryInformationByName),
                 reinterpret_cast<void**>(&g_ntQueryInformationByName), true },
+            { "NtQueryDirectoryFile", reinterpret_cast<void*>(&HookNtQueryDirectoryFile), reinterpret_cast<void**>(&g_ntQueryDirectoryFile) },
+            { "NtQueryDirectoryFileEx", reinterpret_cast<void*>(&HookNtQueryDirectoryFileEx),
+                reinterpret_cast<void**>(&g_ntQueryDirectoryFileEx), true },
         };
         for (const HookEntry& hook : hooks)
         {

@@ -40,7 +40,7 @@ public sealed class HookComparisonTests
         Assert.Contains("ReadFile: <ROOT>\\a.txt -> err=3", unhooked.StandardOutput);
     }
 
-    private static void AssertSameLines(string expected, string actual)
+    internal static void AssertSameLines(string expected, string actual)
     {
         string[] expectedLines = expected.Split('\n');
         string[] actualLines = actual.Split('\n');

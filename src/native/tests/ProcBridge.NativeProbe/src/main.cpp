@@ -5,7 +5,8 @@
 // Usage: ProcBridge.NativeProbe.<arch>.exe <root>
 //        ProcBridge.NativeProbe.<arch>.exe --<command> <arguments>   (single checks, see RunCommand)
 // Expected tree under <root> (created by the test): a.txt, sub\b.txt, sub\deep\c.bin, empty\,
-// ro.txt (read-only), unicode file name. Last access times are never printed (they drift).
+// ro.txt (read-only), unicode file name. Last access times are never printed (they drift), nor the times
+// of ".." entries (the parent of a virtual root is not part of the virtual folder).
 #define WIN32_NO_STATUS
 #include <windows.h>
 #undef WIN32_NO_STATUS
@@ -239,6 +240,12 @@ namespace
                 OPEN_EXISTING, (directory ? FILE_FLAG_BACKUP_SEMANTICS : 0) | flags, nullptr);
         }
 
+        /// ".." describes the parent folder, which for the root lies outside the folder under test.
+        static bool IsParentEntry(const wchar_t* name, size_t chars) noexcept
+        {
+            return chars == 2 && name[0] == L'.' && name[1] == L'.';
+        }
+
         std::wstring HashHandle(HANDLE handle) const
         {
             BYTE buffer[16384];
@@ -430,7 +437,7 @@ namespace
                 {
                     entries.push_back(std::wstring(data.cFileName) + L" attr=" + Hex(data.dwFileAttributes) + L" size="
                         + Num((static_cast<long long>(data.nFileSizeHigh) << 32) | data.nFileSizeLow)
-                        + L" written=" + Time(data.ftLastWriteTime));
+                        + (IsParentEntry(data.cFileName, wcslen(data.cFileName)) ? L"" : L" written=" + Time(data.ftLastWriteTime)));
                 } while (FindNextFileW(find, &data));
                 const DWORD endError = GetLastError();
                 FindClose(find);
@@ -463,9 +470,10 @@ namespace
                 auto* entry = reinterpret_cast<const TEntry*>(buffer);
                 while (true)
                 {
+                    const bool parent = IsParentEntry(entry->FileName, entry->FileNameLength / sizeof(wchar_t));
                     entries.push_back(std::wstring(entry->FileName, entry->FileNameLength / sizeof(wchar_t)) + L" attr="
-                        + Hex(entry->FileAttributes) + L" eof=" + Num(entry->EndOfFile.QuadPart) + L" created="
-                        + Time(entry->CreationTime) + L" written=" + Time(entry->LastWriteTime));
+                        + Hex(entry->FileAttributes) + L" eof=" + Num(entry->EndOfFile.QuadPart)
+                        + (parent ? L"" : L" created=" + Time(entry->CreationTime) + L" written=" + Time(entry->LastWriteTime)));
                     if (entry->NextEntryOffset == 0)
                     {
                         break;
@@ -690,9 +698,16 @@ namespace
         {
             // Reserved, never committed: any access faults.
             void* bad = VirtualAlloc(nullptr, 0x10000, MEM_RESERVE, PAGE_NOACCESS);
-            Handle file(CreateFileW(Path(L"a.txt").c_str(), GENERIC_READ | DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            // Read access only: a read-only share (M2) refuses DELETE. The rename check needs DELETE (the access
+            // check comes before the buffer) and the hook reads the buffer whatever the handle, so it uses a
+            // temporary file outside the root.
+            Handle file(CreateFileW(Path(L"a.txt").c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 nullptr, OPEN_EXISTING, 0, nullptr));
-            if (bad == nullptr || !file.IsValid())
+            wchar_t tempFolder[MAX_PATH];
+            GetTempPathW(MAX_PATH, tempFolder);
+            const std::wstring tempPath = std::wstring(tempFolder) + L"ProcBridge.NativeProbe-" + Num(GetCurrentProcessId()) + L".tmp";
+            Handle renamable(CreateFileW(tempPath.c_str(), GENERIC_READ | DELETE, 0, nullptr, CREATE_ALWAYS, FILE_FLAG_DELETE_ON_CLOSE, nullptr));
+            if (bad == nullptr || !file.IsValid() || !renamable.IsValid())
             {
                 Line(L"BadPointers", Error(GetLastError()));
                 return;
@@ -704,7 +719,7 @@ namespace
                 sizeof(buffer), FileNameInformationClass)));
             Line(L"BadPointers.QueryObject.buffer", Status(_ntQueryObject(file.Get(), 1, bad, 4096, nullptr)));
             Line(L"BadPointers.QueryObject.length", Status(_ntQueryObject(file.Get(), 1, buffer, sizeof(buffer), static_cast<PULONG>(bad))));
-            Line(L"BadPointers.Rename.buffer", Status(_ntSetInformationFile(file.Get(), &io, bad, 64, 10)));
+            Line(L"BadPointers.Rename.buffer", Status(_ntSetInformationFile(renamable.Get(), &io, bad, 64, 10)));
 
             HANDLE raw = nullptr;
             Line(L"BadPointers.Open.attributes", Status(_ntOpenFile(&raw, FILE_GENERIC_READ, static_cast<POBJECT_ATTRIBUTES>(bad), &io,

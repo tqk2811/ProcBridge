@@ -5,6 +5,9 @@
 //
 // Usage:
 //   ProcBridge.Spawn.<arch>.exe [--hook <dll>] --map <virtual dir> <real dir> [--map ...] -- <command line>
+//   ProcBridge.Spawn.<arch>.exe [--hook <dll>] --broker <session id> <broker pid> -- <command line>
+// --map (M1) backs virtual folders by local folders; --broker (M2) hands the hook a Broker session, whose
+// pipe must be owned by <broker pid>.
 // Everything after the "--" argument of the raw command line is passed to CreateProcessW verbatim.
 #include <windows.h>
 #include <ProcBridge/Inject.h>
@@ -136,7 +139,8 @@ namespace
     int Usage()
     {
         std::fwprintf(stderr,
-            L"Usage: ProcBridge.Spawn [--hook <dll>] --map <virtual dir> <real dir> [--map ...] -- <command line>\n");
+            L"Usage: ProcBridge.Spawn [--hook <dll>] --map <virtual dir> <real dir> [--map ...] -- <command line>\n"
+            L"       ProcBridge.Spawn [--hook <dll>] --broker <session id> <broker pid> -- <command line>\n");
         return SpawnFailure;
     }
 
@@ -179,6 +183,8 @@ int wmain(int argc, wchar_t** argv)
 {
     std::wstring hookPath;
     std::vector<Mapping> mappings;
+    std::wstring brokerSession;
+    std::wstring brokerProcessId;
     int separatorIndex = 0;
     for (int i = 1; i < argc; ++i)
     {
@@ -197,6 +203,12 @@ int wmain(int argc, wchar_t** argv)
             mappings.push_back({ GetFullPath(argv[i + 1]), GetFullPath(argv[i + 2]) });
             i += 2;
         }
+        else if (arg == L"--broker" && i + 2 < argc)
+        {
+            brokerSession = argv[i + 1];
+            brokerProcessId = argv[i + 2];
+            i += 2;
+        }
         else
         {
             return Usage();
@@ -207,7 +219,8 @@ int wmain(int argc, wchar_t** argv)
     // inside a quoted --map path), so the target's command line keeps its own quoting.
     const std::wstring rawCommandLine = GetCommandLineW();
     size_t commandStart = separatorIndex == 0 ? std::wstring::npos : FindArgumentEnd(rawCommandLine, separatorIndex);
-    if (mappings.empty() || commandStart == std::wstring::npos)
+    // Exactly one configuration channel.
+    if (mappings.empty() == brokerSession.empty() || commandStart == std::wstring::npos)
     {
         return Usage();
     }
@@ -234,8 +247,22 @@ int wmain(int argc, wchar_t** argv)
         hookPath = GetDefaultHookPath();
     }
 
-    // M1 configuration channel: the hook reads PROCBRIDGE_MAP ("virtual*real|virtual*real").
-    // M2 replaces it with the Broker pipe name.
+    // Configuration channels: PROCBRIDGE_MAP ("virtual*real|virtual*real", M1) or the Broker session
+    // (PROCBRIDGE_SESSION + PROCBRIDGE_BROKER_PID, M2). The other one is cleared so an inherited value
+    // cannot take over.
+    if (!brokerSession.empty())
+    {
+        if (!SetEnvironmentVariableW(L"PROCBRIDGE_SESSION", brokerSession.c_str())
+            || !SetEnvironmentVariableW(L"PROCBRIDGE_BROKER_PID", brokerProcessId.c_str())
+            || (!SetEnvironmentVariableW(L"PROCBRIDGE_MAP", nullptr) && GetLastError() != ERROR_ENVVAR_NOT_FOUND))
+        {
+            return Fail(L"cannot set the Broker session variables", GetLastError());
+        }
+    }
+    else if (!SetEnvironmentVariableW(L"PROCBRIDGE_SESSION", nullptr) && GetLastError() != ERROR_ENVVAR_NOT_FOUND)
+    {
+        return Fail(L"cannot clear PROCBRIDGE_SESSION", GetLastError());
+    }
     std::wstring mapValue;
     for (const Mapping& mapping : mappings)
     {
@@ -245,7 +272,7 @@ int wmain(int argc, wchar_t** argv)
         }
         mapValue += mapping.VirtualDir + L'*' + mapping.RealDir;
     }
-    if (!SetEnvironmentVariableW(L"PROCBRIDGE_MAP", mapValue.c_str()))
+    if (!mappings.empty() && !SetEnvironmentVariableW(L"PROCBRIDGE_MAP", mapValue.c_str()))
     {
         return Fail(L"cannot set PROCBRIDGE_MAP", GetLastError());
     }
