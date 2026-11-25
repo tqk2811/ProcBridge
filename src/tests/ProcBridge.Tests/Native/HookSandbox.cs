@@ -16,6 +16,8 @@ internal sealed class HookSandbox : IDisposable
     public static readonly string UnicodeFileName = "t" + (char)0x1EC7 + "p-" + (char)0x00FC + ".txt";
 
     private static readonly TimeSpan _timeout = TimeSpan.FromMinutes(5);
+    // FILE_FLAG_BACKUP_SEMANTICS: needed to open a directory.
+    private const FileOptions BackupSemantics = (FileOptions)0x02000000;
 
     private readonly string _baseDirectory;
     private readonly NativeBinaries _binaries;
@@ -106,6 +108,46 @@ internal sealed class HookSandbox : IDisposable
             binary[i] = (byte)(i * 31 % 251);
         }
         File.WriteAllBytes(Path.Combine(RealRoot, "sub", "deep", "c.bin"), binary);
+        SettleDirectoryTimes();
+    }
+
+    /// <summary>
+    /// NTFS keeps a copy of each child's times in its parent's index and, for a subdirectory, updates that copy
+    /// lazily: after c.bin is created in "deep", enumerating "sub" still shows deep's creation-time write time while
+    /// deep itself has the new one, until a handle on deep (or on a child of it) is opened and closed. Whether the real
+    /// probe's own opens bring the copy up to date before it lists "sub" depends on the machine (CI showed the old copy),
+    /// and the Agent reports a listed subdirectory's own times (<c>AgentShare.ToListedEntry</c>), so the comparison
+    /// tests would flake. Opening and closing every directory makes the copies equal the directories' own times.
+    /// </summary>
+    private void SettleDirectoryTimes()
+    {
+        string[] directories = [RealRoot, .. Directory.EnumerateDirectories(RealRoot, "*", SearchOption.AllDirectories)];
+        for (int attempt = 0; attempt < 10; attempt++)
+        {
+            foreach (string directory in directories)
+            {
+                using var handle = File.OpenHandle(directory, FileMode.Open, FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete, BackupSemantics);
+            }
+            if (FindUnsettledDirectories(RealRoot).Count == 0)
+                return;
+            Thread.Sleep(50);
+        }
+        throw new InvalidOperationException("The sandbox directories' listed times never matched their own: "
+            + string.Join(", ", FindUnsettledDirectories(RealRoot)));
+    }
+
+    /// <summary>Subdirectories under <paramref name="root"/> whose listed write time differs from their own.</summary>
+    public static IReadOnlyList<string> FindUnsettledDirectories(string root)
+    {
+        List<string> unsettled = [];
+        foreach (DirectoryInfo listed in new DirectoryInfo(root).EnumerateDirectories("*", SearchOption.AllDirectories))
+        {
+            DateTime own = Directory.GetLastWriteTimeUtc(listed.FullName);
+            if (listed.LastWriteTimeUtc != own)
+                unsettled.Add($"{Path.GetRelativePath(root, listed.FullName)} listed={listed.LastWriteTimeUtc.ToFileTimeUtc()} own={own.ToFileTimeUtc()}");
+        }
+        return unsettled;
     }
 
     private static ProcessResult RunProcess(string fileName, string arguments, string? workingDirectory,
