@@ -11,6 +11,14 @@
   <Folder Name="/agent/">
     <Project Path="agent/ProcBridge.Agent/ProcBridge.Agent.csproj" />
   </Folder>
+  <Folder Name="/relay/">
+    <Project Path="relay/ProcBridge.Relay.Shared/ProcBridge.Relay.Shared.csproj" />
+    <Project Path="relay/ProcBridge.Relay.ViewModels/ProcBridge.Relay.ViewModels.csproj" />
+    <Project Path="relay/ProcBridge.Relay.Database.Entities/ProcBridge.Relay.Database.Entities.csproj" />
+    <Project Path="relay/ProcBridge.Relay.Database.PostgreSql/ProcBridge.Relay.Database.PostgreSql.csproj" />
+    <Project Path="relay/ProcBridge.Relay.Repositories.Abstractions/ProcBridge.Relay.Repositories.Abstractions.csproj" />
+    <Project Path="relay/ProcBridge.Relay.Repositories/ProcBridge.Relay.Repositories.csproj" />
+  </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/ProcBridge.Tests/ProcBridge.Tests.csproj" />
   </Folder>

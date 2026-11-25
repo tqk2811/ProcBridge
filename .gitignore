@@ -11,3 +11,4 @@ src/native/**/x64/
 src/native/**/Win32/
 *.VC.db
 *.ipch
+src/relay/**/efdesign.*.json
