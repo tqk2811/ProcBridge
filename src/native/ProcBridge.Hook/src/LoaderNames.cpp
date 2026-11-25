@@ -1,4 +1,5 @@
 #include "LoaderNames.h"
+#include "ImageMaterializer.h"
 #include "NtApi.h"
 #include "PathString.h"
 #include <cstring>
@@ -31,6 +32,8 @@ namespace ProcBridge::Hook
 
         using LdrLockLoaderLockFn = NTSTATUS(NTAPI*)(ULONG, PULONG, PVOID*);
         using LdrUnlockLoaderLockFn = NTSTATUS(NTAPI*)(ULONG, PVOID);
+        using LdrAddRefDllFn = NTSTATUS(NTAPI*)(ULONG, PVOID);
+        constexpr ULONG LdrAddRefDllPin = 0x00000001; // LDR_ADDREF_DLL_PIN
 
         UNICODE_STRING View(const std::wstring& text) noexcept
         {
@@ -95,10 +98,43 @@ namespace ProcBridge::Hook
         }
         PEB* peb = NtCurrentTeb()->ProcessEnvironmentBlock;
         auto* data = reinterpret_cast<LoaderData*>(peb->Ldr);
+        // The loader frees a module's name buffers from its own heap when the module is unloaded, and that heap is not
+        // guaranteed to be the process heap the new buffers come from: the DLLs renamed here are pinned first, so they
+        // are never unloaded and their names never freed (the image itself is never unloaded).
+        PVOID dlls[ImageMaterializer::MaxModules]{};
+        size_t dllCount = 0;
+        for (LIST_ENTRY* link = data->InLoadOrderModuleList.Flink; link != &data->InLoadOrderModuleList; link = link->Flink)
+        {
+            const auto* entry = CONTAINING_RECORD(link, LoaderEntry, InLoadOrderLinks);
+            if (entry->DllBase != peb->Reserved3[1] && entry->FullDllName.Buffer != nullptr && dllCount < ImageMaterializer::MaxModules
+                && HasPathPrefix(entry->FullDllName.Buffer, entry->FullDllName.Length, real))
+            {
+                dlls[dllCount++] = entry->DllBase;
+            }
+        }
+        unlockLoader(0, cookie);
+        const auto addRef = reinterpret_cast<LdrAddRefDllFn>(GetProcAddress(ntdll, "LdrAddRefDll"));
+        bool pinned[ImageMaterializer::MaxModules]{};
+        for (size_t i = 0; i < dllCount; ++i)
+        {
+            pinned[i] = addRef != nullptr && NT_SUCCESS(addRef(LdrAddRefDllPin, dlls[i]));
+        }
+        if (!NT_SUCCESS(lockLoader(0, nullptr, &cookie)))
+        {
+            return;
+        }
         for (LIST_ENTRY* link = data->InLoadOrderModuleList.Flink; link != &data->InLoadOrderModuleList; link = link->Flink)
         {
             auto* entry = CONTAINING_RECORD(link, LoaderEntry, InLoadOrderLinks);
-            Rename(entry->FullDllName, &entry->BaseDllName, real, virtualPath);
+            bool renamable = entry->DllBase == peb->Reserved3[1];
+            for (size_t i = 0; i < dllCount && !renamable; ++i)
+            {
+                renamable = pinned[i] && dlls[i] == entry->DllBase;
+            }
+            if (renamable)
+            {
+                Rename(entry->FullDllName, &entry->BaseDllName, real, virtualPath);
+            }
         }
         Rename(peb->ProcessParameters->ImagePathName, nullptr, real, virtualPath);
         unlockLoader(0, cookie);

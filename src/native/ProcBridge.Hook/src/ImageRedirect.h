@@ -26,8 +26,13 @@ namespace ProcBridge::Hook
         ImageRedirect(const ImageRedirect&) = delete;
         ImageRedirect& operator=(const ImageRedirect&) = delete;
 
-        /// STATUS_SUCCESS (also when the image is not virtual) or the status the process creation fails with.
+        /// STATUS_SUCCESS when the image is redirected or needs no redirect. On failure (the image cannot be brought in:
+        /// IPC, network, memory) nothing is redirected and the caller still makes its original call.
         NTSTATUS Prepare() noexcept;
+
+        /// Status to return for the original call that followed a failed Prepare: the Prepare error when the call only
+        /// failed because the virtual path does not exist locally (a more useful error, e.g. a network one), else createStatus.
+        NTSTATUS FinalStatus(NTSTATUS createStatus) const noexcept;
 
         /// The attribute list to give to NtCreateUserProcess.
         PVOID AttributeList() const noexcept { return _attributes != nullptr ? _attributes.get() : _attributeList; }
@@ -45,6 +50,7 @@ namespace ProcBridge::Hook
         PVOID _attributeList;
         PVOID _processParameters;
         bool _redirected = false;
+        NTSTATUS _prepareStatus = STATUS_SUCCESS;
         MaterializedImage _image;
         std::unique_ptr<BYTE[]> _attributes;
         UNICODE_STRING _realImagePath{};      // points into _image.RealDosPath

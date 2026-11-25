@@ -1,6 +1,7 @@
 #include "ImageMaterializer.h"
 #include "PathString.h"
 #include <algorithm>
+#include <cstddef>
 #include <cwctype>
 
 namespace ProcBridge::Hook
@@ -127,24 +128,18 @@ namespace ProcBridge::Hook
                 if (magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
                 {
                     IMAGE_OPTIONAL_HEADER32 optional{};
-                    if (fileHeader.SizeOfOptionalHeader < sizeof(optional) || !Read(optionalOffset, &optional, sizeof(optional)))
+                    if (!ReadOptionalHeader(optionalOffset, fileHeader.SizeOfOptionalHeader, optional))
                     {
                         return false;
                     }
-                    _sizeOfHeaders = optional.SizeOfHeaders;
-                    _importRva = optional.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_IMPORT
-                        ? optional.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress : 0;
                 }
                 else if (magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
                 {
                     IMAGE_OPTIONAL_HEADER64 optional{};
-                    if (fileHeader.SizeOfOptionalHeader < sizeof(optional) || !Read(optionalOffset, &optional, sizeof(optional)))
+                    if (!ReadOptionalHeader(optionalOffset, fileHeader.SizeOfOptionalHeader, optional))
                     {
                         return false;
                     }
-                    _sizeOfHeaders = optional.SizeOfHeaders;
-                    _importRva = optional.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_IMPORT
-                        ? optional.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress : 0;
                 }
                 else
                 {
@@ -153,6 +148,23 @@ namespace ProcBridge::Hook
                 _sections.resize(fileHeader.NumberOfSections);
                 const DWORD sectionBytes = static_cast<DWORD>(_sections.size() * sizeof(IMAGE_SECTION_HEADER));
                 return sectionBytes == 0 || Read(optionalOffset + fileHeader.SizeOfOptionalHeader, _sections.data(), sectionBytes);
+            }
+
+            /// Reads an optional header that may be shorter than the structure (the directories past SizeOfOptionalHeader
+            /// and past NumberOfRvaAndSizes do not exist), and takes the import directory from it.
+            template <typename OptionalHeader>
+            bool ReadOptionalHeader(ULONGLONG offset, WORD declaredBytes, OptionalHeader& optional) noexcept
+            {
+                const DWORD bytes = static_cast<DWORD>(std::min<size_t>(declaredBytes, sizeof(optional)));
+                if (bytes < offsetof(OptionalHeader, DataDirectory) || !Read(offset, &optional, bytes))
+                {
+                    return false;
+                }
+                _sizeOfHeaders = optional.SizeOfHeaders;
+                constexpr size_t importEnd = offsetof(OptionalHeader, DataDirectory) + (IMAGE_DIRECTORY_ENTRY_IMPORT + 1) * sizeof(IMAGE_DATA_DIRECTORY);
+                _importRva = optional.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_IMPORT && bytes >= importEnd
+                    ? optional.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress : 0;
+                return true;
             }
 
             bool RvaToOffset(DWORD rva, ULONGLONG& offset) const noexcept
@@ -193,7 +205,16 @@ namespace ProcBridge::Hook
                 }
                 name.assign(text, text + length);
                 // A name with a path is resolved by the loader as such, not next to the image.
-                return name.find_first_of(L"\\/:") == std::wstring::npos;
+                if (name.find_first_of(L"\\/:") != std::wstring::npos)
+                {
+                    return false;
+                }
+                // Like the loader: a name without an extension is a .dll.
+                if (name.find(L'.') == std::wstring::npos)
+                {
+                    name += L".dll";
+                }
+                return true;
             }
 
             HANDLE _file;
@@ -211,6 +232,10 @@ namespace ProcBridge::Hook
 
     NTSTATUS ImageMaterializer::Bring(int mapping, const std::wstring& virtualNt, std::wstring& realNt) const
     {
+        if (virtualNt.size() * sizeof(wchar_t) > 0xFFFC)
+        {
+            return STATUS_NAME_TOO_LONG;
+        }
         UNICODE_STRING path{};
         path.Buffer = const_cast<wchar_t*>(virtualNt.c_str());
         path.Length = static_cast<USHORT>(virtualNt.size() * sizeof(wchar_t));
@@ -293,6 +318,10 @@ namespace ProcBridge::Hook
                     continue;
                 }
                 const std::wstring virtualDll = virtualDirectoryNt + L'\\' + name;
+                if (virtualDll.size() * sizeof(wchar_t) > 0xFFFC)
+                {
+                    continue;
+                }
                 UNICODE_STRING virtualPath{};
                 virtualPath.Buffer = const_cast<wchar_t*>(virtualDll.c_str());
                 virtualPath.Length = static_cast<USHORT>(virtualDll.size() * sizeof(wchar_t));

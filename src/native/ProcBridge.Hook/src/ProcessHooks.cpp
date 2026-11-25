@@ -383,18 +383,14 @@ namespace ProcBridge::Hook
             const bool callerSuspended = (threadFlags & ThreadCreateFlagsCreateSuspended) != 0;
             // An image in a virtual folder is started from its backing copy (the kernel opens it unhooked).
             ImageRedirect image(*g_resolver, attributeList, processParameters);
-            const NTSTATUS prepared = image.Prepare();
-            if (!NT_SUCCESS(prepared))
-            {
-                return prepared;
-            }
+            image.Prepare(); // on failure the original arguments go through unchanged
             const NTSTATUS status = g_ntCreateUserProcess(processHandle, threadHandle, processDesiredAccess, threadDesiredAccess,
                 processObjectAttributes, threadObjectAttributes, processFlags & ~ProcessCreateFlagsBreakaway,
                 threadFlags | ThreadCreateFlagsCreateSuspended, processParameters, createInfo, image.AttributeList());
             image.Restore();
             if (!NT_SUCCESS(status))
             {
-                return status;
+                return image.FinalStatus(status);
             }
             HANDLE process = nullptr;
             HANDLE thread = nullptr;
