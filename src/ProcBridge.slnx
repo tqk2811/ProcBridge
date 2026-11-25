@@ -1,0 +1,23 @@
+<Solution>
+  <Folder Name="/shared/">
+    <Project Path="shared/ProcBridge.Protocol/ProcBridge.Protocol.csproj" />
+    <Project Path="shared/ProcBridge.Crypto/ProcBridge.Crypto.csproj" />
+    <Project Path="shared/ProcBridge.HookIpc/ProcBridge.HookIpc.csproj" />
+  </Folder>
+  <Folder Name="/client/">
+    <Project Path="client/ProcBridge.Launcher/ProcBridge.Launcher.csproj" />
+    <Project Path="client/ProcBridge.Broker/ProcBridge.Broker.csproj" />
+  </Folder>
+  <Folder Name="/agent/">
+    <Project Path="agent/ProcBridge.Agent/ProcBridge.Agent.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ProcBridge.Tests/ProcBridge.Tests.csproj" />
+  </Folder>
+  <Folder Name="/Solution Items/">
+    <File Path="Directory.Build.props" />
+    <File Path="Directory.Build.targets" />
+    <File Path="Directory.Packages.props" />
+    <File Path="global.json" />
+  </Folder>
+</Solution>

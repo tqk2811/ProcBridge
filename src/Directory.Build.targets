@@ -1,0 +1,8 @@
+<Project>
+  <!-- Release builds must not leak build machine paths / git info. -->
+  <PropertyGroup Condition="'$(MSBuildProjectExtension)' == '.csproj' And $(Configuration.Contains('Release'))">
+    <DebugType>portable</DebugType>
+    <EnableSourceLink>false</EnableSourceLink>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
+</Project>

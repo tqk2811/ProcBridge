@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>ProcBridge.Agent</RootNamespace>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\shared\ProcBridge.Protocol\ProcBridge.Protocol.csproj" />
+    <ProjectReference Include="..\..\shared\ProcBridge.Crypto\ProcBridge.Crypto.csproj" />
+  </ItemGroup>
+</Project>
