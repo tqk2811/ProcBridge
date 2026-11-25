@@ -52,12 +52,13 @@ extern "C" DWORD WINAPI ProcBridgeHookInitialize(LPVOID /*parameter*/)
     return result;
 }
 
-BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved)
+BOOL APIENTRY DllMain(HMODULE /*module*/, DWORD reason, LPVOID reserved)
 {
     switch (reason)
     {
     case DLL_PROCESS_ATTACH:
-        DisableThreadLibraryCalls(module);
+        // No DisableThreadLibraryCalls: the static CRT (/MT) needs thread notifications to free its
+        // per-thread data.
         break;
 
     case DLL_PROCESS_DETACH:
