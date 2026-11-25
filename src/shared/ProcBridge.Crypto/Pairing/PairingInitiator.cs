@@ -9,7 +9,8 @@ namespace ProcBridge.Crypto.Pairing;
 /// Pairing on machine A (Broker): the user types the short code shown on machine B.
 /// <para>
 /// Runs inside a session from a Noise XX handshake that accepted any static key. Messages are
-/// carried by a <see cref="SecureChannel"/> of that session. Flow (commit-then-reveal, so a
+/// carried by <see cref="SecureSession.GetPairingChannel"/>; the session stays
+/// untrusted (no data channels) until <see cref="ConfirmCode"/> succeeds. Flow (commit-then-reveal, so a
 /// man in the middle cannot grind keys to match codes; success chance per attempt is 1e-6):
 /// </para>
 /// <list type="number">
@@ -31,6 +32,8 @@ public sealed class PairingInitiator
     /// <param name="session">Session from the XX pairing handshake (borrowed).</param>
     public PairingInitiator(SecureSession session)
     {
+        if (!session.IsPairing)
+            throw new ArgumentException("Pairing needs a session from NoiseHandshake.CreatePairing.", nameof(session));
         _session = session;
         _transcript = new PairingTranscript(session);
     }
@@ -74,6 +77,7 @@ public sealed class PairingInitiator
             throw new CryptoProtocolException("Pairing code does not match.");
         }
         _state = State.Paired;
+        _session.MarkTrusted();
         return PairingTranscript.Pack(PairingMessageType.Confirm, _transcript.Confirmation(_nonce, _responderNonce));
     }
 

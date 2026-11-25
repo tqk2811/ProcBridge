@@ -27,6 +27,8 @@ public sealed class PairingResponder
     /// <param name="session">Session from the XX pairing handshake (borrowed).</param>
     public PairingResponder(SecureSession session)
     {
+        if (!session.IsPairing)
+            throw new ArgumentException("Pairing needs a session from NoiseHandshake.CreatePairing.", nameof(session));
         _session = session;
         _transcript = new PairingTranscript(session);
     }
@@ -82,6 +84,7 @@ public sealed class PairingResponder
     {
         Expect(State.Confirmed);
         _state = State.Paired;
+        _session.MarkTrusted();
     }
 
     private void Expect(State state)

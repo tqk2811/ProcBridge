@@ -231,7 +231,7 @@ public sealed class NoiseHandshake : IDisposable
         var (i2r, r2i) = TakeSplit();
         try
         {
-            return new SecureSession(IsInitiator, i2r, r2i, _handshakeHash!, _remoteStatic!);
+            return new SecureSession(IsInitiator, i2r, r2i, _handshakeHash!, _remoteStatic!, isPairing: _isPairing);
         }
         finally
         {

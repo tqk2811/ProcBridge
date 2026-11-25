@@ -14,6 +14,12 @@ namespace ProcBridge.Crypto.Sessions;
 /// the first bytes of the new connection); the peer calls <see cref="AcceptChannel"/>. A given
 /// id can be opened or accepted only once per session.
 /// </para>
+/// <para>
+/// Trust: a session from <see cref="NoiseHandshake.CreatePairing"/> starts untrusted (peer key not yet
+/// confirmed by the user). Until pairing completes it can only carry the reserved pairing channel
+/// (<see cref="GetPairingChannel"/>); <see cref="OpenChannel"/> and <see cref="AcceptChannel"/> throw.
+/// A successful <c>PairingInitiator.ConfirmCode</c> / <c>PairingResponder.Accept</c> marks it trusted.
+/// </para>
 /// Thread-safe. Dispose wipes the session keys; channels already created stay usable.
 /// </summary>
 public sealed class SecureSession : IDisposable
@@ -28,10 +34,13 @@ public sealed class SecureSession : IDisposable
     private readonly byte[] _remoteStatic;
     private uint _nextLocalChannelId;
     private bool _disposed;
+    private bool _isTrusted;
 
-    internal SecureSession(bool isInitiator, byte[] initiatorToResponder, byte[] responderToInitiator, byte[] handshakeHash, byte[] remoteStatic)
+    internal SecureSession(bool isInitiator, byte[] initiatorToResponder, byte[] responderToInitiator, byte[] handshakeHash, byte[] remoteStatic, bool isPairing)
     {
         IsInitiator = isInitiator;
+        IsPairing = isPairing;
+        _isTrusted = !isPairing;
         _initiatorToResponder = (byte[])initiatorToResponder.Clone();
         _responderToInitiator = (byte[])responderToInitiator.Clone();
         _handshakeHash = (byte[])handshakeHash.Clone();
@@ -40,7 +49,16 @@ public sealed class SecureSession : IDisposable
         RemoteFingerprint = KeyFingerprint.Compute(_remoteStatic);
     }
 
+    /// <summary>Reserved channel id of <see cref="GetPairingChannel"/>; never allocated by <see cref="OpenChannel"/>.</summary>
+    public const uint PairingChannelId = uint.MaxValue;
+
     public bool IsInitiator { get; }
+
+    /// <summary>True when the session comes from a pairing handshake (peer key accepted without verification).</summary>
+    public bool IsPairing { get; }
+
+    /// <summary>False for a pairing session until pairing succeeds; data channels need a trusted session.</summary>
+    public bool IsTrusted { get { lock (_lock) return _isTrusted; } }
 
     /// <summary>Peer identity public key authenticated by the handshake.</summary>
     public ReadOnlySpan<byte> RemoteStaticPublicKey => _remoteStatic;
@@ -59,6 +77,7 @@ public sealed class SecureSession : IDisposable
         lock (_lock)
         {
             ThrowIfDisposed();
+            ThrowIfUntrusted();
             if (_nextLocalChannelId > uint.MaxValue - 2)
                 throw new InvalidOperationException("Channel ids exhausted; start a new session.");
             var id = _nextLocalChannelId;
@@ -74,11 +93,43 @@ public sealed class SecureSession : IDisposable
         lock (_lock)
         {
             ThrowIfDisposed();
+            ThrowIfUntrusted();
+            if (channelId == PairingChannelId)
+                throw new CryptoProtocolException("The pairing channel id is reserved.");
             var peerParity = IsInitiator ? 1u : 0u;
             if ((channelId & 1u) != peerParity)
                 throw new CryptoProtocolException($"Channel id {channelId} does not belong to the peer.");
             return CreateChannelLocked(channelId);
         }
+    }
+
+    /// <summary>
+    /// The single channel reserved for pairing messages of a pairing session. Both sides call it once;
+    /// it works before the session is trusted.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Not a pairing session.</exception>
+    public SecureChannel GetPairingChannel()
+    {
+        lock (_lock)
+        {
+            ThrowIfDisposed();
+            if (!IsPairing)
+                throw new InvalidOperationException("Only a pairing session has a pairing channel.");
+            return CreateChannelLocked(PairingChannelId);
+        }
+    }
+
+    /// <summary>Called by the pairing classes once the user confirmed the peer.</summary>
+    internal void MarkTrusted()
+    {
+        lock (_lock)
+            _isTrusted = true;
+    }
+
+    private void ThrowIfUntrusted()
+    {
+        if (!_isTrusted)
+            throw new InvalidOperationException("Session is not trusted yet; finish pairing before opening data channels.");
     }
 
     private SecureChannel CreateChannelLocked(uint id)

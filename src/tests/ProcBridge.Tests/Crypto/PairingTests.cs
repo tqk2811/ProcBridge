@@ -139,6 +139,81 @@ public sealed class PairingTests
     }
 
     [TestMethod]
+    public void PairingSession_BlocksDataChannels_UntilPairingCompletes()
+    {
+        using var a = IdentityKey.Generate();
+        using var b = IdentityKey.Generate();
+        var (sa, sb) = PairingSessions(a, b);
+        using (sa)
+        using (sb)
+        {
+            Assert.IsFalse(sa.IsTrusted);
+            Assert.IsFalse(sb.IsTrusted);
+            Assert.ThrowsExactly<InvalidOperationException>(() => sa.OpenChannel());
+            Assert.ThrowsExactly<InvalidOperationException>(() => sb.OpenChannel());
+            Assert.ThrowsExactly<InvalidOperationException>(() => sa.AcceptChannel(1));
+            Assert.ThrowsExactly<InvalidOperationException>(() => sb.AcceptChannel(0));
+
+            // Pairing messages travel on the reserved channel while untrusted.
+            using var ca = sa.GetPairingChannel();
+            using var cb = sb.GetPairingChannel();
+            Assert.AreEqual(SecureSession.PairingChannelId, ca.Id);
+            Assert.ThrowsExactly<CryptoProtocolException>(() => sa.GetPairingChannel());
+            var initiator = new PairingInitiator(sa);
+            var responder = new PairingResponder(sb);
+            var nonce = responder.ReceiveCommit(cb.Open(ca.Seal(initiator.CreateCommit())));
+            responder.ReceiveReveal(cb.Open(ca.Seal(initiator.ReceiveNonce(ca.Open(cb.Seal(nonce))))));
+            var confirm = initiator.ConfirmCode(responder.Code!);
+            Assert.IsTrue(sa.IsTrusted);
+
+            responder.ReceiveConfirm(cb.Open(ca.Seal(confirm)));
+            Assert.IsFalse(sb.IsTrusted, "B stays untrusted until the user accepts");
+            Assert.ThrowsExactly<InvalidOperationException>(() => sb.OpenChannel());
+            responder.Accept();
+            Assert.IsTrue(sb.IsTrusted);
+
+            using var data = sa.OpenChannel();
+            using var accepted = sb.AcceptChannel(data.Id);
+            CollectionAssert.AreEqual("hi"u8.ToArray(), accepted.Open(data.Seal("hi"u8)));
+        }
+    }
+
+    [TestMethod]
+    public void WrongCode_LeavesSessionUntrusted()
+    {
+        using var a = IdentityKey.Generate();
+        using var b = IdentityKey.Generate();
+        var (sa, sb) = PairingSessions(a, b);
+        using (sa)
+        using (sb)
+        {
+            var initiator = new PairingInitiator(sa);
+            var responder = new PairingResponder(sb);
+            responder.ReceiveReveal(initiator.ReceiveNonce(responder.ReceiveCommit(initiator.CreateCommit())));
+            var wrong = ((int.Parse(responder.Code!) + 1) % 1_000_000).ToString("D6");
+            Assert.ThrowsExactly<CryptoProtocolException>(() => initiator.ConfirmCode(wrong));
+            Assert.IsFalse(sa.IsTrusted);
+            Assert.ThrowsExactly<InvalidOperationException>(() => sa.OpenChannel());
+        }
+    }
+
+    [TestMethod]
+    public void VerifiedSession_IsTrusted_AndHasNoPairingChannel()
+    {
+        using var a = IdentityKey.Generate();
+        using var b = IdentityKey.Generate();
+        var (sa, sb) = CryptoTestHelper.Handshake(NoisePattern.IK, a, b, CryptoTestHelper.Trust(b), CryptoTestHelper.Trust(a));
+        using (sa)
+        using (sb)
+        {
+            Assert.IsTrue(sa.IsTrusted);
+            Assert.ThrowsExactly<InvalidOperationException>(() => sa.GetPairingChannel());
+            Assert.ThrowsExactly<ArgumentException>(() => new PairingInitiator(sa));
+            Assert.ThrowsExactly<CryptoProtocolException>(() => sa.AcceptChannel(SecureSession.PairingChannelId));
+        }
+    }
+
+    [TestMethod]
     public void OutOfOrderCalls_Throw()
     {
         using var a = IdentityKey.Generate();
