@@ -1,15 +1,18 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
+using Microsoft.Win32.SafeHandles;
 using ProcBridge.HookIpc;
+using ProcBridge.HookIpc.Enums;
 
 namespace ProcBridge.Broker;
 
 /// <summary>
 /// Named pipe endpoint for Hook.dll (plan section 6): message mode, many instances, current user only. Each
 /// connected instance is served by its own loop (request, reply, repeat), so hook threads using separate
-/// instances run in parallel.
+/// instances run in parallel. Owns the handler it serves and disposes it.
 /// </summary>
 [SupportedOSPlatform("windows")]
 public sealed class HookIpcServer : IAsyncDisposable
@@ -21,6 +24,7 @@ public sealed class HookIpcServer : IAsyncDisposable
     private readonly ConcurrentDictionary<NamedPipeServerStream, Task> _clients = new();
     private Task _acceptLoop = Task.CompletedTask;
     private int _disposed;
+    private long _anonymousClients;
 
     /// <param name="pipeName">Name without the <c>\\.\pipe\</c> prefix, see <see cref="HookIpcProtocol.GetPipeName"/>.</param>
     /// <param name="createInstance">Creates a pipe instance (argument: is it the first one); tests inject failures here.</param>
@@ -32,6 +36,8 @@ public sealed class HookIpcServer : IAsyncDisposable
     }
 
     public string PipeName => _pipeName;
+
+    public HookRequestHandler Handler => _handler;
 
     public void Start()
     {
@@ -110,8 +116,31 @@ public sealed class HookIpcServer : IAsyncDisposable
         }
     }
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetNamedPipeClientProcessId(SafePipeHandle pipe, out uint clientProcessId);
+
+    /// <summary>
+    /// The client's process id: it owns the directory watches its connections register. When the system will not
+    /// tell, the connection gets an id of its own (negative, so it never collides with a process id).
+    /// </summary>
+    private long GetClientId(NamedPipeServerStream pipe)
+    {
+        try
+        {
+            if (GetNamedPipeClientProcessId(pipe.SafePipeHandle, out uint processId))
+                return processId;
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        return -Interlocked.Increment(ref _anonymousClients);
+    }
+
     private async Task ServeAsync(NamedPipeServerStream pipe)
     {
+        long clientId = GetClientId(pipe);
+        _handler.ClientConnected(clientId);
         byte[] request = new byte[HookIpcProtocol.MaxMessageSize];
         byte[] reply = new byte[HookIpcProtocol.MaxMessageSize];
         try
@@ -130,7 +159,11 @@ public sealed class HookIpcServer : IAsyncDisposable
                 }
                 while (!pipe.IsMessageComplete);
 
-                int size = await _handler.HandleAsync(request.AsMemory(0, length), reply, _stopping.Token).ConfigureAwait(false);
+                int size = IsWaitChanges(request.AsSpan(0, length))
+                    ? await HandleWhileWatchingPipeAsync(pipe, clientId, request.AsMemory(0, length), reply).ConfigureAwait(false)
+                    : await _handler.HandleAsync(clientId, request.AsMemory(0, length), reply, _stopping.Token).ConfigureAwait(false);
+                if (size < 0)
+                    return; // The client went away while its request was being handled.
                 await pipe.WriteAsync(reply.AsMemory(0, size), _stopping.Token).ConfigureAwait(false);
             }
         }
@@ -141,8 +174,42 @@ public sealed class HookIpcServer : IAsyncDisposable
         finally
         {
             _clients.TryRemove(pipe, out _);
+            _handler.ClientDisconnected(clientId);
             await pipe.DisposeAsync().ConfigureAwait(false);
         }
+    }
+
+    private static bool IsWaitChanges(ReadOnlySpan<byte> message)
+        => message.Length >= HookIpcProtocol.HeaderSize && (HookIpcMessageType)BitConverter.ToUInt16(message[6..8]) == HookIpcMessageType.WaitChanges;
+
+    /// <summary>
+    /// Handles a request that can block for a long time (WaitChanges long poll) while still reading the pipe: the client
+    /// sends nothing until it gets the reply, so a read that completes means it closed the pipe (or broke the protocol)
+    /// and the wait is cancelled. Returns -1 in that case.
+    /// </summary>
+    private async Task<int> HandleWhileWatchingPipeAsync(NamedPipeServerStream pipe, long clientId, ReadOnlyMemory<byte> request, Memory<byte> reply)
+    {
+        using var handling = CancellationTokenSource.CreateLinkedTokenSource(_stopping.Token);
+        using var probing = new CancellationTokenSource();
+        Task<int> probe = pipe.ReadAsync(new byte[1], probing.Token).AsTask();
+        Task<int> handle = _handler.HandleAsync(clientId, request, reply, handling.Token);
+        if (await Task.WhenAny(handle, probe).ConfigureAwait(false) == probe)
+        {
+            handling.Cancel();
+            await handle.ConfigureAwait(false);
+            return -1;
+        }
+
+        probing.Cancel();
+        try
+        {
+            if (await probe.ConfigureAwait(false) != 0)
+                return -1; // Unsolicited data while a request is pending.
+        }
+        catch (Exception e) when (e is OperationCanceledException or IOException or ObjectDisposedException)
+        {
+        }
+        return await handle.ConfigureAwait(false);
     }
 
     public async ValueTask DisposeAsync()
@@ -154,6 +221,7 @@ public sealed class HookIpcServer : IAsyncDisposable
         foreach (NamedPipeServerStream pipe in _clients.Keys)
             await pipe.DisposeAsync().ConfigureAwait(false);
         await Task.WhenAll(_clients.Values).ConfigureAwait(false);
+        _handler.Dispose();
         _stopping.Dispose();
     }
 }

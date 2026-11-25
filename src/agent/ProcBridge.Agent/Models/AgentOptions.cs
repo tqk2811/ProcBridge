@@ -25,4 +25,22 @@ public sealed record AgentOptions
 
     /// <summary>Time a new connection has to send Hello.</summary>
     public TimeSpan HelloTimeout { get; init; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>Buffer of the share watcher (<c>ReadDirectoryChangesW</c>); events beyond it are lost and reported as a rescan.</summary>
+    public int WatchBufferSize { get; init; } = 64 * 1024;
+
+    /// <summary>How long changes are collected before one notification carries them all.</summary>
+    public TimeSpan WatchBatchDelay { get; init; } = TimeSpan.FromMilliseconds(50);
+
+    /// <summary>Notifications queued for one connection; a client that falls further behind gets a rescan instead.</summary>
+    public int NotificationQueueCapacity { get; init; } = 256;
+
+    /// <summary>Most entries one FsTree walk returns before it reports <c>Truncated</c>.</summary>
+    public int MaxTreeEntries { get; init; } = 500_000;
+
+    /// <summary>Depth used when an FsTree request leaves it to the server.</summary>
+    public int DefaultTreeDepth { get; init; } = 64;
+
+    /// <summary>Unfinished FsTree walks one connection may hold at once.</summary>
+    public int MaxTreeWalksPerConnection { get; init; } = 4;
 }

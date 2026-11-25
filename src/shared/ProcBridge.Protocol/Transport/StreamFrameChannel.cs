@@ -156,7 +156,7 @@ public sealed class StreamFrameChannel : IFrameChannel
             throw new ProtocolStatusException(NtStatus.ProtocolError, "Frame body too short.", isConnectionFailure: true);
 
         var kind = (FrameKind)span[0];
-        if (kind is not (FrameKind.Request or FrameKind.Response or FrameKind.Error))
+        if (kind is not (FrameKind.Request or FrameKind.Response or FrameKind.Error or FrameKind.Notification))
             throw new ProtocolStatusException(NtStatus.ProtocolError, $"Unknown frame kind {span[0]}.", isConnectionFailure: true);
 
         int headerLength = BinaryPrimitives.ReadInt32LittleEndian(span[7..]);

@@ -30,6 +30,18 @@ public static class HookIpcProtocol
     /// <summary>Bit 0 of the ListReply flags: more entries after this page.</summary>
     public const ushort ListFlagHasMore = 1;
 
+    /// <summary>Bit 0 of the WatchDirectory flags: watch the whole subtree (<c>WatchTree</c> of NtNotifyChangeDirectoryFile).</summary>
+    public const ushort WatchFlagSubtree = 1;
+
+    /// <summary>
+    /// Bit 0 of the WaitChanges reply flags: changes were lost (Agent rescan, reconnect, queue full). The hook completes
+    /// the pending notify with <c>STATUS_NOTIFY_ENUM_DIR</c> so the process lists the directory again.
+    /// </summary>
+    public const ushort ChangesFlagOverflow = 1;
+
+    /// <summary>WaitChanges timeout meaning "wait until a change or until the watch is removed".</summary>
+    public const uint InfiniteTimeout = 0xFFFFFFFF;
+
     public static string GetPipeName(string sessionId) => PipeNamePrefix + sessionId;
 
     /// <summary>

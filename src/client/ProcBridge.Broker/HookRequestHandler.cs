@@ -14,7 +14,7 @@ namespace ProcBridge.Broker;
 /// Answers one Hook IPC request: maps (mapping index, relative path) to a share path and asks the
 /// <see cref="FileCache"/>. Every failure becomes the NTSTATUS the hooked call should return.
 /// </summary>
-public sealed class HookRequestHandler
+public sealed class HookRequestHandler : IDisposable
 {
     private const uint WriteAccessMask =
         0x0002 /* FILE_WRITE_DATA */ | 0x0004 /* FILE_APPEND_DATA */ | 0x0010 /* FILE_WRITE_EA */ |
@@ -37,10 +37,25 @@ public sealed class HookRequestHandler
             throw new ArgumentException("Too many mappings.", nameof(mappings));
         _cache = cache;
         _mappings = mappings;
+        Watches = new HookWatchRegistry(cache);
     }
 
-    /// <summary>Handles <paramref name="request"/> and writes the reply into <paramref name="reply"/>; returns its size.</summary>
-    public async Task<int> HandleAsync(ReadOnlyMemory<byte> request, Memory<byte> reply, CancellationToken cancellationToken)
+    /// <summary>A pipe connection of client <paramref name="clientId"/> (its process id) opened.</summary>
+    public void ClientConnected(long clientId) => Watches.Attach(clientId);
+
+    /// <summary>A pipe connection of <paramref name="clientId"/> closed; the watches of its last connection go with it.</summary>
+    public void ClientDisconnected(long clientId) => Watches.Detach(clientId);
+
+    /// <summary>Directory watches of the hook (WatchDirectory, WaitChanges, Unwatch).</summary>
+    public HookWatchRegistry Watches { get; }
+
+    public void Dispose() => Watches.Dispose();
+
+    /// <summary>
+    /// Handles <paramref name="request"/> of client <paramref name="clientId"/> and writes the reply into
+    /// <paramref name="reply"/>; returns its size.
+    /// </summary>
+    public async Task<int> HandleAsync(long clientId, ReadOnlyMemory<byte> request, Memory<byte> reply, CancellationToken cancellationToken)
     {
         HookIpcHeader header;
         try
@@ -54,7 +69,7 @@ public sealed class HookRequestHandler
 
         try
         {
-            IHookIpcMessage response = await DispatchAsync(header.MessageType, request, cancellationToken).ConfigureAwait(false);
+            IHookIpcMessage response = await DispatchAsync(clientId, header.MessageType, request, cancellationToken).ConfigureAwait(false);
             return HookIpcCodec.Encode(reply.Span, header.RequestId, response);
         }
         catch (Exception e) when (e is not OutOfMemoryException)
@@ -75,7 +90,7 @@ public sealed class HookRequestHandler
         _ => ((uint)status & 0x20000000u) != 0 ? NtStatus.UnexpectedNetworkError : status,
     };
 
-    private async Task<IHookIpcMessage> DispatchAsync(HookIpcMessageType type, ReadOnlyMemory<byte> request, CancellationToken cancellationToken)
+    private async Task<IHookIpcMessage> DispatchAsync(long clientId, HookIpcMessageType type, ReadOnlyMemory<byte> request, CancellationToken cancellationToken)
     {
         switch (type)
         {
@@ -133,6 +148,29 @@ public sealed class HookRequestHandler
                 IReadOnlyList<FsEntry> entries = await _cache.ListAsync(ToRemotePath(list.MappingIndex, list.RelativePath), cancellationToken).ConfigureAwait(false);
                 return BuildListPage(entries, (int)Math.Min(list.StartIndex, int.MaxValue));
             }
+
+            case HookIpcMessageType.WatchDirectory:
+            {
+                HookWatchRequest watch = Read(request, HookWatchRequest.Read);
+                string remotePath = ToRemotePath(watch.MappingIndex, watch.RelativePath);
+                FsEntry entry = await _cache.StatAsync(remotePath, cancellationToken).ConfigureAwait(false);
+                if (!entry.IsDirectory)
+                    throw new ProtocolStatusException(NtStatus.NotADirectory, "Only directories can be watched.");
+                return new HookWatchReply { WatchId = Watches.Add(clientId, remotePath, watch.WatchSubtree) };
+            }
+
+            case HookIpcMessageType.WaitChanges:
+            {
+                HookWaitChangesRequest wait = Read(request, HookWaitChangesRequest.Read);
+                TimeSpan timeout = wait.TimeoutMilliseconds == HookIpcProtocol.InfiniteTimeout
+                    ? Timeout.InfiniteTimeSpan
+                    : TimeSpan.FromMilliseconds(wait.TimeoutMilliseconds);
+                return await Watches.WaitAsync(clientId, wait.WatchId, timeout, cancellationToken).ConfigureAwait(false);
+            }
+
+            case HookIpcMessageType.Unwatch:
+                Watches.Remove(clientId, Read(request, HookUnwatchRequest.Read).WatchId);
+                return new HookUnwatchReply();
 
             default:
                 throw new ProtocolStatusException(NtStatus.NotImplemented, $"IPC message {type} is not supported.");

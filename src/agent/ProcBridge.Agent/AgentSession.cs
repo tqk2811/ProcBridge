@@ -1,5 +1,7 @@
 using System.Buffers;
+using System.Collections.Concurrent;
 using System.Net.Sockets;
+using System.Threading.Channels;
 using ProcBridge.Agent.Models;
 using ProcBridge.Protocol;
 using ProcBridge.Protocol.Enums;
@@ -20,10 +22,19 @@ internal sealed class AgentSession
     private readonly IReadOnlyDictionary<string, ReadOnlyShare> _shares;
     private readonly AgentOptions _options;
     private readonly SemaphoreSlim _concurrency;
+    private readonly Func<ReadOnlyShare, ShareWatcher> _getWatcher;
+    private readonly ConcurrentDictionary<ulong, ShareTreeWalk> _walks = new();
+    private readonly object _watchLock = new();
+    private Channel<FsChangeNotification>? _notifications;
+    private IDisposable? _watchSubscription;
+    private Task _notificationPump = Task.CompletedTask;
+    private int _lostNotifications;
+    private long _nextWalkId;
     private ReadOnlyShare? _share;
 
-    public AgentSession(IFrameChannel channel, TcpClient client, IReadOnlyDictionary<string, ReadOnlyShare> shares, AgentOptions options)
+    public AgentSession(IFrameChannel channel, TcpClient client, IReadOnlyDictionary<string, ReadOnlyShare> shares, AgentOptions options, Func<ReadOnlyShare, ShareWatcher> getWatcher)
     {
+        _getWatcher = getWatcher;
         _channel = channel;
         _client = client;
         _shares = shares;
@@ -59,6 +70,8 @@ internal sealed class AgentSession
         {
             _client.Dispose();
             await Task.WhenAll(running).ConfigureAwait(false);
+            StopWatching();
+            await _notificationPump.ConfigureAwait(false);
             await _channel.DisposeAsync().ConfigureAwait(false);
         }
     }
@@ -116,6 +129,21 @@ internal sealed class AgentSession
                     await SendAsync(FrameKind.Response, request, ProtocolSerializer.Serialize(response), default).ConfigureAwait(false);
                     break;
                 }
+                case MessageType.FsWatch:
+                {
+                    ProtocolSerializer.Deserialize<FsWatchRequest>(request.Header);
+                    StartWatching();
+                    var response = new FsWatchResponse { BatchDelayMilliseconds = (int)_options.WatchBatchDelay.TotalMilliseconds };
+                    await SendAsync(FrameKind.Response, request, ProtocolSerializer.Serialize(response), default).ConfigureAwait(false);
+                    break;
+                }
+                case MessageType.FsTree:
+                {
+                    FsTreeRequest tree = ProtocolSerializer.Deserialize<FsTreeRequest>(request.Header);
+                    FsTreeResponse response = NextTreePage(tree);
+                    await SendAsync(FrameKind.Response, request, ProtocolSerializer.Serialize(response), default).ConfigureAwait(false);
+                    break;
+                }
                 case MessageType.FsRead:
                     await HandleReadAsync(request).ConfigureAwait(false);
                     break;
@@ -139,6 +167,118 @@ internal sealed class AgentSession
             _concurrency.Release();
         }
     }
+
+    private FsTreeResponse NextTreePage(FsTreeRequest request)
+    {
+        ulong cursor = request.Cursor;
+        ShareTreeWalk? walk;
+        if (cursor == 0)
+        {
+            if (_walks.Count >= _options.MaxTreeWalksPerConnection)
+                throw new ProtocolStatusException(NtStatus.InsufficientResources, "Too many unfinished tree walks on this connection.");
+            int depth = request.MaxDepth > 0 ? request.MaxDepth : _options.DefaultTreeDepth;
+            walk = _share!.StartTree(request.Path, depth, _options.MaxTreeEntries);
+            cursor = (ulong)Interlocked.Increment(ref _nextWalkId);
+            _walks[cursor] = walk;
+        }
+        else if (!_walks.TryGetValue(cursor, out walk))
+        {
+            throw new ProtocolStatusException(NtStatus.InvalidParameter, $"Unknown tree cursor {cursor}.");
+        }
+
+        lock (walk)
+        {
+            FsTreeDirectory[] page;
+            try
+            {
+                page = walk.NextPage(_options.MaxFrameSize - Frame.FixedBodySize);
+            }
+            catch
+            {
+                _walks.TryRemove(cursor, out _);
+                throw;
+            }
+            if (walk.IsDone)
+                _walks.TryRemove(cursor, out _);
+            return new FsTreeResponse { Directories = page, Cursor = walk.IsDone ? 0 : cursor, Truncated = walk.Truncated };
+        }
+    }
+
+    /// <summary>Subscribes this connection to the share watcher; a second FsWatch on the same connection is a no-op.</summary>
+    private void StartWatching()
+    {
+        lock (_watchLock)
+        {
+            if (_notifications is not null)
+                return;
+            var queue = Channel.CreateBounded<FsChangeNotification>(new BoundedChannelOptions(_options.NotificationQueueCapacity)
+            {
+                SingleReader = true,
+                FullMode = BoundedChannelFullMode.Wait,
+            });
+            _notifications = queue;
+            _notificationPump = Task.Run(() => PumpNotificationsAsync(queue.Reader));
+            try
+            {
+                // onLost: the share's watcher broke and could not be restarted, so no more changes would reach this
+                // client while it still trusts its cache. Closing the connection makes it fall back to its TTL and resubscribe.
+                _watchSubscription = _getWatcher(_share!).Subscribe(notification =>
+                {
+                    // Never block the watcher: a client that does not keep up loses the details and gets a rescan.
+                    if (!queue.Writer.TryWrite(notification))
+                        Interlocked.Exchange(ref _lostNotifications, 1);
+                }, onLost: Abort);
+            }
+            catch
+            {
+                // Not subscribed (the share cannot be watched now): let a later FsWatch try again.
+                _notifications = null;
+                queue.Writer.TryComplete();
+                throw;
+            }
+        }
+    }
+
+    private void StopWatching()
+    {
+        lock (_watchLock)
+        {
+            _watchSubscription?.Dispose();
+            _watchSubscription = null;
+            _notifications?.Writer.TryComplete();
+        }
+    }
+
+    private async Task PumpNotificationsAsync(ChannelReader<FsChangeNotification> reader)
+    {
+        try
+        {
+            while (await reader.WaitToReadAsync().ConfigureAwait(false))
+            {
+                while (reader.TryRead(out FsChangeNotification? notification))
+                {
+                    if (Interlocked.Exchange(ref _lostNotifications, 0) != 0)
+                    {
+                        // Whatever was dropped and whatever is still queued is covered by one rescan.
+                        while (reader.TryRead(out _))
+                        {
+                        }
+                        notification = new FsChangeNotification { Changes = [], Rescan = true };
+                    }
+                    await SendNotificationAsync(notification).ConfigureAwait(false);
+                }
+                if (Interlocked.Exchange(ref _lostNotifications, 0) != 0)
+                    await SendNotificationAsync(new FsChangeNotification { Changes = [], Rescan = true }).ConfigureAwait(false);
+            }
+        }
+        catch (Exception e) when (e is IOException or ObjectDisposedException or ProtocolStatusException)
+        {
+            // Connection gone; RunAsync cleans up.
+        }
+    }
+
+    private Task SendNotificationAsync(FsChangeNotification notification)
+        => SendFrameAsync(new Frame { Kind = FrameKind.Notification, MessageType = MessageType.FsChanged, RequestId = 0, Header = ProtocolSerializer.Serialize(notification) });
 
     private async Task HandleReadAsync(Frame request)
     {
@@ -165,9 +305,11 @@ internal sealed class AgentSession
         return SendAsync(FrameKind.Error, request, ProtocolSerializer.Serialize(error), default);
     }
 
-    private async Task SendAsync(FrameKind kind, Frame request, ReadOnlyMemory<byte> header, ReadOnlyMemory<byte> payload)
+    private Task SendAsync(FrameKind kind, Frame request, ReadOnlyMemory<byte> header, ReadOnlyMemory<byte> payload)
+        => SendFrameAsync(new Frame { Kind = kind, MessageType = request.MessageType, RequestId = request.RequestId, Header = header, Payload = payload });
+
+    private async Task SendFrameAsync(Frame frame)
     {
-        var frame = new Frame { Kind = kind, MessageType = request.MessageType, RequestId = request.RequestId, Header = header, Payload = payload };
         using var timeout = new CancellationTokenSource(_options.SendTimeout);
         try
         {

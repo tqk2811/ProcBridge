@@ -36,7 +36,7 @@ public sealed class ReadOnlyShare
         "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "COM\u00B9", "COM\u00B2", "COM\u00B3",
         "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "LPT\u00B9", "LPT\u00B2", "LPT\u00B3",
     };
-    private static readonly EnumerationOptions ListOptions = new()
+    internal static readonly EnumerationOptions ListOptions = new()
     {
         AttributesToSkip = 0,
         IgnoreInaccessible = true,
@@ -176,7 +176,7 @@ public sealed class ReadOnlyShare
         int count = 0;
         while (count < limit)
         {
-            budget -= ListEntryOverhead + Encoding.UTF8.GetMaxByteCount(all[start + count].Name.Length);
+            budget -= EntryCost(all[start + count].Name);
             if (budget < 0 && count > 0)
                 break;
             count++;
@@ -190,6 +190,19 @@ public sealed class ReadOnlyShare
                 .ToArray(),
             HasMore = start + count < all.Length,
         };
+    }
+
+    /// <summary>Upper bound of the serialized size of an entry named <paramref name="name"/>.</summary>
+    internal static int EntryCost(string name) => ListEntryOverhead + Encoding.UTF8.GetMaxByteCount(name.Length);
+
+    /// <summary>Starts a breadth-first walk of the directory <paramref name="relativePath"/>.</summary>
+    internal ShareTreeWalk StartTree(string relativePath, int maxDepth, int maxEntries)
+    {
+        string path = ResolvePath(relativePath);
+        if (GetExistingInfo(path) is not DirectoryInfo)
+            throw new ProtocolStatusException(NtStatus.NotADirectory, "Not a directory.");
+        string normalized = string.Join('/', relativePath.Split(Separators, StringSplitOptions.RemoveEmptyEntries));
+        return new ShareTreeWalk(normalized, path, maxDepth, maxEntries);
     }
 
     /// <summary>Reads up to <c>buffer.Length</c> bytes at <paramref name="offset"/>; returns bytes read and the file version.</summary>
@@ -233,7 +246,7 @@ public sealed class ReadOnlyShare
 
     /// <param name="details">File id, change time and allocation size when they could be read; otherwise the change
     /// time falls back to the last write time and the id and allocation size stay unknown.</param>
-    private static FsEntry ToEntry(FileSystemInfo info, string name, FileDetailsReader.FileDetails? details)
+    internal static FsEntry ToEntry(FileSystemInfo info, string name, FileDetailsReader.FileDetails? details)
     {
         long lastWrite = info.LastWriteTimeUtc.ToFileTimeUtc();
         return new FsEntry

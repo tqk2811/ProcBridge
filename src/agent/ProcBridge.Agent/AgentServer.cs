@@ -17,6 +17,7 @@ public sealed class AgentServer : IAsyncDisposable
     private readonly TcpListener _listener;
     private readonly CancellationTokenSource _stopping = new();
     private readonly ConcurrentDictionary<AgentSession, Task> _sessions = new();
+    private readonly ConcurrentDictionary<string, Lazy<ShareWatcher>> _watchers = new(StringComparer.OrdinalIgnoreCase);
     private Task _acceptLoop = Task.CompletedTask;
     private int _disposed;
 
@@ -31,6 +32,10 @@ public sealed class AgentServer : IAsyncDisposable
     public int Port => ((IPEndPoint)_listener.LocalEndpoint).Port;
 
     public int ActiveSessionCount => _sessions.Count;
+
+    /// <summary>The watcher of <paramref name="share"/>, created on first use and shared by every connection.</summary>
+    internal ShareWatcher GetWatcher(ReadOnlyShare share)
+        => _watchers.GetOrAdd(share.Name, _ => new Lazy<ShareWatcher>(() => new ShareWatcher(share.RootPath, _options.WatchBufferSize, _options.WatchBatchDelay))).Value;
 
     public void Start()
     {
@@ -58,7 +63,7 @@ public sealed class AgentServer : IAsyncDisposable
 
             client.NoDelay = true;
             var channel = new StreamFrameChannel(client.GetStream(), ownsStream: true, _options.MaxFrameSize);
-            var session = new AgentSession(channel, client, _shares, _options);
+            var session = new AgentSession(channel, client, _shares, _options, GetWatcher);
 
             // The session removes itself when it ends; it must not start before it is registered, or a connection
             // that fails at once would be removed first and then re-added for good.
@@ -102,6 +107,11 @@ public sealed class AgentServer : IAsyncDisposable
         foreach (AgentSession session in _sessions.Keys)
             session.Abort();
         await Task.WhenAll(_sessions.Values).ConfigureAwait(false);
+        foreach (Lazy<ShareWatcher> watcher in _watchers.Values)
+        {
+            if (watcher.IsValueCreated)
+                watcher.Value.Dispose();
+        }
         _stopping.Dispose();
     }
 }

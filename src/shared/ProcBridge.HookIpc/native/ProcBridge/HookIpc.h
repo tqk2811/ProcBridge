@@ -19,6 +19,14 @@
 //   List    request : ListRequest, then String RelativePath
 //           reply   : ListReply, then Count x (FileInfo, String Name); Flags & ListFlagHasMore = ask again with
 //                     StartIndex += Count
+//   WatchDirectory request : WatchRequest, then String RelativePath (directory to watch)
+//                  reply   : WatchReply
+//   WaitChanges    request : WaitChangesRequest (long poll; use a pipe instance of its own)
+//                  reply   : WaitChangesReply, then Count x (ChangeEntry, String Name); Name is relative to the
+//                            watched directory like FILE_NOTIFY_INFORMATION.FileName. Count 0 without
+//                            ChangesFlagOverflow = timeout. ChangesFlagOverflow = changes lost: complete the
+//                            notify with STATUS_NOTIFY_ENUM_DIR.
+//   Unwatch        request : UnwatchRequest; reply has no body
 
 #include <cstdint>
 
@@ -29,6 +37,9 @@ namespace ProcBridge::HookIpc
     constexpr uint32_t MaxMessageSize = 65536;
     constexpr uint32_t FileInfoSize = 64;
     constexpr uint16_t ListFlagHasMore = 1;
+    constexpr uint16_t WatchFlagSubtree = 1;
+    constexpr uint16_t ChangesFlagOverflow = 1;
+    constexpr uint32_t InfiniteTimeout = 0xFFFFFFFF;
     constexpr const wchar_t* PipeNamePrefix = L"\\\\.\\pipe\\ProcBridge-";
 
     enum class MessageType : uint16_t
@@ -37,6 +48,9 @@ namespace ProcBridge::HookIpc
         Stat = 2,
         Resolve = 3,
         List = 4,
+        WatchDirectory = 5,
+        WaitChanges = 6,
+        Unwatch = 7,
     };
 
     enum class Architecture : uint16_t
@@ -109,6 +123,41 @@ namespace ProcBridge::HookIpc
         uint16_t Count;
         uint16_t Flags;
     };
+
+    struct WatchRequest
+    {
+        uint16_t MappingIndex;
+        uint16_t Flags;            // WatchFlagSubtree = WatchTree argument
+        uint32_t CompletionFilter; // FILE_NOTIFY_CHANGE_*, as received (not applied exactly by the Broker)
+    };
+
+    struct WatchReply
+    {
+        uint32_t WatchId;
+        uint32_t Reserved;
+    };
+
+    struct WaitChangesRequest
+    {
+        uint32_t WatchId;
+        uint32_t TimeoutMilliseconds; // InfiniteTimeout = until a change or Unwatch
+    };
+
+    struct WaitChangesReply
+    {
+        uint16_t Count;
+        uint16_t Flags; // ChangesFlagOverflow
+    };
+
+    struct ChangeEntry
+    {
+        uint32_t Action; // FILE_ACTION_*
+    };
+
+    struct UnwatchRequest
+    {
+        uint32_t WatchId;
+    };
 #pragma pack(pop)
 
     static_assert(sizeof(MessageHeader) == HeaderSize);
@@ -119,4 +168,10 @@ namespace ProcBridge::HookIpc
     static_assert(sizeof(ResolveRequest) == 16);
     static_assert(sizeof(ListRequest) == 8);
     static_assert(sizeof(ListReply) == 4);
+    static_assert(sizeof(WatchRequest) == 8);
+    static_assert(sizeof(WatchReply) == 8);
+    static_assert(sizeof(WaitChangesRequest) == 8);
+    static_assert(sizeof(WaitChangesReply) == 4);
+    static_assert(sizeof(ChangeEntry) == 4);
+    static_assert(sizeof(UnwatchRequest) == 4);
 }
