@@ -17,6 +17,10 @@ namespace ProcBridge::Hook
         static constexpr const wchar_t* BrokerProcessVariable = L"PROCBRIDGE_BROKER_PID";
         static constexpr const wchar_t* TimeoutVariable = L"PROCBRIDGE_IPC_TIMEOUT_MS";
         static constexpr DWORD DefaultTimeoutMs = 60000;
+        /// Least timeout of the start-up exchange (pipe open, Hello, one Resolve per root). It runs while the process
+        /// is still starting (and the machine may be busy starting it), so a short PROCBRIDGE_IPC_TIMEOUT_MS meant
+        /// for later calls must not fail the whole start; a missing Broker still fails at once (no pipe).
+        static constexpr DWORD StartupTimeoutMs = 30000;
 
         /// True when the environment names a Broker session.
         static bool IsConfigured() noexcept;

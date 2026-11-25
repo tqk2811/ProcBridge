@@ -206,13 +206,6 @@ liệt kê theo kết nối hoặc cache danh sách ngắn hạn phía Agent.
 Request quá hạn trả `STATUS_IO_TIMEOUT` nhưng kết nối vẫn được coi là sống; Agent treo hẳn thì request nào cũng
 chờ đủ `RequestTimeout`. Nên có ping/keepalive và đánh dấu kết nối chết sau vài lần quá hạn liên tiếp.
 
-## [Thấp] BrokerTimeoutTests Win32 chập chờn trên CI
-
-`SilentBroker_FailsTheCallWithTimeout ("Win32")` một lần trên CI (run 45614000032, chạy lại thì xanh) trả 125
-(Spawn báo inject/khởi động hook hỏng) thay vì 1: với `PROCBRIDGE_IPC_TIMEOUT_MS=1000`, `Hello`/`Resolve` gốc
-lúc khởi động có lẽ quá hạn khi máy CI chậm. Nên tách thời hạn khởi động khỏi thời hạn request, hoặc để test
-chỉ hạ thời hạn sau khi hook đã khởi động. Ghi 2026-11-25.
-
 ## [Thấp] Probe_ThroughAgent_MatchesRealFolder chập chờn trên CI
 
 `Probe_ThroughAgent_MatchesRealFolder ("x64")` một lần trên CI (run 45626967765, chạy lại thì xanh) lệch ở dòng

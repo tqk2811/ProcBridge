@@ -72,7 +72,7 @@ namespace ProcBridge::Hook
         {
             timeoutMs = DefaultTimeoutMs;
         }
-        result = _client.Initialize(pipeName, brokerProcessId, timeoutMs);
+        result = _client.Initialize(pipeName, brokerProcessId, timeoutMs > StartupTimeoutMs ? timeoutMs : StartupTimeoutMs);
         if (result != ERROR_SUCCESS)
         {
             return result;
@@ -124,7 +124,8 @@ namespace ProcBridge::Hook
                 return result;
             }
         }
-        // hello's instance goes back to the pool here.
+        // Start-up done: later calls use the configured timeout. hello's instance goes back to the pool here.
+        _client.SetTimeout(timeoutMs);
         return ERROR_SUCCESS;
     }
 

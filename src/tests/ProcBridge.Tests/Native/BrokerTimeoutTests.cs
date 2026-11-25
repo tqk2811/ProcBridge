@@ -14,12 +14,23 @@ public sealed class BrokerTimeoutTests
     [TestMethod]
     [DataRow("x64")]
     [DataRow("Win32")]
-    public async Task SilentBroker_FailsTheCallWithTimeout(string platform)
+    public Task SilentBroker_FailsTheCallWithTimeout(string platform) => RunSilentBrokerAsync(platform, TimeSpan.Zero);
+
+    /// <summary>
+    /// The short call timeout of the test (1 s) must not apply to the start-up exchange: a busy machine (CI) may take
+    /// longer to start the process and answer Hello, and the start then failed with 125 instead of reaching the call.
+    /// </summary>
+    [TestMethod]
+    [DataRow("x64")]
+    [DataRow("Win32")]
+    public Task SlowStartUp_DoesNotUseTheCallTimeout(string platform) => RunSilentBrokerAsync(platform, TimeSpan.FromMilliseconds(2500));
+
+    private static async Task RunSilentBrokerAsync(string platform, TimeSpan helloDelay)
     {
         using HookSandbox sandbox = new(platform);
         string sessionId = HookIpcProtocol.NewSessionId();
         using var stop = new CancellationTokenSource();
-        Task server = ServeAsync(HookIpcProtocol.GetPipeName(sessionId), sandbox, stop.Token);
+        Task server = ServeAsync(HookIpcProtocol.GetPipeName(sessionId), sandbox, helloDelay, stop.Token);
 
         var startInfo = new ProcessStartInfo(sandbox.Binaries.Spawn,
             $"--broker {sessionId} {Environment.ProcessId} -- cmd.exe /d /c type \"{sandbox.VirtualRoot}\\a.txt\"")
@@ -42,7 +53,7 @@ public sealed class BrokerTimeoutTests
 
         Assert.IsTrue(exited, "the hooked call hung");
         Assert.IsLessThan(TimeSpan.FromSeconds(30), watch.Elapsed);
-        Assert.AreEqual(1, process.ExitCode, await output);
+        Assert.AreEqual(1, process.ExitCode, await output + await error);
         // STATUS_IO_TIMEOUT becomes ERROR_SEM_TIMEOUT (121) in kernelbase.
         string message = new System.ComponentModel.Win32Exception(121).Message;
         Assert.Contains(message, await error);
@@ -52,7 +63,7 @@ public sealed class BrokerTimeoutTests
     /// A Broker stand-in: answers Hello and the resolve of the virtual root (so the hook starts), never answers
     /// anything else.
     /// </summary>
-    private static async Task ServeAsync(string pipeName, HookSandbox sandbox, CancellationToken cancellationToken)
+    private static async Task ServeAsync(string pipeName, HookSandbox sandbox, TimeSpan helloDelay, CancellationToken cancellationToken)
     {
         var clients = new List<Task>();
         try
@@ -63,7 +74,7 @@ public sealed class BrokerTimeoutTests
                 NamedPipeServerStream pipe = HookIpcServer.CreateDefaultInstance(pipeName, first);
                 first = false;
                 await pipe.WaitForConnectionAsync(cancellationToken);
-                clients.Add(AnswerAsync(pipe, sandbox, cancellationToken));
+                clients.Add(AnswerAsync(pipe, sandbox, helloDelay, cancellationToken));
             }
         }
         catch (OperationCanceledException)
@@ -72,7 +83,7 @@ public sealed class BrokerTimeoutTests
         await Task.WhenAll(clients);
     }
 
-    private static async Task AnswerAsync(NamedPipeServerStream pipe, HookSandbox sandbox, CancellationToken cancellationToken)
+    private static async Task AnswerAsync(NamedPipeServerStream pipe, HookSandbox sandbox, TimeSpan helloDelay, CancellationToken cancellationToken)
     {
         await using (pipe)
         {
@@ -88,6 +99,7 @@ public sealed class BrokerTimeoutTests
                     int size;
                     if (header.MessageType == HookIpcMessageType.Hello)
                     {
+                        await Task.Delay(helloDelay, cancellationToken);
                         size = HookIpcCodec.Encode(buffer, header.RequestId, new HookHelloReply { VirtualRoots = [sandbox.VirtualRoot] });
                     }
                     else if (header.MessageType == HookIpcMessageType.Resolve && ReadRelativePath(buffer.AsSpan(0, length)).Length == 0)

@@ -52,6 +52,9 @@ namespace ProcBridge::Hook
         /// pipeName is the full \\.\pipe\... name; brokerProcessId the process that must own the pipe.
         DWORD Initialize(const wchar_t* pipeName, DWORD brokerProcessId, DWORD timeoutMs) noexcept;
 
+        /// Changes the per-call timeout; only while no other thread uses the client (end of start-up).
+        void SetTimeout(DWORD timeoutMs) noexcept { _timeoutMs = timeoutMs; }
+
     private:
         struct Connection;
 
