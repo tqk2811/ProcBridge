@@ -1,0 +1,7 @@
+<Project>
+  <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)..'))" />
+  <PropertyGroup>
+    <!-- Outputs: src/native/out/<Platform>/<Configuration>/ -->
+    <ProcBridgeNativeOut>$(MSBuildThisFileDirectory)out\$(Platform)\$(Configuration)\</ProcBridgeNativeOut>
+  </PropertyGroup>
+</Project>
