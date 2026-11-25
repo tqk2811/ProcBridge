@@ -57,7 +57,8 @@ namespace ProcBridge::Hook
 
         static constexpr int MaxIdle = 8;
 
-        NTSTATUS Acquire(Connection*& connection) noexcept;
+        /// pooled: the instance came from the idle pool (the Broker may have dropped it meanwhile).
+        NTSTATUS Acquire(Connection*& connection, bool& pooled) noexcept;
         void Release(Connection* connection, bool healthy) noexcept;
         NTSTATUS Open(Connection*& connection) noexcept;
         static void Destroy(Connection* connection) noexcept;
@@ -98,5 +99,6 @@ namespace ProcBridge::Hook
         NTSTATUS _status = STATUS_SUCCESS;
         ULONG _size = HookIpc::HeaderSize;
         bool _healthy = true;
+        bool _pooled = false;
     };
 }

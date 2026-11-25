@@ -93,13 +93,16 @@ namespace ProcBridge::Hook
             {
                 break;
             }
+            const DWORD error = GetLastError(); // before Destroy, which may change it
             const ULONGLONG now = GetTickCount64();
-            if (GetLastError() != ERROR_PIPE_BUSY || now >= deadline)
+            if (error != ERROR_PIPE_BUSY || now >= deadline)
             {
                 Destroy(created);
-                return GetLastError() == ERROR_PIPE_BUSY ? STATUS_IO_TIMEOUT : STATUS_NETWORK_UNREACHABLE;
+                return error == ERROR_PIPE_BUSY ? STATUS_IO_TIMEOUT : STATUS_NETWORK_UNREACHABLE;
             }
-            WaitNamedPipeW(_pipeName, static_cast<DWORD>(deadline - now));
+            // WaitNamedPipeW(0) would mean the pipe's default wait: wait at least 1 ms.
+            const ULONGLONG left = deadline - now;
+            WaitNamedPipeW(_pipeName, left > 0 ? static_cast<DWORD>(left) : 1);
         }
 
         ULONG serverProcessId = 0;
@@ -132,12 +135,13 @@ namespace ProcBridge::Hook
         HeapFree(GetProcessHeap(), 0, connection);
     }
 
-    NTSTATUS BrokerClient::Acquire(Connection*& connection) noexcept
+    NTSTATUS BrokerClient::Acquire(Connection*& connection, bool& pooled) noexcept
     {
         AcquireSRWLockExclusive(&_lock);
         connection = _idleCount > 0 ? _idle[--_idleCount] : nullptr;
         ReleaseSRWLockExclusive(&_lock);
-        return connection != nullptr ? STATUS_SUCCESS : Open(connection);
+        pooled = connection != nullptr;
+        return pooled ? STATUS_SUCCESS : Open(connection);
     }
 
     void BrokerClient::Release(Connection* connection, bool healthy) noexcept
@@ -161,7 +165,7 @@ namespace ProcBridge::Hook
     BrokerClient::Call::Call(BrokerClient& client, HookIpc::MessageType type) noexcept
         : _client(client), _type(type)
     {
-        _status = _client.Acquire(_connection);
+        _status = _client.Acquire(_connection, _pooled);
     }
 
     BrokerClient::Call::~Call()
@@ -213,11 +217,39 @@ namespace ProcBridge::Hook
         memcpy(_connection->Request, &header, sizeof(header));
 
         OVERLAPPED overlapped{};
-        overlapped.hEvent = _connection->Event;
-        ResetEvent(_connection->Event);
         DWORD received = 0;
-        BOOL done = TransactNamedPipe(_connection->Pipe, _connection->Request, _size, _connection->Reply,
-            HookIpc::MaxMessageSize, nullptr, &overlapped);
+        BOOL done = FALSE;
+        while (true)
+        {
+            overlapped = OVERLAPPED{};
+            overlapped.hEvent = _connection->Event;
+            ResetEvent(_connection->Event);
+            done = TransactNamedPipe(_connection->Pipe, _connection->Request, _size, _connection->Reply,
+                HookIpc::MaxMessageSize, nullptr, &overlapped);
+            const DWORD error = done ? ERROR_SUCCESS : GetLastError();
+            // An idle instance the Broker has dropped (restart, its end closed) fails at once: retry once on a
+            // new instance instead of failing the application's call.
+            if (done || !_pooled || (error != ERROR_BROKEN_PIPE && error != ERROR_PIPE_NOT_CONNECTED && error != ERROR_NO_DATA
+                && error != ERROR_BAD_PIPE))
+            {
+                if (!done)
+                {
+                    SetLastError(error);
+                }
+                break;
+            }
+            _pooled = false;
+            Connection* fresh = nullptr;
+            const NTSTATUS opened = _client.Open(fresh);
+            if (!NT_SUCCESS(opened))
+            {
+                _healthy = false;
+                return opened;
+            }
+            memcpy(fresh->Request, _connection->Request, _size);
+            Destroy(_connection);
+            _connection = fresh;
+        }
         if (!done && GetLastError() == ERROR_IO_PENDING)
         {
             if (WaitForSingleObject(_connection->Event, _client._timeoutMs) != WAIT_OBJECT_0)
