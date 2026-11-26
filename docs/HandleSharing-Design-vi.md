@@ -1,11 +1,11 @@
 # Thiết kế: chia sẻ handle ảo giữa các process và đếm write token theo process
 
-Trạng thái: **đã duyệt, đang làm bước 1-5** (2026-11-27, nhánh `feature/handle-sharing`). Bước 6-8 làm sau ở nhánh khác.
+Trạng thái: **đã duyệt; bước 1-5 xong** (2026-11-27, nhánh `feature/handle-sharing`, có lệch nhỏ: chiều kế thừa gửi `Share` ngay ở bước 4). Bước 6-8 làm sau ở nhánh khác.
 
 Gom hai mục backlog vào một thiết kế vì chúng chạm cùng một chỗ (handle ảo đi sang process khác):
 
-- `[Cao] Write token ở lại bên gửi khi nhân bản handle ghi sang process khác` ([Backlog-vi.md](Backlog-vi.md#L5)).
-- `[Vừa] Hộp thư handle chỉ được đọc ở hook tra handle; chiều kéo và handle kế thừa không được theo dõi` ([Backlog-vi.md](Backlog-vi.md#L49)).
+- `[Cao] Write token ở lại bên gửi khi nhân bản handle ghi sang process khác` (đã sửa ở bước 1-5, mục backlog đã xoá).
+- `[Vừa] Hộp thư handle chỉ được đọc ở hook tra handle; chiều kéo và handle kế thừa không được theo dõi` ([Backlog-vi.md](Backlog-vi.md#L40)).
 
 Hướng user đã chọn:
 
@@ -264,7 +264,7 @@ Trong `HookNtDuplicateObject`, nhánh đích là process khác ([FileHooks.cpp:2
 5. Không lấy được pid (thiếu quyền query) → giữ hành vi cũ (token ở lại cha) và log debug; xem [Q4](#11-câu-hỏi-mở-cho-user).
 
 Kế thừa: `RetainForChild` gửi `Share(T, pid con, creationTime con)` thay `Retain(T)`; Hook đã có handle process con lúc tạo.
-Con inject thất bại hoặc chết sớm thì `ProcessWatch` trả phần giữ khi con thoát, lấp lỗ hở ở [Backlog-vi.md](Backlog-vi.md#L156).
+Con inject thất bại hoặc chết sớm thì `ProcessWatch` trả phần giữ khi con thoát, lấp lỗ hở ở [Backlog-vi.md](Backlog-vi.md#L160).
 
 ```mermaid
 sequenceDiagram

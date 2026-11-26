@@ -122,10 +122,29 @@ namespace ProcBridge::Hook
                 static_cast<size_t>(name.Length) - map.RealDevicePath.Length);
         }
 
+        /// PUBLIC_OBJECT_BASIC_INFORMATION (NtQueryObject class 0).
+        struct ObjectBasicInfo
+        {
+            ULONG Attributes;
+            ACCESS_MASK GrantedAccess;
+            ULONG HandleCount;
+            ULONG PointerCount;
+            ULONG Reserved[10];
+        };
+
+        /// Access granted to handle (generic rights already mapped); 0 when it cannot be read.
+        ACCESS_MASK GrantedAccessOf(HANDLE handle) noexcept
+        {
+            ObjectBasicInfo basic{};
+            return NT_SUCCESS(g_ntQueryObject(handle, 0 /* ObjectBasicInformation */, &basic, sizeof(basic), nullptr))
+                ? basic.GrantedAccess : 0;
+        }
+
         /// Tracks the virtual handles other hooked processes duplicated into this one since the last call (HandleInbox).
         /// Runs first in every hook that looks a handle up; one shared memory read when nothing arrived. An entry is only a
         /// hint: it is dropped unless its mapping is the same root here and the handle really is a file under that root's
-        /// backing folder; the virtual path comes from the handle's own name, machine B's metadata from Stat.
+        /// backing folder; the virtual path comes from the handle's own name, machine B's metadata and the write token this
+        /// process holds for it (the sender shared it, HandleSharing-Design-vi.md 5.3) from Adopt.
         void AdoptIncomingHandles() noexcept
         {
             ReentryGuard guard; // Stat below goes to the Broker: its own calls must not drain again
@@ -147,19 +166,29 @@ namespace ProcBridge::Hook
                         return;
                     }
                     HookIpc::FileInfo info{};
-                    if (g_resolver->IsRemote() && !NT_SUCCESS(g_resolver->Stat(entry.Mapping, virtualNt, PathKind::Nt, info)))
+                    uint64_t writeToken = 0;
+                    if (g_resolver->IsRemote())
                     {
-                        FreeString(virtualNt);
-                        return;
+                        const ACCESS_MASK granted = GrantedAccessOf(handle);
+                        const bool writable = (granted & (FILE_WRITE_DATA | FILE_APPEND_DATA)) != 0;
+                        if (!NT_SUCCESS(g_resolver->Adopt(entry.Mapping, virtualNt, PathKind::Nt, granted, writable, info, writeToken)))
+                        {
+                            FreeString(virtualNt);
+                            return;
+                        }
                     }
                     g_directoryNames.Remove(handle);
                     g_parentScans.Remove(handle);
                     g_handles.Add(handle, entry.Mapping);
                     if (g_resolver->IsRemote())
                     {
-                        info.RangeId = entry.RangeId;
-                        g_remoteHandles.Add(handle, entry.Mapping, virtualNt, info);
                         if (entry.RangeId != 0)
+                        {
+                            info.RangeId = entry.RangeId;
+                        }
+                        // Its last copy here sends Close for the token, like a handle this process opened.
+                        g_remoteHandles.Add(handle, entry.Mapping, virtualNt, info, writeToken);
+                        if (info.RangeId != 0)
                         {
                             g_anyRange.store(true, std::memory_order_relaxed);
                         }
@@ -2341,8 +2370,8 @@ namespace ProcBridge::Hook
         }
 
         /// A virtual handle duplicated into another process: the hook of that process is told (HandleInbox) and tracks the
-        /// copy at its next handle lookup, after checking the handle itself. The write token stays with this process: what
-        /// the receiver writes is written back when this process closes its last copy (or now, with DUPLICATE_CLOSE_SOURCE).
+        /// copy at its next handle lookup, after checking the handle itself. The write token is shared with that process
+        /// before (Share in HookNtDuplicateObject), so it gets it from Adopt.
         void SendDuplicate(HANDLE targetProcess, HANDLE copy, int mapping, uint32_t rangeId) noexcept
         {
             DuplicatedHandle entry;
@@ -2421,12 +2450,20 @@ namespace ProcBridge::Hook
             }
             else
             {
+                if (copied && remote && remoteToken != 0
+                    && !NT_SUCCESS(g_resolver->ShareWrite(remoteToken, targetProcess)))
+                {
+                    // No query access to the target (or no Broker): the token stays with this process, and what the
+                    // target writes after this process closed its last copy may not reach machine B.
+                    OutputDebugStringW(L"ProcBridge.Hook: cannot share a write token with the target of DuplicateHandle\n");
+                }
                 if (copied && mapping >= 0)
                 {
                     SendDuplicate(targetProcess, copy, mapping, remote ? remoteInfo.RangeId : 0);
                 }
                 // The source left this process: like NtClose, its last reference to the write token ends here (a copy in
-                // this process above kept it instead).
+                // this process above kept it instead). After Share: the Broker always sees the target as a holder before
+                // this process lets go.
                 if (closedSource.WriteToken != 0)
                 {
                     g_resolver->CloseWrite(closedSource.WriteToken);

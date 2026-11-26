@@ -45,7 +45,6 @@ public sealed class HandleDuplicationTests
     [DataRow("Win32", "write-close-source")]
     [DataRow("x64", "write")]
     [DataRow("Win32", "write")]
-    [Ignore("Red until the write token follows the duplicated handle (HandleSharing-Design-vi.md section 9 step 5).")]
     public async Task ChildWritingDuplicatedHandleAfterParentClosed_LandsOnMachineB(string platform, string mode)
     {
         // The parent creates the file, duplicates its write handle into a child and closes its own (with

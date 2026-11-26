@@ -2,15 +2,6 @@
 
 Việc còn treo, chưa thuộc mốc đang làm. Xử lý xong mục nào thì xoá mục đó trong cùng commit.
 
-## [Cao] Write token ở lại bên gửi khi nhân bản handle ghi sang process khác
-
-`SendDuplicate` ([FileHooks.cpp](../src/native/ProcBridge.Hook/src/FileHooks.cpp) ~2343-2353, nhánh gửi ~2428-2432) để
-write token ở process gửi. Ca thường gặp: process cha nhân bản handle ghi sang con rồi đóng bản của mình
-(`DUPLICATE_CLOSE_SOURCE`, hoặc chuyển hướng stdout của con vào file ảo rồi đóng). Khi đó ghi ngược về máy B chạy ngay lúc
-cha đóng trong khi con vẫn đang ghi; những gì con ghi sau đó mất lặng lẽ, không báo lỗi. Đây là sai dữ liệu nên xếp `[Cao]`.
-Hướng đề xuất: Broker đếm tham chiếu write token theo PID (bên nhận báo đã nhận bản sao, token chỉ ghi ngược khi bản cuối ở
-mọi process đóng). Thiết kế đã duyệt, đang làm: [HandleSharing-Design-vi.md](HandleSharing-Design-vi.md) (mục 5). Ghi 2026-11-26.
-
 ## [Thấp] Thư mục gốc ảo trong thư mục cha: các ca chưa phủ
 
 Mục của gốc ảo được chèn vào cuối lượt liệt kê thư mục cha thật (Plan mục 13, "Hook: đường dẫn và handle ngoài thư mục ảo"). Chưa phủ: thư mục cha không có thật (mở
@@ -41,8 +32,8 @@ User chọn chỉ để backlog (2026-11-26).
 Process có hook nhân bản handle ảo vào process khác có hook thì bên nhận theo dõi bản sao qua hộp thư chung (Plan mục 13,
 "Hook: đường dẫn và handle ngoài thư mục ảo"). Chưa phủ: bên nhận tự kéo handle về (`DuplicateHandle(nguồn khác, ...,
 chính nó)`, bên gửi không chạy hook); handle process đích thiếu quyền query; hộp thư đầy (16 ô chưa đọc); tên hộp thư bị
-chiếm trước (tính năng tắt cho process đó); bên nhận không giữ write token nên thứ nó ghi chỉ về máy B khi bên gửi đóng bản
-cuối (kèm `DUPLICATE_CLOSE_SOURCE` thì là lúc nhân bản); delete-on-close không chuyển; range id trong mục được tin (mục giả
+chiếm trước (tính năng tắt cho process đó); bên gửi không lấy được pid/thời điểm tạo của đích (thiếu quyền query) thì
+write token không được `Share`, ở lại bên gửi như trước 2026-11-27; delete-on-close không chuyển; range id trong mục được tin (mục giả
 chỉ làm Broker tải thừa). Process cùng user, cùng integrity level vẫn ghi được vào hộp thư, chặn bằng kiểm tra phía nhận.
 Ghi 2026-11-26.
 
@@ -166,11 +157,9 @@ IOCP sẽ không nhận được gói hoàn tất. Bỏ qua `SL_INDEX_SPECIFIED`
 - Ghi ngược trọn file mỗi lần đóng; chưa gửi theo khối thay đổi (file lớn sửa vài byte vẫn tải lên cả file).
 - Xoá qua disposition gửi sang máy B ngay lúc đặt cờ: đặt lại `DeleteFile = FALSE` sau đó chỉ huỷ trên bản cache.
   Delete-on-close xoá máy B khi handle có cờ đóng, kể cả khi handle khác của file còn mở.
-- Handle có write token kế thừa sang con: token đi theo bản ghi trong khối khởi tạo và cha gửi `Retain` cho Broker
-  lúc tạo con, nên lần đóng cuối của con cũng ghi ngược. Còn hở: con bị kết thúc trước khi nhận khối khởi tạo (inject
-  thất bại) thì phần giữ của nó không bao giờ được trả, file coi như còn mở tới hết phiên; nhân bản handle sang
-  process khác (`DuplicateHandle`) vẫn không mang token. Process thoát không đóng handle (kể cả con giữ handle kế thừa)
-  thì Broker ghi ngược khi phiên kết thúc (`SyncOpenAsync`), không phải lúc process thoát.
+- Write token theo process ([HandleSharing-Design-vi.md](HandleSharing-Design-vi.md) mục 5, 2026-11-27): kế thừa và
+  nhân bản sang process khác gửi `Share`, Broker chờ process thoát (`ProcessWatch`). Còn hở: process Broker không mở
+  được (quyền cao hơn) và chưa từng nối pipe thì phần giữ của nó chỉ trả lúc hết phiên.
 - Hết phiên chỉ ghi ngược file còn token mở; chưa quét mọi file cache đã đổi so với version đã tải (`_versions`):
   file tạo mới hay ghi đè không có version để so, nên cách quét này chỉ phủ được một phần.
 - Delete-on-close mang file ID máy B lúc mở: Agent không xoá nếu tên đã sang file khác. `File.Replace` của commit ghi
