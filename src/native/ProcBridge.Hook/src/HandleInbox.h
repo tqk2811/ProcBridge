@@ -37,7 +37,9 @@ namespace ProcBridge::Hook
         DWORD Open() noexcept;
 
         /// Calls adopt(const DuplicatedHandle&) for each entry received since the last call. One shared memory read when
-        /// nothing arrived.
+        /// nothing arrived. When another thread is draining at the same time, this call may return before that thread has
+        /// adopted the entries it took; a lookup right after it then misses the copy once. Accepted: the duplicate itself
+        /// works, only its tracking starts one lookup later, and waiting here would block on the other thread's Broker call.
         template <typename Adopt>
         void Drain(Adopt&& adopt) noexcept
         {
@@ -83,11 +85,15 @@ namespace ProcBridge::Hook
 
         static LONG ReadSequence(const Header* view) noexcept;
 
-        /// Copies a ready slot into entry and frees it; frees a slot stuck in writing for too long.
-        static bool Take(Header* view, ULONG index, DuplicatedHandle& entry) noexcept;
+        /// Copies a ready slot into entry and frees it; frees a slot stuck in writing for too long. Runs under _lock.
+        bool Take(Header* view, ULONG index, DuplicatedHandle& entry) noexcept;
 
         Header* volatile _view = nullptr;
         SRWLOCK _lock = SRWLOCK_INIT;
         LONG _seen = 0;
+        // Per slot: the writing state last seen with Claimed still 0 (sender died before stamping it) and when it was
+        // first seen. The same state value means the same claim, as each reclaim bumps the generation. Guarded by _lock.
+        LONG _unstampedState[SlotCount] = {};
+        ULONGLONG _unstampedSince[SlotCount] = {};
     };
 }

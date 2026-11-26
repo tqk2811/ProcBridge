@@ -115,7 +115,9 @@ namespace ProcBridge::Hook
         int32_t Mapping;
         uint32_t RootHash;
         uint32_t RangeId;
-        volatile ULONGLONG Claimed; // GetTickCount64 of the sender when it claimed the slot, 0 when free
+        // GetTickCount64 of the sender when it claimed the slot, 0 when free. Accessed only through ReadNoFence64 /
+        // WriteNoFence64, so a 32-bit process never reads it torn.
+        volatile LONG64 Claimed;
     };
 
     struct HandleInbox::Header
@@ -184,11 +186,23 @@ namespace ProcBridge::Hook
         const LONG taking = SlotWithKind(state, SlotTaking);
         if (SlotKind(state) == SlotWriting)
         {
-            const ULONGLONG claimed = slot.Claimed;
-            if (claimed != 0 && GetTickCount64() - claimed > StuckSlotMs
-                && InterlockedCompareExchange(&slot.State, taking, state) == state)
+            const ULONGLONG now = GetTickCount64();
+            ULONGLONG claimed = static_cast<ULONGLONG>(ReadNoFence64(&slot.Claimed));
+            if (claimed == 0)
             {
-                slot.Claimed = 0;
+                // The sender has not stamped the slot yet, or died between its compare-exchange and the stamp: time it
+                // from when this receiver first saw this claim. A sender that wakes later cannot publish (generation).
+                if (_unstampedState[index] != state || _unstampedSince[index] == 0)
+                {
+                    _unstampedState[index] = state;
+                    _unstampedSince[index] = now;
+                }
+                claimed = _unstampedSince[index];
+            }
+            if (now - claimed > StuckSlotMs && InterlockedCompareExchange(&slot.State, taking, state) == state)
+            {
+                WriteNoFence64(&slot.Claimed, 0);
+                _unstampedSince[index] = 0;
                 InterlockedExchange(&slot.State, SlotNextFree(state));
             }
             return false;
@@ -202,7 +216,7 @@ namespace ProcBridge::Hook
         entry.Mapping = slot.Mapping;
         entry.RootHash = slot.RootHash;
         entry.RangeId = slot.RangeId;
-        slot.Claimed = 0;
+        WriteNoFence64(&slot.Claimed, 0);
         InterlockedExchange(&slot.State, SlotNextFree(state));
         return true;
     }
@@ -247,14 +261,15 @@ namespace ProcBridge::Hook
                 {
                     continue;
                 }
-                slot.Claimed = GetTickCount64() | 1;
+                WriteNoFence64(&slot.Claimed, static_cast<LONG64>(GetTickCount64() | 1));
                 slot.Handle = entry.Handle;
                 slot.SenderPid = GetCurrentProcessId();
                 slot.Mapping = entry.Mapping;
                 slot.RootHash = entry.RootHash;
                 slot.RangeId = entry.RangeId;
-                // Fails when the receiver reclaimed the slot while this thread was suspended: the fields written above
-                // may then mix with another sender's, which is harmless as the receiver verifies each entry anyway.
+                // Fails when the receiver reclaimed the slot while this thread was suspended. The fields written above may
+                // then overwrite those of another sender that claimed the slot since: the receiver verifies each entry, so
+                // it never tracks a wrong handle, but that other sender's entry may be rejected and its handle go untracked.
                 if (InterlockedCompareExchange(&slot.State, SlotWithKind(state, SlotReady), writing) != writing)
                 {
                     continue;
