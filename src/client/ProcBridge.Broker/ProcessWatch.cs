@@ -19,6 +19,7 @@ public sealed class ProcessWatch : IAsyncDisposable
     private const uint Synchronize = 0x00100000;
     private const uint ProcessQueryLimitedInformation = 0x1000;
     private const int ErrorAccessDenied = 5;
+    private const uint WaitObject0 = 0;
     private const uint StillActive = 259;
 
     private readonly Func<ProcessKey, Task> _exited;
@@ -56,11 +57,19 @@ public sealed class ProcessWatch : IAsyncDisposable
     /// The key of process <paramref name="processId"/> as it runs now; null when it cannot be opened (gone, or access
     /// denied).
     /// </summary>
-    public static ProcessKey? TryGetKey(int processId)
+    public static ProcessKey? TryGetKey(int processId) => TryGetKey(processId, out _);
+
+    /// <inheritdoc cref="TryGetKey(int)"/>
+    /// <param name="accessDenied">True when the process could not be opened for lack of rights: it may still run.</param>
+    public static ProcessKey? TryGetKey(int processId, out bool accessDenied)
     {
+        accessDenied = false;
         using SafeProcessHandle process = OpenProcess(ProcessQueryLimitedInformation, false, processId);
         if (process.IsInvalid)
+        {
+            accessDenied = Marshal.GetLastPInvokeError() == ErrorAccessDenied;
             return null;
+        }
         return GetCreationTime(process) is { } creationTime ? new ProcessKey(processId, creationTime) : null;
     }
 
@@ -102,9 +111,10 @@ public sealed class ProcessWatch : IAsyncDisposable
             return ProcessWatchResult.Exited;
         }
 
-        if (GetExitCodeProcess(process, out uint exitCode) && exitCode != StillActive)
+        // Exited, but something still holds its handle open. A process that ended with exit code STILL_ACTIVE (259) is
+        // only told by its signaled handle; one being terminated has its exit code before its handle is signaled.
+        if (WaitForSingleObject(process, 0) == WaitObject0 || (GetExitCodeProcess(process, out uint exitCode) && exitCode != StillActive))
         {
-            // Exited, but something still holds its handle open.
             process.Dispose();
             _exits.Writer.TryWrite(key);
             return ProcessWatchResult.Exited;
@@ -176,6 +186,9 @@ public sealed class ProcessWatch : IAsyncDisposable
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetExitCodeProcess(SafeProcessHandle process, out uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(SafeProcessHandle handle, uint milliseconds);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

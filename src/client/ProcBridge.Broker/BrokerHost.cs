@@ -160,6 +160,8 @@ public sealed class BrokerHost : IAsyncDisposable
             return;
         _stopping.Cancel();
         await Pipe.DisposeAsync().ConfigureAwait(false);
+        // Write-backs that the last pipe connections of unwatched processes started finish before the queue goes.
+        await Pipe.Handler.WaitReleasesAsync().ConfigureAwait(false);
         // Exits already seen are released (written back) before the watch goes.
         await Processes.DisposeAsync().ConfigureAwait(false);
         // Last write-backs first, while the connection is still up.

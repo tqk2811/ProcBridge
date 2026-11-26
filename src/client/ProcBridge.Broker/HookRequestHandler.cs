@@ -48,6 +48,8 @@ public sealed class HookRequestHandler : IDisposable
     private readonly ProcessWatch? _processes;
     private readonly Lock _clientsLock = new();
     private readonly Dictionary<long, ClientState> _clients = [];
+    /// <summary>Releases started by <see cref="ClientDisconnected"/> and not finished yet (under the clients lock).</summary>
+    private readonly List<Task> _releases = [];
 
     /// <param name="writeBack">Write-back queue; null serves the share read only whatever the Agent allows (tests).</param>
     /// <param name="writeThrough">Tell hooks to flush after every write (<see cref="Models.BrokerOptions.WriteThrough"/>).</param>
@@ -106,8 +108,36 @@ public sealed class HookRequestHandler : IDisposable
             }
         }
         if (released is { } key && _writeBack is not null)
-            _ = _writeBack.ReleaseProcessAsync(key, CancellationToken.None);
+        {
+            Task release = _writeBack.ReleaseProcessAsync(key, CancellationToken.None);
+            lock (_clientsLock)
+            {
+                _releases.RemoveAll(x => x.IsCompleted);
+                if (!release.IsCompleted)
+                    _releases.Add(release);
+            }
+        }
     }
+
+    /// <summary>
+    /// Waits for the write-backs that the last connections of unwatched processes started; the Broker awaits it after
+    /// the pipe closed, before the write-back queue goes.
+    /// </summary>
+    public Task WaitReleasesAsync()
+    {
+        lock (_clientsLock)
+            return Task.WhenAll(_releases.ToArray());
+    }
+
+    /// <summary>
+    /// Looks up a process by id: its key as it runs now, or null with whether that was for lack of rights (the process may
+    /// still run) rather than because it is gone. Tests replace it to play a process the Broker cannot open.
+    /// </summary>
+    internal Func<int, (ProcessKey? Key, bool AccessDenied)> ProcessLookup { get; set; } = processId =>
+    {
+        ProcessKey? key = ProcessWatch.TryGetKey(processId, out bool accessDenied);
+        return (key, accessDenied);
+    };
 
     /// <summary>The process behind <paramref name="clientId"/> as a write token holder.</summary>
     private ProcessKey GetHolder(long clientId)
@@ -124,11 +154,28 @@ public sealed class HookRequestHandler : IDisposable
     /// The process of a pipe client with its creation time; a client the Broker cannot open (or without a process id) gets
     /// a key of its own without creation time, released with its last connection.
     /// </summary>
-    private static ProcessKey ResolveKey(long clientId)
+    private ProcessKey ResolveKey(long clientId)
     {
-        if (clientId is > 0 and <= int.MaxValue && ProcessWatch.TryGetKey((int)clientId) is { } key)
+        if (clientId is > 0 and <= int.MaxValue && ProcessLookup((int)clientId).Key is { } key)
             return key;
         return new ProcessKey((int)Math.Clamp(clientId, int.MinValue, int.MaxValue), 0);
+    }
+
+    /// <summary>
+    /// The holder key of a process named by another one (Share target: pid and creation time from the hook), the same key
+    /// its own pipe connection gets from <see cref="ResolveKey"/>: a process the Broker cannot open becomes (pid, 0), so its
+    /// Close and Adopt find the holder and its last connection releases it. A process that is gone (or whose id now
+    /// belongs to another process) keeps the given key, so the watch reports it gone at once.
+    /// </summary>
+    private ProcessKey ToHolderKey(ProcessKey target)
+    {
+        lock (_clientsLock)
+        {
+            if (_clients.TryGetValue(target.ProcessId, out ClientState? client) && (client.Key == target || client.Key.CreationTime == 0))
+                return client.Key;
+        }
+        (ProcessKey? now, bool accessDenied) = ProcessLookup(target.ProcessId);
+        return now is null && accessDenied ? new ProcessKey(target.ProcessId, 0) : target;
     }
 
     /// <summary>
@@ -271,6 +318,7 @@ public sealed class HookRequestHandler : IDisposable
                     throw new ProtocolStatusException(NtStatus.InvalidParameter, "Negative lock range.");
                 if (_holds is not null)
                 {
+                    RequireHolder(range.WriteToken, clientId);
                     if (type == HookIpcMessageType.Lock)
                         await _holds.LockAsync(range.WriteToken, range.Offset, range.Length, range.Exclusive, range.FailImmediately, cancellationToken).ConfigureAwait(false);
                     else
@@ -331,9 +379,9 @@ public sealed class HookRequestHandler : IDisposable
             {
                 HookShareRequest share = Read(request, HookShareRequest.Read);
                 ProcessKey sender = GetHolder(clientId);
-                var target = new ProcessKey((int)share.TargetProcessId, (long)share.TargetCreationTime);
                 if (_writeBack is null || share.TargetProcessId == 0 || share.TargetProcessId > int.MaxValue)
                     return new HookEmptyReply { Type = type };
+                ProcessKey target = ToHolderKey(new ProcessKey((int)share.TargetProcessId, (long)share.TargetCreationTime));
                 // Only a holder may share a token: anything else could keep a file open for another process.
                 if (!_writeBack.IsHolder(share.WriteToken, sender))
                 {
@@ -379,7 +427,10 @@ public sealed class HookRequestHandler : IDisposable
             {
                 HookTokenRequest flush = Read(request, (ref HookIpcReader r) => HookTokenRequest.Read(ref r, type));
                 if (_writeBack is not null)
+                {
+                    RequireHolder(flush.WriteToken, clientId);
                     await _writeBack.FlushAsync(flush.WriteToken, cancellationToken).ConfigureAwait(false);
+                }
                 return new HookEmptyReply { Type = type };
             }
 
@@ -540,6 +591,16 @@ public sealed class HookRequestHandler : IDisposable
             WatchHolder(holder);
         }
         return new HookResolveReply { Info = ToFileInfo(item.Entry) with { RangeId = item.RangeId }, CachePath = item.LocalPath, WriteToken = token };
+    }
+
+    /// <summary>
+    /// Only a process holding <paramref name="token"/> may flush or lock through it: tokens are numbered in order, so
+    /// another process of the session could guess one.
+    /// </summary>
+    private void RequireHolder(ulong token, long clientId)
+    {
+        if (_writeBack is not null && !_writeBack.IsHolder(token, GetHolder(clientId)))
+            throw new ProtocolStatusException(NtStatus.InvalidHandle, "The process does not hold this write token.");
     }
 
     private static HookListReply BuildListPage(IReadOnlyList<FsEntry> entries, int start)

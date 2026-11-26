@@ -94,28 +94,30 @@ public sealed class WriteBackQueue : IAsyncDisposable
     /// <param name="baseVersion">Version of machine B the cache copy holds (or will hold after the open's truncation).</param>
     public ulong Open(string remotePath, FsVersion? baseVersion, ProcessKey holder)
     {
-        PathState state;
         lock (_lock)
+            return OpenLocked(remotePath, baseVersion, holder);
+    }
+
+    /// <summary><see cref="Open"/> under the queue lock.</summary>
+    private ulong OpenLocked(string remotePath, FsVersion? baseVersion, ProcessKey holder)
+    {
+        if (!_paths.TryGetValue(remotePath, out PathState? state))
         {
-            if (!_paths.TryGetValue(remotePath, out state!))
-            {
-                state = new PathState { RemotePath = remotePath };
-                _paths.Add(remotePath, state);
-            }
-            if (state.OpenCount == 0)
-            {
-                state.Base = baseVersion;
-                state.Deleted = false;
-                state.Conflicted = false;
-                state.ConflictVersion = null;
-            }
-            state.OpenCount++;
+            state = new PathState { RemotePath = remotePath };
+            _paths.Add(remotePath, state);
         }
+        if (state.OpenCount == 0)
+        {
+            state.Base = baseVersion;
+            state.Deleted = false;
+            state.Conflicted = false;
+            state.ConflictVersion = null;
+        }
+        state.OpenCount++;
         ulong token = (ulong)Interlocked.Increment(ref _nextToken);
         var created = new TokenState(state);
         created.Holders.Add(holder);
-        lock (_lock)
-            _tokens[token] = created;
+        _tokens[token] = created;
         return token;
     }
 
@@ -174,9 +176,10 @@ public sealed class WriteBackQueue : IAsyncDisposable
                 _tokens[open].Holders.Add(holder);
                 return open;
             }
+            // In the same lock: two adopters of a file nobody holds share one new token.
+            created = true;
+            return OpenLocked(remotePath, baseVersion, holder);
         }
-        created = true;
-        return Open(remotePath, baseVersion, holder);
     }
 
     /// <summary>Tokens process <paramref name="holder"/> holds now.</summary>

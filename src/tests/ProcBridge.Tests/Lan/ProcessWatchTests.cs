@@ -110,6 +110,22 @@ public sealed class ProcessWatchTests
     }
 
     [TestMethod]
+    public async Task ExitedWithCodeStillActive_IsReportedExited()
+    {
+        // Exit code 259 is STILL_ACTIVE: only the signaled handle tells the process is gone. The Process object keeps
+        // the handle open, so the id still names the exited process.
+        using var child = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", "/d /c exit 259") { UseShellExecute = false, CreateNoWindow = true })!;
+        await child.WaitForExitAsync();
+        Assert.AreEqual(259, child.ExitCode);
+        ProcessKey key = ProcessWatch.TryGetKey(child.Id)!.Value;
+        var exits = new Exits();
+        await using var watch = new ProcessWatch(exits.OnExited);
+
+        Assert.AreEqual(ProcessWatchResult.Exited, watch.Watch(key));
+        Assert.AreEqual(key, await exits.NextAsync());
+    }
+
+    [TestMethod]
     public async Task KeyWithoutCreationTime_IsNotWatched()
     {
         var exits = new Exits();

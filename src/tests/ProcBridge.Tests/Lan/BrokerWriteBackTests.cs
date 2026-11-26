@@ -43,13 +43,14 @@ public sealed class BrokerWriteBackTests
         public BrokerHost Broker { get; private set; }
         public FakeHook Hook { get; private set; }
 
-        public static async Task<Session> StartAsync(ConflictPolicy policy = ConflictPolicy.KeepBoth, TimeSpan? retryDelay = null)
+        /// <param name="configure">Runs on the Broker before the fake hook connects.</param>
+        public static async Task<Session> StartAsync(ConflictPolicy policy = ConflictPolicy.KeepBoth, TimeSpan? retryDelay = null, Action<BrokerHost>? configure = null)
         {
             var peers = new SecurePeers();
             var share = new TempFolder("wshare");
             var work = new TempFolder("wwork");
             AgentServer agent = StartAgent(peers, share, 0);
-            (BrokerHost broker, FakeHook hook) = await StartBrokerAsync(peers, work, agent.Port, policy, retryDelay);
+            (BrokerHost broker, FakeHook hook) = await StartBrokerAsync(peers, work, agent.Port, policy, retryDelay, configure);
             return new Session(peers, share, work, agent, broker, hook);
         }
 
@@ -60,7 +61,7 @@ public sealed class BrokerWriteBackTests
             return agent;
         }
 
-        public static async Task<(BrokerHost, FakeHook)> StartBrokerAsync(SecurePeers peers, TempFolder work, int port, ConflictPolicy policy = ConflictPolicy.KeepBoth, TimeSpan? retryDelay = null)
+        public static async Task<(BrokerHost, FakeHook)> StartBrokerAsync(SecurePeers peers, TempFolder work, int port, ConflictPolicy policy = ConflictPolicy.KeepBoth, TimeSpan? retryDelay = null, Action<BrokerHost>? configure = null)
         {
             string session = Guid.NewGuid().ToString("N");
             BrokerHost broker = BrokerHost.Start(new BrokerOptions
@@ -77,6 +78,7 @@ public sealed class BrokerWriteBackTests
                 // machine B keeps for writers (M8 share mode) would refuse that, so it is only opened for locks here.
                 HoldShareMode = false,
             });
+            configure?.Invoke(broker);
             FakeHook hook = await FakeHook.ConnectAsync(HookIpcProtocol.GetPipeName(session));
             await hook.CallOkAsync(new HookHelloRequest { ProcessId = 1, Architecture = HookArchitecture.X64 }, HookHelloReply.Read);
             return (broker, hook);
@@ -748,5 +750,82 @@ public sealed class BrokerWriteBackTests
         (uint status, _) = await s.Hook.CallAsync(new HookAdoptRequest { MappingIndex = 0, RelativePath = "gone.txt", Flags = HookIpcProtocol.AdoptFlagWrite });
 
         Assert.AreEqual((uint)NtStatus.ObjectNameNotFound, status);
+    }
+
+    /// <summary>The Broker cannot open this test process (as for a child running with higher rights).</summary>
+    private static void CannotOpenSelf(BrokerHost broker)
+        => broker.Pipe.Handler.ProcessLookup = pid => pid == Environment.ProcessId ? (null, true) : (ProcessWatch.TryGetKey(pid, out bool denied), denied);
+
+    [TestMethod]
+    public async Task Share_ToAProcessTheBrokerCannotOpen_IsTheHolderItsOwnCloseLetsGo()
+    {
+        await using Session s = await Session.StartAsync(configure: CannotOpenSelf);
+        HookResolveReply created = await s.ResolveAsync("unopenable.txt", GenericWrite, 2);
+        File.WriteAllText(created.CachePath, "child");
+        ProcessKey real = ProcessWatch.TryGetKey(Environment.ProcessId)!.Value;
+
+        // The sender names the target with its real creation time; the target's own connection has (pid, 0).
+        await ShareAsync(s, created.WriteToken, real);
+        Assert.AreEqual(created.WriteToken, (await AdoptAsync(s, "unopenable.txt", write: true)).WriteToken);
+        Assert.IsFalse(s.Broker.WriteBack.IsHolder(created.WriteToken, real), "the target is one holder, under the key of its connection");
+        await s.CloseAsync(created.WriteToken);
+
+        Assert.IsFalse(s.Broker.WriteBack.IsBusy("unopenable.txt"), "the target's close let the token go");
+        Assert.AreEqual("child", File.ReadAllText(s.Share.Combine("unopenable.txt")));
+    }
+
+    [TestMethod]
+    public async Task FlushAndLock_FromAProcessNotHoldingTheToken_AreRefused()
+    {
+        await using Session s = await Session.StartAsync();
+        HookResolveReply created = await s.ResolveAsync("guessed.txt", GenericWrite, 2);
+        ProcessKey self = ProcessWatch.TryGetKey(Environment.ProcessId)!.Value;
+        ProcessKey other = new(4242, 1);
+        // The token now belongs to another process only (its hold on machine B stays).
+        Assert.IsTrue(s.Broker.WriteBack.AddHolder(created.WriteToken, other));
+        await s.Broker.WriteBack.CloseAsync(created.WriteToken, self, CancellationToken.None);
+
+        (uint flush, _) = await s.Hook.CallAsync(new HookTokenRequest { Type = HookIpcMessageType.Flush, WriteToken = created.WriteToken });
+        (uint locked, _) = await s.Hook.CallAsync(new HookLockRequest { Type = HookIpcMessageType.Lock, WriteToken = created.WriteToken, Offset = 0, Length = 1 });
+        (uint unlocked, _) = await s.Hook.CallAsync(new HookLockRequest { Type = HookIpcMessageType.Unlock, WriteToken = created.WriteToken, Offset = 0, Length = 1 });
+
+        Assert.AreEqual((uint)NtStatus.InvalidHandle, flush);
+        Assert.AreEqual((uint)NtStatus.InvalidHandle, locked);
+        Assert.AreEqual((uint)NtStatus.InvalidHandle, unlocked);
+        await s.Broker.WriteBack.CloseAsync(created.WriteToken, other, CancellationToken.None);
+    }
+
+    [TestMethod]
+    public async Task ConcurrentAdopts_OfAFileNobodyHolds_ShareOneToken()
+    {
+        await using Session s = await Session.StartAsync();
+        for (int round = 0; round < 50; round++)
+        {
+            string path = $"race{round}.txt";
+            using var start = new Barrier(2);
+            Task<ulong>[] adopts = [.. Enumerable.Range(0, 2).Select(i => Task.Run(() =>
+            {
+                start.SignalAndWait();
+                return s.Broker.WriteBack.Adopt(path, new ProcessKey(5000 + i, 1), write: true, null, out _);
+            }))];
+            ulong[] tokens = await Task.WhenAll(adopts);
+            Assert.AreEqual(tokens[0], tokens[1], $"round {round}");
+            await s.Broker.WriteBack.CloseAsync(tokens[0], new ProcessKey(5000, 1), CancellationToken.None);
+            await s.Broker.WriteBack.CloseAsync(tokens[0], new ProcessKey(5001, 1), CancellationToken.None);
+        }
+    }
+
+    [TestMethod]
+    public async Task LastConnectionOfAnUnwatchedProcess_WriteBackEndsBeforeTheBrokerStops()
+    {
+        await using Session s = await Session.StartAsync(configure: CannotOpenSelf);
+        HookResolveReply created = await s.ResolveAsync("last.txt", GenericWrite, 2);
+        File.WriteAllText(created.CachePath, "written before the pipe closed");
+
+        await s.Hook.DisposeAsync();
+        await s.Broker.DisposeAsync();
+
+        Assert.AreEqual("written before the pipe closed", File.ReadAllText(s.Share.Combine("last.txt")));
+        Assert.AreEqual(0, s.Broker.WriteBack.PendingCount, "nothing left queued for the next session");
     }
 }
