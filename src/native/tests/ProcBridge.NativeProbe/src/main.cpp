@@ -3431,6 +3431,67 @@ namespace
         return CloseHandle(handle) ? 0 : 1;
     }
 
+    /// --pid-lock-dup: like --pid-read-handle, then one thread waits in a synchronous LockFileEx on the received handle
+    /// (the process that pushed it holds that range) while another duplicates the handle. Prints "duplicated" when the
+    /// duplicate returns within 15 s, "duplicate blocked" otherwise: DuplicateHandle never waits for the file's I/O, but
+    /// the hook's lazy adopt asking the name of the synchronous handle would.
+    int PidLockDuplicate()
+    {
+        WriteLine(L"pid " + std::to_wstring(GetCurrentProcessId()));
+        const HANDLE handle = ReadHandleValue(GetStdHandle(STD_INPUT_HANDLE));
+        if (handle == nullptr)
+        {
+            WriteLine(L"child: read " + Error(GetLastError()));
+            return 1;
+        }
+        HANDLE locker = CreateThread(nullptr, 0, [](void* context) -> DWORD
+            {
+                OVERLAPPED range{};
+                return LockFileEx(static_cast<HANDLE>(context), LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &range) ? 0 : 1;
+            }, handle, 0, nullptr);
+        Sleep(500); // the locker waits in its LockFileEx by now
+        HANDLE duplicator = CreateThread(nullptr, 0, [](void* context) -> DWORD
+            {
+                HANDLE copy = nullptr;
+                return DuplicateHandle(GetCurrentProcess(), static_cast<HANDLE>(context), GetCurrentProcess(), &copy, 0, FALSE,
+                    DUPLICATE_SAME_ACCESS) ? 0 : 1;
+            }, handle, 0, nullptr);
+        const bool done = locker != nullptr && duplicator != nullptr && WaitForSingleObject(duplicator, 15000) == WAIT_OBJECT_0;
+        WriteLine(done ? L"duplicated" : L"duplicate blocked");
+        ExitProcess(done ? 0 : 2); // the locker waits until the pushing process lets the range go
+    }
+
+    /// --real-under-backing <real file> <other file> <count>: opens real file by its real path (under a backing folder),
+    /// then count handles to other file (kept open, so their values fill every negative cache set), and prints the final
+    /// path of the first handle: still its real path when the hook kept its "not virtual" mark.
+    int RealUnderBacking(const wchar_t* realFile, const wchar_t* otherFile, const wchar_t* countText)
+    {
+        Handle real(OpenRead(realFile));
+        if (!real.IsValid())
+        {
+            WriteLine(L"open: " + Error(GetLastError()));
+            return 1;
+        }
+        const int count = _wtoi(countText);
+        std::vector<HANDLE> others;
+        for (int i = 0; i < count; ++i)
+        {
+            const HANDLE other = OpenRead(otherFile);
+            if (other == INVALID_HANDLE_VALUE)
+            {
+                WriteLine(L"open other: " + Error(GetLastError()));
+                return 1;
+            }
+            others.push_back(other);
+        }
+        WriteLine(FinalPath(real.Get()));
+        for (HANDLE other : others)
+        {
+            CloseHandle(other);
+        }
+        return 0;
+    }
+
     /// --inbox-section: prints "inbox: absent" when no section Local\ProcBridge-HandleInbox-<pid of this process> exists
     /// (the hook no longer creates one), "inbox: present" otherwise.
     int InboxSection()
@@ -3456,13 +3517,23 @@ namespace
         return CloseHandle(handle) ? 0 : 1;
     }
 
-    /// --outside-push <real file> <spawn exe> <virtual root> <real root> [count]: run without a hook. Opens real file,
-    /// starts "<spawn> --map <virtual root> <real root> -- <this probe> --pid-read-handle" (count: --pid-count-queries)
+    /// --outside-push <real file> <spawn exe> <virtual root> <real root> [count|lockdup]: run without a hook. Opens real file,
+    /// starts "<spawn> --map <virtual root> <real root> -- <this probe> --pid-read-handle" (count: --pid-count-queries, lockdup:
+    /// --pid-lock-dup, with a range of real file locked meanwhile)
     /// with pipes for its input and output, reads the hooked child's id, duplicates the handle into it (no hook on this
     /// side tells it anything) and passes the value on; forwards the child's other lines.
-    int OutsidePush(const wchar_t* realFile, const wchar_t* spawn, const wchar_t* virtualRoot, const wchar_t* realRoot, bool countQueries)
+    int OutsidePush(const wchar_t* realFile, const wchar_t* spawn, const wchar_t* virtualRoot, const wchar_t* realRoot,
+        const wchar_t* childCommand)
     {
         Handle opened(OpenRead(realFile));
+        // lockdup: a range lock the child's own lock request on the pushed handle waits for, held until the child exits.
+        Handle blocker(std::wstring(childCommand) == L"--pid-lock-dup" ? OpenRead(realFile) : INVALID_HANDLE_VALUE);
+        OVERLAPPED range{};
+        if (blocker.IsValid() && !LockFileEx(blocker.Get(), LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &range))
+        {
+            WriteLine(L"lock: " + Error(GetLastError()));
+            return 1;
+        }
         SECURITY_ATTRIBUTES inherit{ sizeof(inherit), nullptr, TRUE };
         HANDLE inRead = nullptr;
         HANDLE inWrite = nullptr;
@@ -3479,7 +3550,7 @@ namespace
         Handle output(outRead);
         Handle childOutput(outWrite);
         std::wstring commandLine = L"\"" + std::wstring(spawn) + L"\" --map \"" + virtualRoot + L"\" \"" + realRoot + L"\" -- \""
-            + SelfPath() + (countQueries ? L"\" --pid-count-queries" : L"\" --pid-read-handle");
+            + SelfPath() + L"\" " + childCommand;
         STARTUPINFOW startup{};
         startup.cb = sizeof(startup);
         startup.dwFlags = STARTF_USESTDHANDLES;
@@ -3650,9 +3721,22 @@ namespace
         {
             return PidReadHandle();
         }
-        if (command == L"--outside-push" && (argc == 6 || (argc == 7 && std::wstring(argv[6]) == L"count")))
+        if (command == L"--outside-push" && argc == 6)
         {
-            return OutsidePush(argv[2], argv[3], argv[4], argv[5], argc == 7);
+            return OutsidePush(argv[2], argv[3], argv[4], argv[5], L"--pid-read-handle");
+        }
+        if (command == L"--outside-push" && argc == 7 && (std::wstring(argv[6]) == L"count" || std::wstring(argv[6]) == L"lockdup"))
+        {
+            return OutsidePush(argv[2], argv[3], argv[4], argv[5],
+                std::wstring(argv[6]) == L"count" ? L"--pid-count-queries" : L"--pid-lock-dup");
+        }
+        if (command == L"--real-under-backing" && argc == 5)
+        {
+            return RealUnderBacking(argv[2], argv[3], argv[4]);
+        }
+        if (command == L"--pid-lock-dup" && argc == 2)
+        {
+            return PidLockDuplicate();
         }
         if (command == L"--write-read-handle" && argc == 2)
         {

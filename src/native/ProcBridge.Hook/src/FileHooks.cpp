@@ -132,29 +132,117 @@ namespace ProcBridge::Hook
             ULONG Reserved[10];
         };
 
+        /// ObjectNameInformation of a handle, asked by NameQueryThread. Shared by the asking hook and the worker (two
+        /// references): a worker left waiting frees it when its query finally returns.
+        struct NameQuery
+        {
+            volatile LONG References;
+            HANDLE Handle;
+            NTSTATUS Status;
+            ULONG BufferBytes;
+            BYTE* Buffer; // MaxNameBytes right after the structure
+        };
+
+        // How long lazy adopt waits for a name. The I/O manager serialises every request on a synchronous file object,
+        // the name query included, while calls such as NtDuplicateObject or NtQueryObject(basic) never wait for it: a
+        // name query made in such a hook while another thread waits in a synchronous read or LockFileEx of the same
+        // handle would hang the hook (HandleSharing-Design-vi.md 4.6). The query runs on a worker thread; past this
+        // timeout the handle is taken as not virtual (until its value is closed) and the worker is left to finish.
+        constexpr DWORD NameQueryTimeoutMs = 3000;
+
+        void ReleaseNameQuery(NameQuery* query) noexcept
+        {
+            if (InterlockedDecrement(&query->References) == 0)
+            {
+                HeapFree(GetProcessHeap(), 0, query);
+            }
+        }
+
+        DWORD WINAPI NameQueryThread(void* context) noexcept
+        {
+            NameQuery* query = static_cast<NameQuery*>(context);
+            query->Status = g_ntQueryObject(query->Handle, ObjectNameInformation, query->Buffer, query->BufferBytes, nullptr);
+            ReleaseNameQuery(query);
+            return 0;
+        }
+
+        /// True when some thread holds the loader lock: a new thread would wait for it before running (its
+        /// DLL_THREAD_ATTACH), and the owner may be the calling thread itself. PEB.LoaderLock sits at 0x110 (x64) and
+        /// 0xA0 (x86) on every Windows version the hook supports.
+        bool IsLoaderLockHeld() noexcept
+        {
+            const BYTE* peb = reinterpret_cast<const BYTE*>(NtCurrentTeb()->ProcessEnvironmentBlock);
+            const RTL_CRITICAL_SECTION* lock = *reinterpret_cast<RTL_CRITICAL_SECTION* const*>(peb + (sizeof(void*) == 8 ? 0x110 : 0xA0));
+            return lock == nullptr || *reinterpret_cast<const volatile HANDLE*>(&lock->OwningThread) != nullptr;
+        }
+
+        /// The name of handle (ObjectNameInformation), waited for at most NameQueryTimeoutMs; nullptr when the query
+        /// failed or timed out. The caller releases the result with ReleaseNameQuery. While the loader lock is held the
+        /// query runs on the calling thread (a worker could not start).
+        NameQuery* QueryNameBounded(HANDLE handle) noexcept
+        {
+            NameQuery* query = static_cast<NameQuery*>(HeapAlloc(GetProcessHeap(), 0, sizeof(NameQuery) + MaxNameBytes));
+            if (query == nullptr)
+            {
+                return nullptr;
+            }
+            query->References = 1;
+            query->Handle = handle;
+            query->Status = STATUS_UNSUCCESSFUL;
+            query->BufferBytes = static_cast<ULONG>(MaxNameBytes);
+            query->Buffer = reinterpret_cast<BYTE*>(query + 1);
+            HANDLE worker = nullptr;
+            if (!IsLoaderLockHeld())
+            {
+                InterlockedIncrement(&query->References);
+                worker = CreateThread(nullptr, 0, NameQueryThread, query, 0, nullptr);
+                if (worker == nullptr)
+                {
+                    InterlockedDecrement(&query->References);
+                }
+            }
+            if (worker != nullptr)
+            {
+                const bool done = WaitForSingleObject(worker, NameQueryTimeoutMs) == WAIT_OBJECT_0;
+                g_ntClose(worker);
+                if (!done)
+                {
+                    OutputDebugStringW(L"ProcBridge.Hook: lazy adopt gave up a name query that did not return in time\n");
+                    ReleaseNameQuery(query); // the worker keeps its reference until its query returns
+                    return nullptr;
+                }
+            }
+            else
+            {
+                query->Status = g_ntQueryObject(handle, ObjectNameInformation, query->Buffer, query->BufferBytes, nullptr);
+            }
+            if (!NT_SUCCESS(query->Status))
+            {
+                ReleaseNameQuery(query);
+                return nullptr;
+            }
+            return query;
+        }
+
         /// The mapping whose backing folder holds the real name of handle (the longest such folder when roots nest), or -1:
         /// one name query checked against every mapping. virtualNt (optional) receives the matching virtual NT path
-        /// (FreeString). Counted in g_nameQueries (read by tests through ProcBridgeHookNameQueries).
+        /// (FreeString). Counted in g_nameQueries (read by tests through ProcBridgeHookNameQueries). GetFileType (a
+        /// device query) never waits for the file object, so pipes and consoles are left out before the name query.
         int FindBackingMapping(HANDLE handle, UNICODE_STRING* virtualNt) noexcept
         {
             if (GetFileType(handle) != FILE_TYPE_DISK)
             {
                 return -1;
             }
-            const size_t bufferBytes = sizeof(ObjectNameInfo) + MaxNameBytes;
-            HeapBuffer buffer(bufferBytes);
             g_nameQueries.fetch_add(1, std::memory_order_relaxed);
-            if (!buffer || !NT_SUCCESS(g_ntQueryObject(handle, ObjectNameInformation, buffer.Get(), static_cast<ULONG>(bufferBytes), nullptr)))
+            NameQuery* query = QueryNameBounded(handle);
+            if (query == nullptr)
             {
                 return -1;
             }
-            const UNICODE_STRING& name = reinterpret_cast<const ObjectNameInfo*>(buffer.Get())->Name;
-            if (name.Buffer == nullptr)
-            {
-                return -1;
-            }
+            const UNICODE_STRING& name = reinterpret_cast<const ObjectNameInfo*>(query->Buffer)->Name;
             int found = -1;
-            for (int mapping = 0; mapping < g_resolver->Count(); ++mapping)
+            for (int mapping = 0; name.Buffer != nullptr && mapping < g_resolver->Count(); ++mapping)
             {
                 const PathMapping& map = g_resolver->GetMapping(mapping);
                 if (map.RealDevicePath.Length != 0 && HasPathPrefix(name.Buffer, name.Length, map.RealDevicePath)
@@ -163,14 +251,18 @@ namespace ProcBridge::Hook
                     found = mapping;
                 }
             }
-            if (found < 0 || virtualNt == nullptr)
+            if (found >= 0 && virtualNt != nullptr)
             {
-                return found;
+                const PathMapping& map = g_resolver->GetMapping(found);
+                if (!ConcatString(*virtualNt, map.VirtualNt,
+                    reinterpret_cast<const wchar_t*>(reinterpret_cast<const BYTE*>(name.Buffer) + map.RealDevicePath.Length),
+                    static_cast<size_t>(name.Length) - map.RealDevicePath.Length))
+                {
+                    found = -1;
+                }
             }
-            const PathMapping& map = g_resolver->GetMapping(found);
-            return ConcatString(*virtualNt, map.VirtualNt,
-                reinterpret_cast<const wchar_t*>(reinterpret_cast<const BYTE*>(name.Buffer) + map.RealDevicePath.Length),
-                static_cast<size_t>(name.Length) - map.RealDevicePath.Length) ? found : -1;
+            ReleaseNameQuery(query);
+            return found;
         }
 
         // Lazy adopt (HandleSharing-Design-vi.md 4): a handle the tables do not know may still be a virtual handle that
@@ -178,25 +270,32 @@ namespace ProcBridge::Hook
         // lookup checks its real name once; a handle that is not virtual goes into a small negative cache, so the next
         // lookups cost one object manager query (its fingerprint) instead of a name query that reaches the file system.
         constexpr size_t HandleSlots = 1024; // power of two
+        constexpr size_t NotVirtualWays = 4;
 
         /// Negative cache entry: a handle value seen not to be virtual, with the fingerprint of its object then
-        /// (granted access, handle attributes) and the close epoch of its slot when it was written.
+        /// (granted access, handle attributes). Pinned: a real handle the hook saw opened in local mode, where its name
+        /// may lie under a backing folder; it is never evicted (a full set sends it to g_pinnedOverflow).
         struct NotVirtualEntry
         {
             HANDLE Handle;
             ACCESS_MASK GrantedAccess;
             ULONG Attributes;
-            LONG Epoch;
+            bool Pinned;
         };
 
         // Per slot (from the handle value): bumped when the hook sees a value of that slot closed or handed out again
-        // (NtClose, DUPLICATE_CLOSE_SOURCE, opens and duplicates returning it). A negative entry whose epoch differs is
-        // stale, and an adopt that saw the epoch change while it asked the Broker drops its result. Two values sharing
-        // a slot only cost an extra check.
+        // (NtClose, DUPLICATE_CLOSE_SOURCE, opens and duplicates returning it). An adopt or a negative entry worked out
+        // while the epoch of its slot moved is dropped. Two values sharing a slot only cost an extra check.
         volatile LONG g_closeEpoch[HandleSlots] = {};
-        NotVirtualEntry g_notVirtual[HandleSlots] = {};
+        // Negative cache: one set of NotVirtualWays entries per slot; an entry leaves when its value changes
+        // (HandleValueChanged) or, unpinned, to make room (round robin).
+        NotVirtualEntry g_notVirtual[HandleSlots][NotVirtualWays] = {};
+        BYTE g_notVirtualNext[HandleSlots] = {};
         SRWLOCK g_notVirtualLock = SRWLOCK_INIT;
-        // One adopt at a time: two threads meeting the same unknown handle give one table entry and one Adopt.
+        // Pinned entries whose set was full of pinned entries (a process with thousands of real handles open).
+        HandleTable g_pinnedOverflow;
+        std::atomic<bool> g_anyPinnedOverflow{ false };
+        // Guards the check-and-add of an adopted handle: two threads meeting the same unknown handle give one table entry.
         SRWLOCK g_adoptLock = SRWLOCK_INIT;
 
         size_t HandleSlot(HANDLE handle) noexcept
@@ -209,44 +308,125 @@ namespace ProcBridge::Hook
             return InterlockedCompareExchange(&g_closeEpoch[slot], 0, 0);
         }
 
-        /// The value of handle was closed or now names another object: what lazy adopt learnt about it is stale.
-        void HandleValueChanged(HANDLE handle) noexcept
+        /// After a close of handle succeeded: an adopt that read the epoch between the move before the close and the close
+        /// itself drops its result. Its negative entries were cleared before the close; clearing now could undo the mark
+        /// of a new open that already got the value.
+        void HandleValueClosed(HANDLE handle) noexcept
         {
             InterlockedIncrement(&g_closeEpoch[HandleSlot(handle)]);
         }
 
-        bool IsKnownNotVirtual(HANDLE handle, const ObjectBasicInfo& basic, size_t slot, LONG epoch) noexcept
+        /// The value of handle was closed or now names another object: what lazy adopt learnt about it is stale. The
+        /// epoch moves first, so a RememberNotVirtual that read the old one either sees the new one or is undone here.
+        void HandleValueChanged(HANDLE handle) noexcept
         {
-            AcquireSRWLockShared(&g_notVirtualLock);
-            const NotVirtualEntry& entry = g_notVirtual[slot];
-            const bool known = entry.Handle == handle && entry.GrantedAccess == basic.GrantedAccess
-                && entry.Attributes == basic.Attributes && entry.Epoch == epoch;
-            ReleaseSRWLockShared(&g_notVirtualLock);
-            return known;
-        }
-
-        /// Hot path variant (NtWriteFile): the value and its slot's epoch only, without the fingerprint query. A value
-        /// reused behind the hook's back keeps its old answer until the value is closed through the hook, the hole the
-        /// fingerprint narrows elsewhere (accepted, HandleSharing-Design-vi.md 11 Q2).
-        bool IsKnownNotVirtualValue(HANDLE handle, size_t slot, LONG epoch) noexcept
-        {
-            AcquireSRWLockShared(&g_notVirtualLock);
-            const NotVirtualEntry& entry = g_notVirtual[slot];
-            const bool known = entry.Handle == handle && entry.Epoch == epoch;
-            ReleaseSRWLockShared(&g_notVirtualLock);
-            return known;
-        }
-
-        void RememberNotVirtual(HANDLE handle, const ObjectBasicInfo& basic, size_t slot, LONG epoch) noexcept
-        {
+            const size_t slot = HandleSlot(handle);
+            InterlockedIncrement(&g_closeEpoch[slot]);
             AcquireSRWLockExclusive(&g_notVirtualLock);
-            g_notVirtual[slot] = { handle, basic.GrantedAccess, basic.Attributes, epoch };
+            for (NotVirtualEntry& entry : g_notVirtual[slot])
+            {
+                if (entry.Handle == handle)
+                {
+                    entry = {};
+                }
+            }
+            ReleaseSRWLockExclusive(&g_notVirtualLock);
+            if (g_anyPinnedOverflow.load(std::memory_order_acquire))
+            {
+                g_pinnedOverflow.Remove(handle);
+            }
+        }
+
+        bool IsPinnedOverflow(HANDLE handle) noexcept
+        {
+            return g_anyPinnedOverflow.load(std::memory_order_acquire) && g_pinnedOverflow.Find(handle) >= 0;
+        }
+
+        bool IsKnownNotVirtual(HANDLE handle, const ObjectBasicInfo& basic, size_t slot) noexcept
+        {
+            bool known = false;
+            AcquireSRWLockShared(&g_notVirtualLock);
+            for (const NotVirtualEntry& entry : g_notVirtual[slot])
+            {
+                known = known || (entry.Handle == handle && entry.GrantedAccess == basic.GrantedAccess && entry.Attributes == basic.Attributes);
+            }
+            ReleaseSRWLockShared(&g_notVirtualLock);
+            return known || IsPinnedOverflow(handle);
+        }
+
+        /// Hot path variant (NtWriteFile): the value only, without the fingerprint query. A value reused behind the hook's
+        /// back keeps its old answer until the value is closed through the hook, the hole the fingerprint narrows
+        /// elsewhere (accepted, HandleSharing-Design-vi.md 11 Q2).
+        bool IsKnownNotVirtualValue(HANDLE handle, size_t slot) noexcept
+        {
+            bool known = false;
+            AcquireSRWLockShared(&g_notVirtualLock);
+            for (const NotVirtualEntry& entry : g_notVirtual[slot])
+            {
+                known = known || entry.Handle == handle;
+            }
+            ReleaseSRWLockShared(&g_notVirtualLock);
+            return known || IsPinnedOverflow(handle);
+        }
+
+        /// Records handle as not virtual, unless the epoch of its slot moved since *epoch was read (what the caller found
+        /// may describe an object the value no longer names; nullptr: no check). Its own entry is updated, else a free way is taken, else an
+        /// unpinned one is replaced; a pinned entry finding every way pinned goes to g_pinnedOverflow, an unpinned one is
+        /// not cached.
+        void RememberNotVirtual(HANDLE handle, const ObjectBasicInfo& basic, size_t slot, const LONG* epoch, bool pinned) noexcept
+        {
+            bool overflow = false;
+            AcquireSRWLockExclusive(&g_notVirtualLock);
+            if (epoch == nullptr || ReadCloseEpoch(slot) == *epoch)
+            {
+                NotVirtualEntry (&set)[NotVirtualWays] = g_notVirtual[slot];
+                NotVirtualEntry* target = nullptr;
+                for (NotVirtualEntry& entry : set)
+                {
+                    if (entry.Handle == handle)
+                    {
+                        target = &entry;
+                        pinned = pinned || entry.Pinned;
+                        break;
+                    }
+                }
+                for (size_t way = 0; target == nullptr && way < NotVirtualWays; ++way)
+                {
+                    if (set[way].Handle == nullptr)
+                    {
+                        target = &set[way];
+                    }
+                }
+                for (size_t turn = 0; target == nullptr && turn < NotVirtualWays; ++turn)
+                {
+                    const size_t way = g_notVirtualNext[slot]++ % NotVirtualWays;
+                    if (!set[way].Pinned)
+                    {
+                        target = &set[way];
+                    }
+                }
+                if (target != nullptr)
+                {
+                    *target = { handle, basic.GrantedAccess, basic.Attributes, pinned };
+                }
+                else
+                {
+                    overflow = pinned;
+                }
+            }
+            if (overflow)
+            {
+                // Under the lock: HandleValueChanged removes it from the table only after taking the lock.
+                g_anyPinnedOverflow.store(true, std::memory_order_release);
+                g_pinnedOverflow.Add(handle, 0);
+            }
             ReleaseSRWLockExclusive(&g_notVirtualLock);
         }
 
         /// A handle value this process just got through the hook for something that is not virtual (a real path, a copy of
         /// a real handle): known not virtual from the start. In local mode a real path may lie under a backing folder,
-        /// where the name alone would make lazy adopt take it for a virtual handle.
+        /// where the name alone would make lazy adopt take it for a virtual handle: the entry is pinned. With the Broker
+        /// the backing folder is the session's private cache, so the entry only spares a name query and may be evicted.
         void MarkNotVirtual(HANDLE handle) noexcept
         {
             HandleValueChanged(handle);
@@ -254,12 +434,11 @@ namespace ProcBridge::Hook
             {
                 return;
             }
-            const size_t slot = HandleSlot(handle);
-            const LONG epoch = ReadCloseEpoch(slot);
+            // The value names this object right now: no epoch to check (a close racing with this mark undoes it).
             ObjectBasicInfo basic{};
             if (NT_SUCCESS(g_ntQueryObject(handle, 0 /* ObjectBasicInformation */, &basic, sizeof(basic), nullptr)))
             {
-                RememberNotVirtual(handle, basic, slot, epoch);
+                RememberNotVirtual(handle, basic, HandleSlot(handle), nullptr, !g_resolver->IsRemote());
             }
         }
 
@@ -267,6 +446,7 @@ namespace ProcBridge::Hook
         /// brings machine B's metadata and the write token this process holds (or gets) for it. The caller is the
         /// outermost hook on this thread (its ReentryGuard keeps the Broker's own calls out of here) and found handle in
         /// no table. NtClose never calls it (HandleSharing-Design-vi.md 4.1). hotPath: see IsKnownNotVirtualValue.
+        /// The name query and the Broker's answer run without a lock; g_adoptLock only covers the check and the add.
         void TryAdoptUnknownHandle(HANDLE handle, bool hotPath = false) noexcept
         {
             // Null and pseudo handles (current process or thread: negative values) are never files.
@@ -276,20 +456,14 @@ namespace ProcBridge::Hook
             }
             const size_t slot = HandleSlot(handle);
             const LONG epoch = ReadCloseEpoch(slot);
-            if (hotPath && IsKnownNotVirtualValue(handle, slot, epoch))
+            if (hotPath && IsKnownNotVirtualValue(handle, slot))
             {
                 return;
             }
             ObjectBasicInfo basic{};
             if (!NT_SUCCESS(g_ntQueryObject(handle, 0 /* ObjectBasicInformation */, &basic, sizeof(basic), nullptr))
-                || IsKnownNotVirtual(handle, basic, slot, epoch))
+                || IsKnownNotVirtual(handle, basic, slot))
             {
-                return;
-            }
-            AcquireSRWLockExclusive(&g_adoptLock);
-            if (g_handles.Find(handle) >= 0)
-            {
-                ReleaseSRWLockExclusive(&g_adoptLock); // another thread adopted it meanwhile
                 return;
             }
             UNICODE_STRING virtualNt{};
@@ -303,35 +477,59 @@ namespace ProcBridge::Hook
             {
                 // Not virtual, or machine B does not know the file (any more): a real handle until the value is closed.
                 FreeString(virtualNt);
-                RememberNotVirtual(handle, basic, slot, epoch);
-                ReleaseSRWLockExclusive(&g_adoptLock);
+                RememberNotVirtual(handle, basic, slot, &epoch, false);
                 return;
             }
-            if (ReadCloseEpoch(slot) != epoch)
+            bool added = false;
+            ULONG64 generation = 0;
+            ULONG64 remoteGeneration = 0;
+            AcquireSRWLockExclusive(&g_adoptLock);
+            // Another thread adopted it meanwhile, or the value was closed (or reused) while the name or the Broker's
+            // answer came: an entry now could describe another object.
+            if (g_handles.Find(handle) < 0 && ReadCloseEpoch(slot) == epoch)
             {
-                // Closed (or reused) while the Broker answered: an entry now could describe another object.
-                if (writeToken != 0)
+                g_directoryNames.Remove(handle);
+                g_parentScans.Remove(handle);
+                g_handles.Add(handle, mapping);
+                g_handles.Find(handle, &generation);
+                if (g_resolver->IsRemote())
                 {
-                    g_resolver->CloseWrite(writeToken);
+                    // Its last copy here sends Close for the token, like a handle this process opened.
+                    g_remoteHandles.Add(handle, mapping, virtualNt, info, writeToken);
+                    g_remoteHandles.Find(handle, remoteGeneration);
+                    writeToken = 0; // owned by the entry now
+                    if (info.RangeId != 0)
+                    {
+                        g_anyRange.store(true, std::memory_order_relaxed);
+                    }
                 }
-                FreeString(virtualNt);
-                ReleaseSRWLockExclusive(&g_adoptLock);
-                return;
+                added = true;
             }
-            g_directoryNames.Remove(handle);
-            g_parentScans.Remove(handle);
-            g_handles.Add(handle, mapping);
-            if (g_resolver->IsRemote())
+            else if (writeToken != 0 && g_remoteHandles.HoldsToken(writeToken))
             {
-                // Its last copy here sends Close for the token, like a handle this process opened.
-                g_remoteHandles.Add(handle, mapping, virtualNt, info, writeToken);
-                if (info.RangeId != 0)
-                {
-                    g_anyRange.store(true, std::memory_order_relaxed);
-                }
+                // Adopt from the same process is idempotent: the winner's entry (or another copy) holds this token, and
+                // a Close now would end this process's share under it. Under the lock: no adopt adds it meanwhile.
+                writeToken = 0;
             }
-            FreeString(virtualNt);
             ReleaseSRWLockExclusive(&g_adoptLock);
+            FreeString(virtualNt);
+            if (added && ReadCloseEpoch(slot) != epoch)
+            {
+                // Closed while being added (NtClose moves the epoch before and after the close): drop this entry only, a
+                // new open of the value may have its own by now.
+                g_handles.Remove(handle, generation);
+                if (remoteGeneration != 0)
+                {
+                    RemovedRemoteHandle removed;
+                    g_remoteHandles.Remove(handle, remoteGeneration, &removed);
+                    writeToken = removed.WriteToken;
+                    FreeString(removed.Path);
+                }
+            }
+            if (writeToken != 0)
+            {
+                g_resolver->CloseWrite(writeToken);
+            }
         }
 
         /// Start of a hook that looks handle up: adopts it when no table knows it (lazy adopt).
@@ -2123,17 +2321,20 @@ namespace ProcBridge::Hook
             // which holds a RemoteHandleTable state lock) never touches the remote table: those handles are
             // not in it.
             ReentryGuard guard;
+            // The value's epoch moves before the lookups (an adopt adding the handle after them sees it) and again after
+            // the close (HandleValueClosed). Once closed, another thread may get the value for a new object and mark it,
+            // which a later clear would undo.
+            HandleValueChanged(handle);
             ULONG64 generation = 0;
             const bool tracked = g_handles.Find(handle, &generation) >= 0;
             ULONG64 remoteGeneration = 0;
             const bool remote = guard.IsOutermost() && g_remoteHandles.Find(handle, remoteGeneration);
             // No lazy adopt here (one more query per close of every handle): an unknown virtual handle closed before any
-            // use keeps the Broker's share of this process until it exits. The value's epoch moves before the close: once
-            // closed, another thread may get the value for a new object and mark it, which a later bump would undo.
-            HandleValueChanged(handle);
+            // use keeps the Broker's share of this process until it exits.
             const NTSTATUS status = g_ntClose(handle);
             if (NT_SUCCESS(status))
             {
+                HandleValueClosed(handle);
                 if (tracked)
                 {
                     g_handles.Remove(handle, generation);
@@ -2578,6 +2779,7 @@ namespace ProcBridge::Hook
             RemovedRemoteHandle closedSource;
             if (sourceIsSelf && (options & DUPLICATE_CLOSE_SOURCE) != 0)
             {
+                HandleValueClosed(sourceHandle);
                 if (mapping >= 0)
                 {
                     g_handles.Remove(sourceHandle, generation);

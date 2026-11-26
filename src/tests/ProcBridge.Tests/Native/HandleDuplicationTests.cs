@@ -159,7 +159,50 @@ public sealed class HandleDuplicationTests
         ProcessResult result = sandbox.RunHooked($"\"{sandbox.Binaries.Probe}\" --dup-reuse \"{file}\" \"{outside}\"");
 
         Assert.AreEqual(0, result.ExitCode, result.StandardOutput + result.StandardError);
+        if (result.StandardOutput.Trim().StartsWith("child: fresh ", StringComparison.Ordinal))
+        {
+            // The system handed out another value this run: the case under test did not happen.
+            Assert.Inconclusive("The duplicated handle did not get the closed value: " + result.StandardOutput.Trim());
+        }
         Assert.AreEqual($"child: reused \\\\?\\{file}", result.StandardOutput.Trim());
+    }
+
+    [TestMethod]
+    [DataRow("x64")]
+    [DataRow("Win32")]
+    public void DuplicateOfSynchronousHandleWithPendingLock_Completes(string platform)
+    {
+        // A real handle the hook never saw opened waits in a synchronous LockFileEx on one thread while another thread
+        // duplicates it. DuplicateHandle never waits for the file's I/O; the name query of lazy adopt does (the I/O
+        // manager serialises a synchronous file object), so the adopt must give up instead of blocking the duplicate.
+        using HookSandbox sandbox = new(platform);
+        string outside = Path.Combine(sandbox.BaseDirectory, "outside.txt");
+        File.WriteAllText(outside, "outside");
+
+        ProcessResult result = sandbox.Run(sandbox.Binaries.Probe,
+            $"--outside-push \"{outside}\" \"{sandbox.Binaries.Spawn}\" \"{sandbox.VirtualRoot}\" \"{sandbox.RealRoot}\" lockdup");
+
+        Assert.AreEqual("duplicated", result.StandardOutput.Trim(), result.StandardOutput + result.StandardError);
+        Assert.AreEqual(0, result.ExitCode, result.StandardOutput + result.StandardError);
+    }
+
+    [TestMethod]
+    [DataRow("x64")]
+    [DataRow("Win32")]
+    public void RealHandleUnderBackingFolder_KeepsRealNameAmongManyHandles(string platform)
+    {
+        // Local mode: a handle opened by its real path under the backing folder is marked "not virtual" at the open. The
+        // thousands of handles opened after it share its negative cache set; its mark must stay, or lazy adopt would
+        // take it for a virtual handle by its name.
+        using HookSandbox sandbox = new(platform);
+        string outside = Path.Combine(sandbox.BaseDirectory, "outside.txt");
+        File.WriteAllText(outside, "outside");
+        string real = Path.Combine(sandbox.RealRoot, "a.txt");
+
+        ProcessResult result = sandbox.RunHooked($"\"{sandbox.Binaries.Probe}\" --real-under-backing \"{real}\" \"{outside}\" 5000");
+
+        Assert.AreEqual(0, result.ExitCode, result.StandardOutput + result.StandardError);
+        Assert.AreEqual($"\\\\?\\{real}", result.StandardOutput.Trim());
     }
 
     [TestMethod]

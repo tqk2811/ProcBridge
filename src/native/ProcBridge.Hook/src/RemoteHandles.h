@@ -55,6 +55,9 @@ namespace ProcBridge::Hook
         /// a new open of the same value leaves the new entry alone).
         void Remove(HANDLE handle, ULONG64 generation = 0, RemovedRemoteHandle* removed = nullptr) noexcept;
 
+        /// True when some handle of this process still holds token (counted by Add, released by Remove).
+        bool HoldsToken(uint64_t token) const noexcept;
+
         /// Write token of handle (0 when none or not tracked).
         uint64_t GetWriteToken(HANDLE handle) const noexcept;
 

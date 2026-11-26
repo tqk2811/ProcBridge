@@ -287,6 +287,18 @@ namespace ProcBridge::Hook
         _tokens[_tokenCount++] = { token, 1 };
     }
 
+    bool RemoteHandleTable::HoldsToken(uint64_t token) const noexcept
+    {
+        bool held = false;
+        AcquireSRWLockShared(&_lock);
+        for (size_t i = 0; i < _tokenCount && !held; ++i)
+        {
+            held = _tokens[i].Token == token;
+        }
+        ReleaseSRWLockShared(&_lock);
+        return held;
+    }
+
     bool RemoteHandleTable::ReleaseToken(uint64_t token) noexcept
     {
         for (size_t i = 0; i < _tokenCount; ++i)
