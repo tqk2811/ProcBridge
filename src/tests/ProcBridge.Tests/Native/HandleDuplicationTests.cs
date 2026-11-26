@@ -41,6 +41,28 @@ public sealed class HandleDuplicationTests
     }
 
     [TestMethod]
+    [DataRow("x64", "write-close-source")]
+    [DataRow("Win32", "write-close-source")]
+    [DataRow("x64", "write")]
+    [DataRow("Win32", "write")]
+    [Ignore("Red until the write token follows the duplicated handle (HandleSharing-Design-vi.md section 9 step 5).")]
+    public async Task ChildWritingDuplicatedHandleAfterParentClosed_LandsOnMachineB(string platform, string mode)
+    {
+        // The parent creates the file, duplicates its write handle into a child and closes its own (with
+        // DUPLICATE_CLOSE_SOURCE or right after), then the child appends three times. Write-back must wait for the
+        // child: everything it wrote reaches machine B, not only what the parent wrote.
+        using HookSandbox sandbox = new(platform);
+        await using RemoteSession session = RemoteSession.Start(sandbox, writable: true);
+
+        ProcessResult result = session.Run($"\"{sandbox.Binaries.Probe}\" --dup-to-child \"{sandbox.VirtualRoot}\\out.txt\" \"\" {mode}");
+
+        Assert.AreEqual(0, result.ExitCode, result.StandardOutput + result.StandardError);
+        // Checked before the session ends: the child's own close wrote it back, not the final sync of open files.
+        Assert.AreEqual("parent+a+b+c", File.ReadAllText(Path.Combine(sandbox.RealRoot, "out.txt")));
+        Assert.AreEqual(0, session.Broker.WriteBack.PendingCount);
+    }
+
+    [TestMethod]
     [DataRow("x64", "Win32")]
     [DataRow("Win32", "x64")]
     public void DuplicateIntoChildOfOtherArchitecture_KeepsVirtualName(string platform, string childPlatform)

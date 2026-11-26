@@ -3050,18 +3050,60 @@ namespace
         return CloseHandle(handle) ? 0 : 1;
     }
 
-    /// --dup-to-child <file> [child exe] [squat|close-source]: opens file without inheritance, starts a child
+    /// --write-read-handle: reads a handle value (decimal) from stdin, then appends "+a", "+b" and "+c" through it with
+    /// pauses in between (the parent has long closed its own handle by then), and closes it.
+    int WriteReadHandle()
+    {
+        char text[32] = {};
+        DWORD read = 0;
+        if (!ReadFile(GetStdHandle(STD_INPUT_HANDLE), text, sizeof(text) - 1, &read, nullptr) || read == 0)
+        {
+            WriteLine(L"child: read " + Error(GetLastError()));
+            return 1;
+        }
+        const HANDLE handle = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(std::strtoull(text, nullptr, 10)));
+        const char* parts[] = { "+a", "+b", "+c" };
+        for (const char* part : parts)
+        {
+            Sleep(200);
+            DWORD written = 0;
+            if (!WriteFile(handle, part, 2, &written, nullptr))
+            {
+                WriteLine(L"child write: " + Error(GetLastError()));
+                return 1;
+            }
+        }
+        return CloseHandle(handle) ? 0 : 1;
+    }
+
+    /// --dup-to-child <file> [child exe] [squat|close-source|write|write-close-source]: opens file without inheritance, starts a child
     /// (--read-handle, this probe or child exe) that inherits nothing but its standard handles, duplicates the handle into
     /// the child with DuplicateHandle and sends the value through the child's stdin (as a process passes a handle over
     /// IPC). Prints its own view of the handle, then the child's. squat: the child is created suspended and its handle
     /// inbox name is taken first with a section anyone may write. close-source: DUPLICATE_CLOSE_SOURCE.
+    /// write, write-close-source: the file is created for writing with "parent" in it, the child (--write-read-handle)
+    /// appends through the copy after this process closed its own handle (or DUPLICATE_CLOSE_SOURCE closed it); nothing
+    /// is printed but errors.
     int DuplicateToChild(const wchar_t* file, const wchar_t* childExe, const wchar_t* modeArgument)
     {
-        const std::wstring mode = modeArgument != nullptr ? modeArgument : L"";
-        Handle opened(OpenRead(file));
+        std::wstring mode = modeArgument != nullptr ? modeArgument : L"";
+        const bool write = mode == L"write" || mode == L"write-close-source";
+        if (write)
+        {
+            mode = mode == L"write" ? L"" : L"close-source";
+        }
+        Handle opened(write
+            ? CreateFileW(file, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, CREATE_ALWAYS, 0, nullptr)
+            : OpenRead(file));
         if (!opened.IsValid())
         {
             WriteLine(L"open: " + Error(GetLastError()));
+            return 1;
+        }
+        DWORD parentWritten = 0;
+        if (write && !WriteFile(opened.Get(), "parent", 6, &parentWritten, nullptr))
+        {
+            WriteLine(L"write: " + Error(GetLastError()));
             return 1;
         }
         SECURITY_ATTRIBUTES inherit{ sizeof(inherit), nullptr, TRUE };
@@ -3086,7 +3128,7 @@ namespace
             }
         }
         const std::wstring path = childExe != nullptr && *childExe != 0 ? std::wstring(childExe) : SelfPath();
-        std::wstring commandLine = L"\"" + path + L"\" --read-handle";
+        std::wstring commandLine = L"\"" + path + (write ? L"\" --write-read-handle" : L"\" --read-handle");
         STARTUPINFOEXW startup{};
         startup.StartupInfo.cb = sizeof(startup);
         startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -3123,7 +3165,10 @@ namespace
             squatter.Reset(CreateFileMappingW(INVALID_HANDLE_VALUE, &anyone, PAGE_READWRITE, 0, 1024 * 1024, name.c_str()));
             ResumeThread(child.Thread);
         }
-        WriteLine(L"parent: " + FinalPath(opened.Get()) + L" " + Identity(opened.Get()));
+        if (!write)
+        {
+            WriteLine(L"parent: " + FinalPath(opened.Get()) + L" " + Identity(opened.Get()));
+        }
         HANDLE copy = nullptr;
         const DWORD options = DUPLICATE_SAME_ACCESS | (mode == L"close-source" ? DUPLICATE_CLOSE_SOURCE : 0);
         // close-source: the system closes this process's handle, whatever DuplicateHandle returns.
@@ -3133,6 +3178,11 @@ namespace
             WriteLine(L"duplicate: " + Error(GetLastError()));
             TerminateProcess(child.Process, 1);
             return 1;
+        }
+        if (write)
+        {
+            // Without DUPLICATE_CLOSE_SOURCE the parent closes its own handle before the child writes anything.
+            opened.Reset();
         }
         const std::string value = std::to_string(reinterpret_cast<ULONG_PTR>(copy)) + "\n";
         DWORD written = 0;
@@ -3227,6 +3277,10 @@ namespace
         if (command == L"--dup-to-child" && argc >= 3 && argc <= 5)
         {
             return DuplicateToChild(argv[2], argc >= 4 ? argv[3] : nullptr, argc >= 5 ? argv[4] : nullptr);
+        }
+        if (command == L"--write-read-handle" && argc == 2)
+        {
+            return WriteReadHandle();
         }
         if (command == L"--read-handle" && argc == 2)
         {
