@@ -608,4 +608,74 @@ public sealed class BrokerWriteBackTests
         WriteConflict conflict = s.Broker.WriteBack.Conflicts.Single();
         Assert.AreEqual("edited on machine A", File.ReadAllText(s.Share.Combine(conflict.ConflictPath)));
     }
+
+    /// <summary>A child that runs until its stdin closes (or it is killed).</summary>
+    private static System.Diagnostics.Process StartIdleChild()
+        => System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", "/d /q /k")
+        {
+            RedirectStandardInput = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        })!;
+
+    [TestMethod]
+    public async Task TokenHeldByAnotherProcess_IsWrittenBackWhenThatProcessExits()
+    {
+        // HandleSharing-Design-vi.md 5.2: the opener closing leaves the token to the other holder; the other holder
+        // exiting without a Close ends it, and its last copy reaches machine B before the session ends.
+        await using Session s = await Session.StartAsync();
+        HookResolveReply created = await s.ResolveAsync("shared.txt", GenericWrite, 2);
+        File.WriteAllText(created.CachePath, "parent");
+        using System.Diagnostics.Process child = StartIdleChild();
+        ProcessKey childKey = ProcessWatch.TryGetKey(child.Id)!.Value;
+        Assert.IsTrue(s.Broker.WriteBack.AddHolder(created.WriteToken, childKey));
+        s.Broker.Processes.Watch(childKey);
+
+        await s.CloseAsync(created.WriteToken);
+        Assert.IsTrue(s.Broker.WriteBack.IsBusy("shared.txt"), "the child still holds the token");
+        File.WriteAllText(created.CachePath, "parent+child");
+        child.Kill();
+
+        for (int i = 0; i < 200 && s.Broker.WriteBack.IsBusy("shared.txt"); i++)
+            await Task.Delay(50);
+        Assert.IsFalse(s.Broker.WriteBack.IsBusy("shared.txt"));
+        Assert.AreEqual("parent+child", File.ReadAllText(s.Share.Combine("shared.txt")));
+        Assert.AreEqual(1, s.Broker.Processes.Count, "only the opener (this process) is still watched");
+    }
+
+    [TestMethod]
+    public async Task CloseFromAProcessNotHoldingTheToken_IsIgnored()
+    {
+        await using Session s = await Session.StartAsync();
+        HookResolveReply created = await s.ResolveAsync("own.txt", GenericWrite, 2);
+        File.WriteAllText(created.CachePath, "mine");
+        ProcessKey self = ProcessWatch.TryGetKey(Environment.ProcessId)!.Value;
+        Assert.IsTrue(s.Broker.WriteBack.IsHolder(created.WriteToken, self));
+
+        await s.Broker.WriteBack.CloseAsync(created.WriteToken, new ProcessKey(4242, 1), CancellationToken.None);
+
+        Assert.IsTrue(s.Broker.WriteBack.IsHolder(created.WriteToken, self));
+        Assert.IsTrue(s.Broker.WriteBack.IsBusy("own.txt"));
+        await s.CloseAsync(created.WriteToken);
+        Assert.IsFalse(s.Broker.WriteBack.IsBusy("own.txt"));
+        Assert.AreEqual("mine", File.ReadAllText(s.Share.Combine("own.txt")));
+    }
+
+    [TestMethod]
+    public async Task RetainedToken_EndsWithTheCloseOfTheUnknownHolder()
+    {
+        // Hook IPC Retain (a child inheriting the handle, process not named): one Close from a process that is not a
+        // holder stands for it.
+        await using Session s = await Session.StartAsync();
+        HookResolveReply created = await s.ResolveAsync("kept.txt", GenericWrite, 2);
+        File.WriteAllText(created.CachePath, "kept");
+        await s.Hook.CallOkAsync(new HookTokenRequest { Type = HookIpcMessageType.Retain, WriteToken = created.WriteToken }, (ref HookIpcReader _) => 0);
+
+        await s.CloseAsync(created.WriteToken);
+        Assert.IsTrue(s.Broker.WriteBack.IsBusy("kept.txt"));
+        await s.Broker.WriteBack.CloseAsync(created.WriteToken, new ProcessKey(4242, 1), CancellationToken.None);
+
+        Assert.IsFalse(s.Broker.WriteBack.IsBusy("kept.txt"));
+        Assert.AreEqual("kept", File.ReadAllText(s.Share.Combine("kept.txt")));
+    }
 }

@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
-using System.Runtime.Versioning;
 using System.Threading.Channels;
 using Microsoft.Win32.SafeHandles;
 using ProcBridge.Broker.Enums;
@@ -15,7 +14,6 @@ namespace ProcBridge.Broker;
 /// their own (never on the thread pool's wait thread, never under a caller's lock). A process stays watched until it
 /// exits or the watch is disposed. Thread safe. Owns the process handles and waits.
 /// </summary>
-[SupportedOSPlatform("windows")]
 public sealed class ProcessWatch : IAsyncDisposable
 {
     private const uint Synchronize = 0x00100000;

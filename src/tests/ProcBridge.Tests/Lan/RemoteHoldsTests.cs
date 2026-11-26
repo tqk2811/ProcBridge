@@ -62,32 +62,21 @@ public sealed class RemoteHoldsTests
     }
 
     [TestMethod]
-    public async Task TokenInheritedByAChild_StaysHeldUntilTheLastHolderGoes()
+    public async Task Hold_StaysUntilItsTokenEnds()
     {
+        // Which processes hold the token is the write-back queue's business: the hold goes when it says the token ended.
         using var share = new TempFolder("hold");
         share.WriteFile("a.txt", "data"u8.ToArray());
         await using AgentServer server = StartAgent(share);
         await using AgentClient client = CreateClient(server.Port);
         await using var holds = new RemoteHolds(client, holdShareMode: true, TimeSpan.Zero);
-        const long parent = 10;
-        const long child = 20;
-        holds.ClientConnected(parent);
-        holds.ClientConnected(child);
 
-        await holds.OpenAsync(1, "a.txt", ShareReadWrite, parent, CancellationToken.None);
-        holds.Retain(1, child);
-        holds.ClientDisconnected(parent);
-        Assert.AreEqual(1, holds.Count, "The child still uses the inherited handle.");
-        holds.ClientDisconnected(child);
+        await holds.OpenAsync(1, "a.txt", ShareReadWrite, CancellationToken.None);
+        await holds.ReleaseAsync(2);
+        Assert.AreEqual(1, holds.Count, "another token ending leaves this one");
+        await holds.ReleaseAsync(1);
         Assert.AreEqual(0, holds.Count);
-
-        // Closes: the parent closing its handle leaves the child's.
-        await holds.OpenAsync(2, "a.txt", ShareReadWrite, parent, CancellationToken.None);
-        holds.Retain(2, child);
-        await holds.ReleaseAsync(2, parent);
-        Assert.AreEqual(1, holds.Count);
-        await holds.ReleaseAsync(2, child);
-        Assert.AreEqual(0, holds.Count);
+        await holds.ReleaseAsync(1);
     }
 
     [TestMethod]
@@ -98,8 +87,7 @@ public sealed class RemoteHoldsTests
         await using AgentServer server = StartAgent(share);
         await using AgentClient client = CreateClient(server.Port);
         await using var holds = new RemoteHolds(client, holdShareMode: true, TimeSpan.Zero);
-        holds.ClientConnected(10);
-        await holds.OpenAsync(1, "a.txt", ShareNone, 10, CancellationToken.None);
+        await holds.OpenAsync(1, "a.txt", ShareNone, CancellationToken.None);
         await holds.LockAsync(1, 0, 4, exclusive: true, failImmediately: true, CancellationToken.None);
         Assert.IsFalse(CanOpenLocally(file));
 

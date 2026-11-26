@@ -23,9 +23,10 @@ public sealed class BrokerHost : IAsyncDisposable
     private readonly IDisposable? _factory;
     private int _disposed;
 
-    private BrokerHost(AgentClient client, FileCache cache, ChangeWatcher? watcher, WriteBackQueue writeBack, RemoteHolds holds, HookIpcServer pipe, Task preload, CancellationTokenSource stopping, IDisposable? factory)
+    private BrokerHost(AgentClient client, FileCache cache, ChangeWatcher? watcher, WriteBackQueue writeBack, RemoteHolds holds, ProcessWatch processes, HookIpcServer pipe, Task preload, CancellationTokenSource stopping, IDisposable? factory)
     {
         Holds = holds;
+        Processes = processes;
         _factory = factory;
         _stopping = stopping;
         Client = client;
@@ -40,6 +41,9 @@ public sealed class BrokerHost : IAsyncDisposable
 
     /// <summary>Handles machine B keeps for writers: byte range locks and share mode (M8).</summary>
     public RemoteHolds Holds { get; }
+
+    /// <summary>Processes holding write tokens, watched so what they hold is released when they exit.</summary>
+    public ProcessWatch Processes { get; }
 
     public FileCache Cache { get; }
 
@@ -81,14 +85,16 @@ public sealed class BrokerHost : IAsyncDisposable
         var writeBack = new WriteBackQueue(client, cache, options.GetWriteQueueRoot(), options.GetWriteTarget(), options.ConflictPolicy, options.WriteRetryDelay);
         var holds = new RemoteHolds(client, options.HoldShareMode, options.LockWait);
         writeBack.HoldIdLookup = holds.GetHoldId;
-        var handler = new HookRequestHandler(cache, options.Mappings, writeBack, options.WriteThrough, holds);
+        writeBack.TokenEnded = holds.ReleaseAsync;
+        var processes = new ProcessWatch(key => writeBack.ReleaseProcessAsync(key, CancellationToken.None));
+        var handler = new HookRequestHandler(cache, options.Mappings, writeBack, options.WriteThrough, holds, processes);
         var pipe = new HookIpcServer(HookIpcProtocol.GetPipeName(options.SessionId), handler, progressInterval: options.IpcProgressInterval, maxProgressDuration: options.IpcMaxProgressDuration);
         pipe.Start();
         writeBack.StartRecovery();
 
         var stopping = new CancellationTokenSource();
         Task preload = options.PreloadTree ? PreloadAsync(cache, watcher, options, stopping.Token) : Task.CompletedTask;
-        return new BrokerHost(client, cache, watcher, writeBack, holds, pipe, preload, stopping, factory as IDisposable);
+        return new BrokerHost(client, cache, watcher, writeBack, holds, processes, pipe, preload, stopping, factory as IDisposable);
     }
 
     /// <summary>Encrypted factory when <see cref="BrokerOptions.Security"/> is set; plain only when explicitly allowed.</summary>
@@ -154,6 +160,8 @@ public sealed class BrokerHost : IAsyncDisposable
             return;
         _stopping.Cancel();
         await Pipe.DisposeAsync().ConfigureAwait(false);
+        // Exits already seen are released (written back) before the watch goes.
+        await Processes.DisposeAsync().ConfigureAwait(false);
         // Last write-backs first, while the connection is still up.
         try
         {

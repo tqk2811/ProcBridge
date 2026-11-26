@@ -81,9 +81,18 @@ public sealed class WriteBackQueue : IAsyncDisposable
     /// <summary>Number of queue entries of this target still waiting (not uploaded yet).</summary>
     public int PendingCount => EnumerateEntries().Count();
 
-    /// <summary>Registers an open that may change <paramref name="remotePath"/>; returns its write token.</summary>
+    /// <summary>
+    /// Called after the last holder of a write token let it go and its last write-back ran (machine B can let the held
+    /// handle of the token go). Set once before use.
+    /// </summary>
+    public Func<ulong, Task>? TokenEnded { get; set; }
+
+    /// <summary>
+    /// Registers an open that may change <paramref name="remotePath"/> by process <paramref name="holder"/>; returns its
+    /// write token, held by that process only.
+    /// </summary>
     /// <param name="baseVersion">Version of machine B the cache copy holds (or will hold after the open's truncation).</param>
-    public ulong Open(string remotePath, FsVersion? baseVersion)
+    public ulong Open(string remotePath, FsVersion? baseVersion, ProcessKey holder)
     {
         PathState state;
         lock (_lock)
@@ -103,23 +112,54 @@ public sealed class WriteBackQueue : IAsyncDisposable
             state.OpenCount++;
         }
         ulong token = (ulong)Interlocked.Increment(ref _nextToken);
-        _tokens[token] = new TokenState(state);
+        var created = new TokenState(state);
+        created.Holders.Add(holder);
+        lock (_lock)
+            _tokens[token] = created;
         return token;
     }
 
     /// <summary>
-    /// Another process now holds <paramref name="token"/> too (a handle inherited by a child): the token, and the file
-    /// open, stay until that holder closes it as well. Unknown tokens are ignored.
+    /// Process <paramref name="holder"/> holds <paramref name="token"/> too (a handle duplicated into it or inherited by
+    /// it): the token, and the file open, stay until that process lets it go as well. False when the token is unknown
+    /// (already ended).
+    /// </summary>
+    public bool AddHolder(ulong token, ProcessKey holder)
+    {
+        lock (_lock)
+        {
+            if (!_tokens.TryGetValue(token, out TokenState? held))
+                return false;
+            held.Holders.Add(holder);
+            return true;
+        }
+    }
+
+    /// <summary>True when process <paramref name="holder"/> holds <paramref name="token"/>.</summary>
+    public bool IsHolder(ulong token, ProcessKey holder)
+    {
+        lock (_lock)
+            return _tokens.TryGetValue(token, out TokenState? held) && held.Holders.Contains(holder);
+    }
+
+    /// <summary>
+    /// Some process holds <paramref name="token"/> too, which one is not known (Hook IPC Retain: a handle inherited by a
+    /// child): one later Close from a process that is not a holder lets it go. Unknown tokens are ignored.
     /// </summary>
     public void Retain(ulong token)
     {
         lock (_lock)
         {
-            if (!_tokens.TryGetValue(token, out TokenState? holder))
-                return;
-            holder.Count++;
-            holder.State.OpenCount++;
+            if (_tokens.TryGetValue(token, out TokenState? held))
+                held.UnknownHolders++;
         }
+    }
+
+    /// <summary>Tokens process <paramref name="holder"/> holds now.</summary>
+    internal ulong[] GetTokensOf(ProcessKey holder)
+    {
+        lock (_lock)
+            return _tokens.Where(x => x.Value.Holders.Contains(holder)).Select(x => x.Key).ToArray();
     }
 
     /// <summary>True while a writer has <paramref name="remotePath"/> open: the cache copy must not be replaced by a download.</summary>
@@ -129,18 +169,35 @@ public sealed class WriteBackQueue : IAsyncDisposable
             return _paths.TryGetValue(remotePath, out PathState? state) && state.OpenCount > 0;
     }
 
-    public async Task CloseAsync(ulong token, CancellationToken cancellationToken)
+    /// <summary>
+    /// Process <paramref name="holder"/> closed its last handle holding <paramref name="token"/>. Each close writes the
+    /// cache copy back; the token ends with its last holder, and the end of the file's last token is the final
+    /// write-back. A close from a process that does not hold the token lets one unknown holder (<see cref="Retain"/>) go,
+    /// or is ignored.
+    /// </summary>
+    public async Task CloseAsync(ulong token, ProcessKey holder, CancellationToken cancellationToken)
     {
         PathState state;
+        bool ended;
         bool final;
         lock (_lock)
         {
-            if (!_tokens.TryGetValue(token, out TokenState? holder))
+            if (!_tokens.TryGetValue(token, out TokenState? held))
                 return;
-            if (--holder.Count == 0)
+            if (!held.Holders.Remove(holder))
+            {
+                if (held.UnknownHolders == 0)
+                {
+                    Trace.TraceWarning($"ProcBridge: process {holder.ProcessId} closed write token {token} it does not hold; ignored.");
+                    return;
+                }
+                held.UnknownHolders--;
+            }
+            ended = held.Holders.Count == 0 && held.UnknownHolders == 0;
+            if (ended)
                 _tokens.TryRemove(token, out _);
-            state = holder.State;
-            final = state.OpenCount == 1;
+            state = held.State;
+            final = ended && state.OpenCount == 1;
         }
         try
         {
@@ -148,15 +205,39 @@ public sealed class WriteBackQueue : IAsyncDisposable
         }
         finally
         {
-            lock (_lock)
+            if (ended)
             {
-                if (--state.OpenCount == 0)
+                lock (_lock)
                 {
-                    if (state.Conflicted)
-                        _cache.ForgetContent(state.RemotePath);
-                    if (_paths.TryGetValue(state.RemotePath, out PathState? current) && current == state)
-                        _paths.Remove(state.RemotePath);
+                    if (--state.OpenCount == 0)
+                    {
+                        if (state.Conflicted)
+                            _cache.ForgetContent(state.RemotePath);
+                        if (_paths.TryGetValue(state.RemotePath, out PathState? current) && current == state)
+                            _paths.Remove(state.RemotePath);
+                    }
                 }
+                if (TokenEnded is { } tokenEnded)
+                    await tokenEnded(token).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Process <paramref name="holder"/> exited (or, when it cannot be watched, its last pipe connection closed): it lets
+    /// go of every token it still holds, as if it closed them.
+    /// </summary>
+    public async Task ReleaseProcessAsync(ProcessKey holder, CancellationToken cancellationToken)
+    {
+        foreach (ulong token in GetTokensOf(holder))
+        {
+            try
+            {
+                await CloseAsync(token, holder, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception e) when (e is not OutOfMemoryException)
+            {
+                Trace.TraceError($"ProcBridge: write-back of token {token} after process {holder.ProcessId} went away failed: {e.Message}");
             }
         }
     }
@@ -590,7 +671,7 @@ public sealed class WriteBackQueue : IAsyncDisposable
         /// <summary>Version of machine B the cache copy was derived from; null when unknown (no conflict check).</summary>
         public FsVersion? Base { get; set; }
 
-        /// <summary>Holders of write tokens on the file (each process holding a token counts once).</summary>
+        /// <summary>Write tokens of the file still held by some process (each token counts once, whatever its holders).</summary>
         public int OpenCount { get; set; }
 
         public bool Deleted { get; set; }
@@ -605,13 +686,16 @@ public sealed class WriteBackQueue : IAsyncDisposable
         public string? PendingEntryId { get; set; }
     }
 
-    /// <summary>A write token and the number of processes holding it (a handle inherited by a child adds one).</summary>
+    /// <summary>A write token and the processes holding it (HandleSharing-Design-vi.md section 5.1).</summary>
     private sealed class TokenState(PathState state)
     {
         public PathState State { get; } = state;
 
-        /// <summary>Under the queue lock.</summary>
-        public int Count { get; set; } = 1;
+        /// <summary>Processes holding the token (under the queue lock).</summary>
+        public HashSet<ProcessKey> Holders { get; } = [];
+
+        /// <summary>Holders added by <see cref="Retain"/>, process not known (under the queue lock).</summary>
+        public int UnknownHolders { get; set; }
     }
 
     private sealed class GateRelease(SemaphoreSlim[] gates) : IDisposable

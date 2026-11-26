@@ -1,3 +1,4 @@
+using ProcBridge.Broker.Enums;
 using ProcBridge.Broker.Models;
 using ProcBridge.HookIpc;
 using ProcBridge.HookIpc.Enums;
@@ -43,14 +44,22 @@ public sealed class HookRequestHandler : IDisposable
     private readonly WriteBackQueue? _writeBack;
     private readonly bool _writeThrough;
     private readonly RemoteHolds? _holds;
+    private readonly ProcessWatch? _processes;
+    private readonly Lock _clientsLock = new();
+    private readonly Dictionary<long, ClientState> _clients = [];
 
     /// <param name="writeBack">Write-back queue; null serves the share read only whatever the Agent allows (tests).</param>
     /// <param name="writeThrough">Tell hooks to flush after every write (<see cref="Models.BrokerOptions.WriteThrough"/>).</param>
     /// <param name="holds">Handles machine B keeps for writers (M8 locks and share mode); null keeps locks on machine A only.</param>
+    /// <param name="processes">
+    /// Watches processes holding write tokens, so what they hold is released when they exit; null releases it with the
+    /// process's last pipe connection instead.
+    /// </param>
     public HookRequestHandler(FileCache cache, IReadOnlyList<VirtualMapping> mappings, WriteBackQueue? writeBack = null, bool writeThrough = false,
-        RemoteHolds? holds = null)
+        RemoteHolds? holds = null, ProcessWatch? processes = null)
     {
         _holds = holds;
+        _processes = processes;
         if (mappings.Count > ushort.MaxValue)
             throw new ArgumentException("Too many mappings.", nameof(mappings));
         _cache = cache;
@@ -64,14 +73,75 @@ public sealed class HookRequestHandler : IDisposable
     public void ClientConnected(long clientId)
     {
         Watches.Attach(clientId);
-        _holds?.ClientConnected(clientId);
+        lock (_clientsLock)
+        {
+            if (!_clients.TryGetValue(clientId, out ClientState? client))
+            {
+                client = new ClientState(ResolveKey(clientId));
+                _clients.Add(clientId, client);
+            }
+            client.Connections++;
+        }
     }
 
-    /// <summary>A pipe connection of <paramref name="clientId"/> closed; the watches of its last connection go with it.</summary>
+    /// <summary>
+    /// A pipe connection of <paramref name="clientId"/> closed; the watches of its last connection go with it. A process
+    /// that is not watched (it cannot be opened) is taken as gone with its last connection: the write tokens it still
+    /// holds are released, like the system releases the locks of a dead process.
+    /// </summary>
     public void ClientDisconnected(long clientId)
     {
         Watches.Detach(clientId);
-        _holds?.ClientDisconnected(clientId);
+        ProcessKey? released = null;
+        lock (_clientsLock)
+        {
+            if (_clients.TryGetValue(clientId, out ClientState? client) && --client.Connections <= 0)
+            {
+                _clients.Remove(clientId);
+                if (!client.Watched)
+                    released = client.Key;
+            }
+        }
+        if (released is { } key && _writeBack is not null)
+            _ = _writeBack.ReleaseProcessAsync(key, CancellationToken.None);
+    }
+
+    /// <summary>The process behind <paramref name="clientId"/> as a write token holder.</summary>
+    private ProcessKey GetHolder(long clientId)
+    {
+        lock (_clientsLock)
+        {
+            if (_clients.TryGetValue(clientId, out ClientState? client))
+                return client.Key;
+        }
+        return ResolveKey(clientId);
+    }
+
+    /// <summary>
+    /// The process of a pipe client with its creation time; a client the Broker cannot open (or without a process id) gets
+    /// a key of its own without creation time, released with its last connection.
+    /// </summary>
+    private static ProcessKey ResolveKey(long clientId)
+    {
+        if (clientId is > 0 and <= int.MaxValue && ProcessWatch.TryGetKey((int)clientId) is { } key)
+            return key;
+        return new ProcessKey((int)Math.Clamp(clientId, int.MinValue, int.MaxValue), 0);
+    }
+
+    /// <summary>
+    /// <paramref name="holder"/> now holds a write token: watch it so the token is released when it exits. Call after
+    /// the holder was added, so an exit reported at once finds it.
+    /// </summary>
+    private void WatchHolder(long clientId, ProcessKey holder)
+    {
+        if (_processes is null)
+            return;
+        bool watched = _processes.Watch(holder) != ProcessWatchResult.Unavailable;
+        lock (_clientsLock)
+        {
+            if (_clients.TryGetValue(clientId, out ClientState? client) && client.Key == holder)
+                client.Watched |= watched;
+        }
     }
 
     /// <summary>Directory watches of the hook (WatchDirectory, WaitChanges, WaitAnyChanges, Unwatch).</summary>
@@ -240,17 +310,10 @@ public sealed class HookRequestHandler : IDisposable
             case HookIpcMessageType.Close:
             {
                 HookTokenRequest close = Read(request, (ref HookIpcReader r) => HookTokenRequest.Read(ref r, type));
-                try
-                {
-                    if (_writeBack is not null)
-                        await _writeBack.CloseAsync(close.WriteToken, cancellationToken).ConfigureAwait(false);
-                }
-                finally
-                {
-                    // After the write-back: a commit writes through the held handle while it is open.
-                    if (_holds is not null)
-                        await _holds.ReleaseAsync(close.WriteToken, clientId).ConfigureAwait(false);
-                }
+                // The hold on machine B goes when the token ends (WriteBackQueue.TokenEnded), after the last write-back:
+                // a commit writes through the held handle while it is open.
+                if (_writeBack is not null)
+                    await _writeBack.CloseAsync(close.WriteToken, GetHolder(clientId), cancellationToken).ConfigureAwait(false);
                 return new HookEmptyReply { Type = type };
             }
 
@@ -258,7 +321,6 @@ public sealed class HookRequestHandler : IDisposable
             {
                 HookTokenRequest retain = Read(request, (ref HookIpcReader r) => HookTokenRequest.Read(ref r, type));
                 _writeBack?.Retain(retain.WriteToken);
-                _holds?.Retain(retain.WriteToken, clientId);
                 return new HookEmptyReply { Type = type };
             }
 
@@ -409,20 +471,22 @@ public sealed class HookRequestHandler : IDisposable
             || (created && resolve.CreateDisposition != FileOpen);
         if (contentWrite && !item.Entry.IsDirectory)
         {
-            token = _writeBack!.Open(remotePath, item.Entry.Version);
+            ProcessKey holder = GetHolder(clientId);
+            token = _writeBack!.Open(remotePath, item.Entry.Version, holder);
             if (_holds is not null)
             {
                 try
                 {
-                    await _holds.OpenAsync(token, remotePath, resolve.ShareAccess, clientId, cancellationToken).ConfigureAwait(false);
+                    await _holds.OpenAsync(token, remotePath, resolve.ShareAccess, cancellationToken).ConfigureAwait(false);
                 }
                 catch
                 {
                     // A user of machine B holds the file in a way this open forbids (or the Agent is gone): no open.
-                    await _writeBack.CloseAsync(token, CancellationToken.None).ConfigureAwait(false);
+                    await _writeBack.CloseAsync(token, holder, CancellationToken.None).ConfigureAwait(false);
                     throw;
                 }
             }
+            WatchHolder(clientId, holder);
         }
         return new HookResolveReply { Info = ToFileInfo(item.Entry) with { RangeId = item.RangeId }, CachePath = item.LocalPath, WriteToken = token };
     }
@@ -464,6 +528,17 @@ public sealed class HookRequestHandler : IDisposable
         string root = _mappings[mappingIndex].RemotePath.Trim('/');
         string relative = string.Join('/', segments);
         return root.Length == 0 ? relative : relative.Length == 0 ? root : root + "/" + relative;
+    }
+
+    /// <summary>Pipe connections of one client and the process behind them (under the clients lock).</summary>
+    private sealed class ClientState(ProcessKey key)
+    {
+        public ProcessKey Key { get; } = key;
+
+        public int Connections { get; set; }
+
+        /// <summary>The process is watched: what it holds is released when it exits, not with its last connection.</summary>
+        public bool Watched { get; set; }
     }
 
     private static HookFileInfo ToFileInfo(FsEntry entry) => new()

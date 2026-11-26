@@ -13,9 +13,9 @@ namespace ProcBridge.Broker;
 /// open fail with a sharing violation). They live on one dedicated connection: when it breaks, machine B closes them
 /// (and their locks). A token that had locks then is marked lost: its later Lock and Unlock fail with
 /// <see cref="NtStatus.FileLockConflict"/> instead of silently locking a fresh handle; with <c>holdShareMode</c> every
-/// hold is opened again on a new connection at once, to keep the share mode. A token held by several processes (a
-/// handle inherited by a child, <see cref="Retain"/>) is released with its last Close or when the last of those
-/// processes goes away. Thread safe. Does not own the <see cref="AgentClient"/>.
+/// hold is opened again on a new connection at once, to keep the share mode. A hold lives as long as its write token:
+/// the <see cref="WriteBackQueue"/> knows which processes hold it and calls <see cref="ReleaseAsync"/> once the last one
+/// let it go (closed it or exited). Thread safe. Does not own the <see cref="AgentClient"/>.
 /// </summary>
 public sealed class RemoteHolds : IAsyncDisposable
 {
@@ -25,7 +25,6 @@ public sealed class RemoteHolds : IAsyncDisposable
     private readonly SemaphoreSlim _connectLock = new(1, 1);
     private readonly object _lock = new();
     private readonly Dictionary<ulong, Hold> _holds = [];
-    private readonly Dictionary<long, int> _clientConnections = [];
     private ProtocolConnection? _connection;
     private bool _disposed;
 
@@ -49,10 +48,9 @@ public sealed class RemoteHolds : IAsyncDisposable
     }
 
     /// <summary>A writer opened <paramref name="remotePath"/> with <paramref name="token"/>: hold it on machine B (share mode).</summary>
-    public async Task OpenAsync(ulong token, string remotePath, uint shareAccess, long clientId, CancellationToken cancellationToken)
+    public async Task OpenAsync(ulong token, string remotePath, uint shareAccess, CancellationToken cancellationToken)
     {
         var hold = new Hold(remotePath, shareAccess);
-        hold.Holders.Add(clientId);
         lock (_lock)
             _holds[token] = hold;
         if (!_holdShareMode)
@@ -114,70 +112,19 @@ public sealed class RemoteHolds : IAsyncDisposable
             hold.LockCount = Math.Max(0, hold.LockCount - 1);
     }
 
-    /// <summary>Process <paramref name="clientId"/> now holds <paramref name="token"/> too (a handle inherited by a child).</summary>
-    public void Retain(ulong token, long clientId)
-    {
-        lock (_lock)
-        {
-            if (_holds.TryGetValue(token, out Hold? hold))
-                hold.Holders.Add(clientId);
-        }
-    }
-
     /// <summary>
-    /// Process <paramref name="clientId"/> closed its last handle holding <paramref name="token"/>: with the last holder
-    /// machine B lets the file (and its locks) go.
+    /// The last process holding <paramref name="token"/> let it go (closed its last handle or exited, like the system
+    /// releases the locks of a dead process): machine B lets the file (and its locks) go. Unknown tokens are ignored.
     /// </summary>
-    public async Task ReleaseAsync(ulong token, long clientId)
+    public async Task ReleaseAsync(ulong token)
     {
         Hold? hold;
         lock (_lock)
         {
-            if (!_holds.TryGetValue(token, out hold))
+            if (!_holds.Remove(token, out hold))
                 return;
-            // A holder unknown here (handle passed another way) still closes one hold of the token.
-            if (!hold.Holders.Remove(clientId) && hold.Holders.Count > 0)
-                hold.Holders.RemoveAt(0);
-            if (hold.Holders.Count > 0)
-                return;
-            _holds.Remove(token);
         }
         await CloseAsync(hold).ConfigureAwait(false);
-    }
-
-    /// <summary>A pipe connection of hooked process <paramref name="clientId"/> opened.</summary>
-    public void ClientConnected(long clientId)
-    {
-        lock (_lock)
-            _clientConnections[clientId] = _clientConnections.GetValueOrDefault(clientId) + 1;
-    }
-
-    /// <summary>
-    /// A pipe connection of <paramref name="clientId"/> closed; with its last one the process is gone (or crashed) and
-    /// the holds no other process holds any more are released, like the system releases the locks of a dead process.
-    /// </summary>
-    public void ClientDisconnected(long clientId)
-    {
-        List<Hold> released = [];
-        lock (_lock)
-        {
-            int left = _clientConnections.GetValueOrDefault(clientId) - 1;
-            if (left > 0)
-            {
-                _clientConnections[clientId] = left;
-                return;
-            }
-            _clientConnections.Remove(clientId);
-            foreach (KeyValuePair<ulong, Hold> pair in _holds.ToArray())
-            {
-                if (pair.Value.Holders.RemoveAll(x => x == clientId) == 0 || pair.Value.Holders.Count > 0)
-                    continue;
-                _holds.Remove(pair.Key);
-                released.Add(pair.Value);
-            }
-        }
-        foreach (Hold hold in released)
-            _ = CloseAsync(hold);
     }
 
     private Hold Get(ulong token)
@@ -328,8 +275,6 @@ public sealed class RemoteHolds : IAsyncDisposable
     {
         public string RemotePath { get; } = remotePath;
         public uint ShareAccess { get; } = shareAccess;
-        /// <summary>Processes holding the token, once per Open or Retain (under the holds lock).</summary>
-        public List<long> Holders { get; } = [];
         /// <summary>Locks granted on machine B and not unlocked yet (under the holds lock).</summary>
         public int LockCount { get; set; }
         /// <summary>The connection broke while locks were held: the process's locks are gone.</summary>
