@@ -55,10 +55,21 @@ public sealed class RemoteHoldsTests
     }
 
     /// <summary>Breaks the dedicated connection the holds live on, like a network failure.</summary>
-    private static async Task BreakHoldConnectionAsync(RemoteHolds holds)
+    private static async Task<ProtocolConnection> BreakHoldConnectionAsync(RemoteHolds holds)
     {
         var connection = (ProtocolConnection)typeof(RemoteHolds).GetField("_connection", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(holds)!;
         await connection.DisposeAsync();
+        return connection;
+    }
+
+    /// <summary>The connection the hold of <paramref name="token"/> has its handle on.</summary>
+    private static object? HoldConnectionOf(RemoteHolds holds, ulong token)
+    {
+        var all = (System.Collections.IDictionary)typeof(RemoteHolds).GetField("_holds", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(holds)!;
+        object? hold;
+        lock (holds.GetType().GetField("_lock", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(holds)!)
+            hold = all[token];
+        return hold?.GetType().GetProperty("Connection")!.GetValue(hold);
     }
 
     [TestMethod]
@@ -91,13 +102,15 @@ public sealed class RemoteHoldsTests
         await holds.LockAsync(1, 0, 4, exclusive: true, failImmediately: true, CancellationToken.None);
         Assert.IsFalse(CanOpenLocally(file));
 
-        await BreakHoldConnectionAsync(holds);
+        ProtocolConnection broken = await BreakHoldConnectionAsync(holds);
 
-        // The share mode is held again on a new connection.
+        // The share mode is held again on a new connection. Until the break is seen the old handle may still be open on
+        // machine B (refusing the open too), and the locks are not marked lost yet: wait for the hold to move.
         bool refused = false;
         for (int i = 0; i < 200 && !refused; i++)
         {
-            refused = !CanOpenLocally(file) && holds.Count == 1;
+            object? connection = HoldConnectionOf(holds, 1);
+            refused = connection is not null && !ReferenceEquals(connection, broken) && !CanOpenLocally(file) && holds.Count == 1;
             if (!refused)
                 await Task.Delay(25);
         }

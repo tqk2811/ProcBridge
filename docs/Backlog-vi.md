@@ -291,6 +291,15 @@ Commit (`AgentShare.Write.cs`) đọc thuộc tính, `File.Replace` (mang thuộ
 `WriteBackQueue`), nhưng hai máy A khác nhau ghi cùng một file thì Agent vẫn không xếp hàng hai việc này. Hướng sửa: khoá
 theo đường dẫn trên Agent cho commit, set-info, rename, delete.
 
+## [Vừa] RemoteHoldsTests.BrokenHoldConnection_ReportsTheLostLocks_AndHoldsTheShareModeAgain chập chờn
+
+Đỏ thỉnh thoảng khi chạy cả bộ test trên nhánh `feature/handle-sharing`. Chạy riêng 20 lần trên `082fd6b` và 20 lần trên
+nhánh (sau `c387340`) đều xanh; thêm trễ 300 ms vào `RemoteHolds.OnConnectionLost` cũng không làm đỏ. Nghi vấn: vòng chờ
+dừng ngay lượt đầu khi máy B chưa kịp đóng handle của kết nối cũ (mở cục bộ vẫn bị từ chối, `Count` vẫn là 1) và
+`OnConnectionLost` chưa đánh dấu `Lost`, nên `LockAsync` sau đó mở handle mới và khoá được thay vì `FileLockConflict`. Đã làm
+cứng phía test: chờ tới khi hold chuyển sang kết nối mới ([RemoteHoldsTests.cs](../src/tests/ProcBridge.Tests/Lan/RemoteHoldsTests.cs)).
+Chưa tái hiện được nên chưa chứng minh đây là nguyên nhân; đỏ lại thì lưu log đầy đủ (assert nào) rồi xem tiếp. Ghi 2026-11-27.
+
 ## [Thấp] Test chập chờn chưa tìm ra nguyên nhân
 
 - `ConnectionPoolTests.BusyConnection_IsNotBlockedByAnotherRequestOpeningASlot`: đỏ một lần khi chạy cả bộ test
