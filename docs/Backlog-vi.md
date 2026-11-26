@@ -75,11 +75,24 @@ hơn một chút (object khác quyền cũng lọt). Ghi 2026-11-27.
 ## [Thấp] Chế độ cục bộ: handle tới đường thật dưới thư mục phía sau bị kiểm lười coi là handle ảo
 
 Kiểm lười nhận diện handle ảo bằng tên thật nằm dưới thư mục phía sau. Ở chế độ cục bộ (`PROCBRIDGE_MAP`) thư mục phía sau
-là thư mục thường, nên handle tới đường *thật* dưới nó mà Hook không thấy lúc mở (kế thừa từ cha, nhân bản từ process khác,
-hoặc handle Hook đã mở nhưng ô cache âm của nó bị giá trị khác cùng ô đè, process có trên 1024 handle) bị đổi tên sang
-đường ảo. Handle Hook tự mở cho đường thật được ghi "không ảo" ngay lúc mở. Chế độ Broker không bị: thư mục phía sau là
-cache riêng của phiên. Hướng nếu cần: cha gửi kèm danh sách handle thật trong khối khởi tạo, hoặc cache âm theo bảng băm
-không đè. Ghi 2026-11-27.
+là thư mục thường, nên handle tới đường *thật* dưới nó mà Hook không thấy lúc mở (kế thừa từ cha, nhân bản từ process khác)
+bị đổi tên sang đường ảo. Handle Hook tự mở cho đường thật được ghi "không ảo" ngay lúc mở, dấu đó được ghim (không bị
+handle khác đẩy ra, [HandleSharing-Design-vi.md](HandleSharing-Design-vi.md) mục 4.3). Chế độ Broker không bị: thư mục phía
+sau là cache riêng của phiên. Hướng nếu cần: cha gửi kèm danh sách handle thật trong khối khởi tạo. Ghi 2026-11-27.
+
+## [Thấp] Kiểm lười: thư mục phía sau nằm sau junction/symlink
+
+`FindBackingMapping` so tên thật (đã qua reparse) với `RealDevicePath` theo tiền tố chuỗi; tên 8.3 đã được mở rộng lúc dựng
+ánh xạ, nhưng junction, symlink, điểm mount trên đường thư mục phía sau thì không. Khi đó handle ảo lạ (nhân bản từ process
+khác, kế thừa qua process không có hook) không được nhận, bị coi là handle thật. Hướng: lúc dựng ánh xạ mở thư mục phía sau
+và lấy tên thật của nó (`NtQueryObject`) làm `RealDevicePath` thứ hai. Ghi 2026-11-27.
+
+## [Thấp] Kiểm lười bỏ cuộc sau 3 giây hỏi tên
+
+Tên handle lạ được hỏi trên luồng phụ, chờ tối đa 3 giây ([HandleSharing-Design-vi.md](HandleSharing-Design-vi.md) mục 4.6):
+file object đồng bộ có I/O đang chờ ở luồng khác thì lượt hỏi tên chờ theo. Quá hạn thì handle bị coi là handle thật tới
+khi giá trị đóng (handle ảo khi đó mất tên ảo, metadata máy B và token). Mỗi lần hỏi tên tốn một lần tạo luồng. Hướng nếu
+cần: một luồng phụ dùng lại thay vì tạo mới mỗi lần; thử lại ở lần dùng sau thay vì ghi cache âm. Ghi 2026-11-27.
 
 ## [Vừa] Inject con: các đường chưa phủ
 

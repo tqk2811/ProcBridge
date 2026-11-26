@@ -19,7 +19,7 @@ Hướng user đã chọn:
 ## Mục lục
 
 1. [Mục tiêu và ngoài phạm vi](#1-mục-tiêu-và-ngoài-phạm-vi)
-2. [Luồng hiện tại](#2-luồng-hiện-tại)
+2. [Luồng trước đây](#2-luồng-trước-đây)
 3. [Thiết kế mới: tổng quan](#3-thiết-kế-mới-tổng-quan)
 4. [Kiểm lười handle lạ (lazy adopt)](#4-kiểm-lười-handle-lạ-lazy-adopt)
 5. [Đếm write token theo process](#5-đếm-write-token-theo-process)
@@ -52,7 +52,10 @@ Hướng user đã chọn:
 - Gốc ảo trên ổ giả (`V:\`), luồng dữ liệu phụ: không đổi.
 - Chế độ cục bộ (`PROCBRIDGE_MAP`, không có Broker): không có token; chỉ phần kiểm lười áp dụng.
 
-## 2. Luồng hiện tại
+## 2. Luồng trước đây
+
+Mục này tả luồng **trước** nhánh `feature/handle-lazy-adopt` (hộp thư `HandleInbox`), giữ lại để so sánh. Hộp thư
+và `AdoptIncomingHandles` đã bị xoá nên không còn link tới mã của chúng; số dòng trong mục này là của bản cũ.
 
 ### 2.1 Bảng handle trong Hook
 
@@ -60,9 +63,9 @@ Hướng user đã chọn:
 |---|---|---|
 | `g_handles` (`HandleTable`) | [FileHooks.cpp:49](../src/native/ProcBridge.Hook/src/FileHooks.cpp#L49), [HandleTable.h:10-47](../src/native/ProcBridge.Hook/src/HandleTable.h#L10-L47) | handle → chỉ số ánh xạ, mỗi mục một generation để `Remove(handle, generation)` không xoá nhầm mục mới |
 | `g_remoteHandles` (`RemoteHandleTable`) | [FileHooks.cpp:51](../src/native/ProcBridge.Hook/src/FileHooks.cpp#L51), [RemoteHandles.h:33-126](../src/native/ProcBridge.Hook/src/RemoteHandles.h#L33-L126) | handle → đường ảo, metadata máy B, write token, delete-on-close; **đếm số handle giữ cùng token trong process** (`RetainToken`/`ReleaseToken`, [RemoteHandles.h:109-126](../src/native/ProcBridge.Hook/src/RemoteHandles.h#L109-L126)) |
-| `g_inbox` (`HandleInbox`) | [FileHooks.cpp:54](../src/native/ProcBridge.Hook/src/FileHooks.cpp#L54), [HandleInbox.h](../src/native/ProcBridge.Hook/src/HandleInbox.h) | hộp thư shared memory 16 ô nhận handle process khác nhân bản vào |
+| `g_inbox` (`HandleInbox`) | đã xoá (`HandleInbox.h/.cpp`) | hộp thư shared memory 16 ô nhận handle process khác nhân bản vào |
 | `IsBackedByMapping` | [FileHooks.cpp:97-123](../src/native/ProcBridge.Hook/src/FileHooks.cpp#L97-L123) | `GetFileType` + `NtQueryObject(ObjectNameInformation)`: tên thật nằm dưới `RealDevicePath` của ánh xạ thì là handle ảo |
-| `AdoptIncomingHandles` | [FileHooks.cpp:129-169](../src/native/ProcBridge.Hook/src/FileHooks.cpp#L129-L169) | rút hộp thư ở đầu mọi hook tra handle (vd [FileHooks.cpp:449](../src/native/ProcBridge.Hook/src/FileHooks.cpp#L449)) |
+| `AdoptIncomingHandles` | đã xoá | rút hộp thư ở đầu mọi hook tra handle |
 
 ### 2.2 Write token
 
@@ -188,6 +191,9 @@ sequenceDiagram
   của object manager, **không** đi xuống hệ thống file, rẻ hơn hẳn truy vấn tên.
 - Kích thước cố định (đề xuất 1024 mục, bảng băm mở, thay mục cũ nhất khi đầy). Bị đẩy ra chỉ tốn một lần kiểm lại.
 - Khoá bằng SRW lock riêng; tra cứu dùng khoá shared.
+- Đã làm (sau review, mục 12.3): 1024 tập × 4 ngả theo giá trị handle, thay vòng tròn. Mục **ghim** (handle Hook tự mở cho
+  đường thật ở chế độ cục bộ, mục 12.1) không bao giờ bị đẩy ra; tập đầy mục ghim thì mục ghim mới vào bảng tràn
+  `g_pinnedOverflow`. Mục rời cache khi giá trị đổi (`HandleValueChanged` xoá đúng giá trị đó), không còn so thế hệ.
 
 ### 4.4 Làm mất hiệu lực cache âm (handle bị dùng lại)
 
@@ -216,6 +222,32 @@ loại vì giữ object sống: file thật của app không đóng được h�
 Giữ đường khối khởi tạo hiện có (`ImportFromParent`, [FileHooks.cpp:2659-2700](../src/native/ProcBridge.Hook/src/FileHooks.cpp#L2659-L2700)):
 nhanh, không hỏi Broker, có sẵn metadata. Kiểm lười chỉ là đường dự phòng (vd handle kế thừa từ process cha không có hook
 nhưng là con của process có hook: cha trung gian không inject được). Phần token của kế thừa đổi ở mục 5.3.
+
+### 4.6 Truy vấn tên có giới hạn thời gian
+
+I/O manager tuần tự hoá mọi request trên file object **đồng bộ** (mở không có `FILE_FLAG_OVERLAPPED`), kể cả
+`NtQueryObject(ObjectNameInformation)` và `NtQueryInformationFile` (đo được: lớp mode, access cũng chờ). Còn
+`NtQueryObject(ObjectBasicInformation)`, `NtQueryObject(ObjectTypeInformation)`, `GetFileType` (`FileFsDeviceInformation`) và
+`NtDuplicateObject` thì không chờ. Vậy khi một luồng đang chờ trong `ReadFile`/`LockFileEx` đồng bộ trên handle, luồng khác gọi
+`DuplicateHandle` (hay `NtQueryObject` lớp cơ bản) trên chính handle đó sẽ treo nếu kiểm lười hỏi tên ngay trong hook.
+`CancelSynchronousIo` cũng không gỡ được lượt chờ này (đo: `ERROR_NOT_FOUND`).
+
+Cách làm:
+
+- `GetFileType` lọc trước (không chờ): pipe, console, socket không bao giờ tới bước hỏi tên.
+- Tên của handle đĩa hỏi trên một luồng phụ (`QueryNameBounded`), chờ tối đa `NameQueryTimeoutMs` (3 giây). Quá hạn thì
+  handle được coi là không ảo (ghi cache âm tới khi giá trị đóng), luồng phụ tự giải phóng khi lượt hỏi của nó xong.
+- Đang có luồng giữ loader lock (luồng phụ mới không chạy được tới khi lock nhả, có thể chính luồng gọi đang giữ) thì hỏi
+  ngay trên luồng gọi như trước.
+- Lượt hỏi tên và `Adopt` tới Broker chạy **ngoài** `g_adoptLock`; khoá chỉ bao lượt kiểm lại và thêm mục.
+
+Với các hook mà chính lời gọi gốc cũng chờ file object (đọc, ghi, query/set information...), hỏi tên trên luồng gọi chỉ chờ
+cái lời gọi gốc đằng nào cũng chờ; luồng phụ vẫn dùng chung cho mọi hook cho đơn giản. Ca review nêu (pipe song công đồng
+bộ, luồng A chờ `ReadFile`, luồng B `WriteFile`) treo cả khi **không** có Hook (`WriteFile` chờ `ReadFile` trên cùng file
+object đồng bộ), và `GetFileType` đã loại pipe trước bước hỏi tên.
+
+Giới hạn: handle ảo có I/O đồng bộ chờ lâu hơn 3 giây ở luồng khác đúng lúc lần kiểm đầu thì bị coi là handle thật tới khi
+giá trị đóng. Mỗi lần hỏi tên tốn thêm một lần tạo luồng (chỉ ở lần kiểm đầu của handle lạ, không ở hot path).
 
 ## 5. Đếm write token theo process
 
@@ -469,7 +501,7 @@ T5, T7, T8, T9, T10 đỏ khi tắt kiểm lười; T8 đỏ riêng khi bỏ l�
 | `NtWriteFile` | không nói tới (hook này chỉ cài ở chế độ ghi thẳng) | cài mỗi khi có Broker; lần ghi đầu của handle lạ kiểm lười | con chỉ ghi rồi đóng handle nhận được thì không gọi hook tra handle nào khác: không có token, lần đóng không ghi ngược (T1, T10 đỏ) |
 | Cache âm trên `NtWriteFile` | dấu vân tay mỗi lần | chỉ so giá trị + thế hệ (không thêm syscall) | `NtWriteFile` là hot path; lỗ hở Q2 rộng hơn chút, ghi ở Backlog |
 | Dấu vân tay | quyền + thuộc tính + loại từ `GetFileType` | quyền + thuộc tính | `GetFileType` là thêm một syscall mỗi lần tra; `GetFileType` vẫn chạy ở lần kiểm đầu |
-| Cache âm | bảng băm mở, thay mục cũ nhất | 1024 ô ánh xạ trực tiếp theo giá trị handle, mỗi ô một thế hệ (`g_closeEpoch` cùng kích thước) | đơn giản; hai giá trị cùng ô chỉ tốn thêm một lần kiểm |
+| Cache âm | bảng băm mở, thay mục cũ nhất | 1024 ô ánh xạ trực tiếp theo giá trị handle, mỗi ô một thế hệ (`g_closeEpoch` cùng kích thước) | đơn giản; hai giá trị cùng ô chỉ tốn thêm một lần kiểm (sau review đổi thành 4 ngả + mục ghim, mục 12.3) |
 | Hai luồng cùng nhận | `AddIfAbsent` | một SRW lock cho lượt nhận, kiểm lại `g_handles` sau khi lấy khoá | cùng kết quả (một mục, một `Adopt`), không cần thêm API vào bảng |
 | Thời điểm tăng thế hệ khi đóng | sau khi `NtClose` thành công | trước lần đóng (`NtClose`, `DUPLICATE_CLOSE_SOURCE`) | tăng sau làm hỏng dấu "không ảo" luồng khác vừa ghi cho giá trị mới (`ConcurrentOpenClose_KeepsNamesApart` đỏ) |
 | Handle Hook mở cho đường thật | không nói tới | ghi "không ảo" ngay lúc mở, cả bản sao trong process | chế độ cục bộ: mở thẳng thư mục phía sau là đường thật, tên không phân biệt được với handle ảo |
@@ -495,4 +527,40 @@ Release): `cmd /c for /l %i in (1,1,60) do @(cmd /c type <ảo>\f1.txt > nul & f
 | Sau bước 6 | 7,10 | 7,07 | 7,05 | 7,09 |
 | Sau bước 7 | 7,09 | 7,08 | 7,09 | 7,07 |
 
-Không chậm đi đo được (lần 4 của bản trước là nhiễu). Chưa đo chế độ Broker, nơi `NtWriteFile` giờ được hook.
+Không chậm đi đo được (lần 4 của bản trước là nhiễu).
+
+Chế độ Broker, nơi `NtWriteFile` giờ được hook (hot path: một lần tra `g_handles`, rồi với handle lạ một lần tra cache âm
+dưới khoá shared, không thêm syscall): NativeProbe ghi 200000 lần 1 byte (`WriteFile` đồng bộ) vào một file thật ngoài
+thư mục ảo, x64 Release, mỗi ô 5 lần chạy, ms:
+
+| Bản | Không hook | Hook + Broker |
+|---|---|---|
+| Trước sửa review (d74c800) | 231-242 | 240-254 |
+| Sau sửa review (mục 12.3) | 232-246 | 237-253 |
+
+Hook thêm khoảng 2-4% (vài chục ns mỗi lần ghi), trong mức nhiễu; bản sửa không làm chậm thêm. Đo bằng một test tạm (không
+commit). Ghi qua handle ảo (có token, `FlushWrite` khi ghi thẳng) chưa đo.
+
+### 12.3 Sửa sau review
+
+| Lỗi review | Đã sửa | Test |
+|---|---|---|
+| [Cao] Hỏi tên handle đồng bộ có I/O đang chờ thì treo, lại giữ `g_adoptLock` | mục 4.6: hỏi tên trên luồng phụ có hạn 3 giây, ngoài khoá | `DuplicateOfSynchronousHandleWithPendingLock_Completes` (đỏ trên d74c800: `DuplicateHandle` treo) |
+| [Vừa] `Adopt` tới Broker trong `g_adoptLock` | gọi ngoài khoá; lấy khoá kiểm lại `g_handles` + thế hệ rồi mới thêm. Luồng thua mà process còn mục giữ cùng token thì **không** gửi `Close` (`Adopt` cùng process idempotent, mục 7); không còn mục nào giữ thì gửi | T10 `TwoThreadsMeetingPushedHandleAtOnce_CloseWritesBack` (đỏ khi luồng thua luôn gửi `Close`) |
+| [Vừa] Cache âm ánh xạ trực tiếp: va chạm đẩy dấu "không ảo" lúc mở; `RememberNotVirtual` thế hệ cũ ghi đè | 4 ngả, mục ghim + bảng tràn (mục 4.3); ghi cache âm chỉ khi thế hệ chưa đổi (kiểm dưới khoá) | `RealHandleUnderBackingFolder_KeepsRealNameAmongManyHandles` (5000 handle; đỏ trên d74c800: ra tên ảo) |
+| [Thấp] Thế hệ chỉ tăng trước lần đóng | tăng trước (trước cả lượt tra bảng của `NtClose`) và sau lần đóng thành công (`HandleValueClosed`: chỉ tăng, không xoá dấu của lần mở mới); thêm mục xong kiểm lại thế hệ, đổi thì gỡ đúng mục vừa thêm (theo generation) | không có test riêng (đua hẹp) |
+| [Thấp] `MarkNotVirtual` mọi lần mở | vẫn ghi ở cả hai chế độ, chỉ **ghim** ở chế độ cục bộ | xem dưới |
+| [Thấp] T8 phụ thuộc giá trị handle được cấp lại | giá trị mới (`fresh`) thì `Inconclusive` | |
+
+`MarkNotVirtual` ở chế độ Broker không bỏ hẳn: bỏ thì mỗi handle thật lần đầu đi qua hook đọc/ghi phải hỏi tên (một luồng
+phụ và một truy vấn xuống hệ thống file) thay vì một `ObjectBasicInformation` lúc mở. Mục không ghim nên không giữ chỗ.
+
+Còn lại (không sửa):
+
+- Đua hẹp: lượt kiểm lười đọc thế hệ giữa lần tăng trước và lần đóng thật, rồi thêm mục xong trước lần tăng sau lần đóng
+  (app dùng handle đúng lúc luồng khác đóng nó). Mục treo bị thay ở lần mở kế tiếp trả về cùng giá trị.
+- `FindBackingMapping` so tên thật với `RealDevicePath` theo tiền tố chuỗi. Tên 8.3 trong đường thư mục phía sau đã được
+  mở rộng lúc dựng ánh xạ (`ToLongDosPath`), nhưng junction, symlink, điểm mount thì không: tên object manager trả là đường
+  đã qua reparse, nên thư mục phía sau nằm sau một junction thì tên thật không khớp `RealDevicePath` và handle ảo lạ không
+  được nhận (bị coi là handle thật).
+  Ghi ở Backlog.
