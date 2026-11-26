@@ -57,7 +57,9 @@ namespace ProcBridge::Hook
             DirectoryPage& page) const noexcept override;
         NTSTATUS CloseWrite(uint64_t writeToken) const noexcept override { return SendToken(HookIpc::MessageType::Close, writeToken); }
         NTSTATUS FlushWrite(uint64_t writeToken) const noexcept override { return SendToken(HookIpc::MessageType::Flush, writeToken); }
-        NTSTATUS RetainWrite(uint64_t writeToken) const noexcept override { return SendToken(HookIpc::MessageType::Retain, writeToken); }
+        NTSTATUS ShareWrite(uint64_t writeToken, HANDLE targetProcess) const noexcept override;
+        NTSTATUS Adopt(int mapping, const UNICODE_STRING& path, PathKind kind, ACCESS_MASK grantedAccess, bool writable,
+            HookIpc::FileInfo& info, uint64_t& writeToken) const noexcept override;
         bool IsWriteThrough() const noexcept override { return _writeThrough; }
         NTSTATUS SetInfo(int mapping, const UNICODE_STRING& ntPath, const HookIpc::SetInfoRequest& request,
             HookIpc::FileInfo& info) const noexcept override;

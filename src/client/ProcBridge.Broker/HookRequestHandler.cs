@@ -38,6 +38,7 @@ public sealed class HookRequestHandler : IDisposable
     private const uint FileDirectoryFile = 0x00000001;
     private const uint FileDeleteOnClose = 0x00001000;
     private const long AllocationUnit = 4096;
+    private const uint ShareAll = 0x7; /* FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE */
 
     private readonly FileCache _cache;
     private readonly IReadOnlyList<VirtualMapping> _mappings;
@@ -77,7 +78,9 @@ public sealed class HookRequestHandler : IDisposable
         {
             if (!_clients.TryGetValue(clientId, out ClientState? client))
             {
-                client = new ClientState(ResolveKey(clientId));
+                ProcessKey key = ResolveKey(clientId);
+                // Shared a token (Share) before it connected: already watched.
+                client = new ClientState(key) { Watched = _processes?.IsWatching(key) == true };
                 _clients.Add(clientId, client);
             }
             client.Connections++;
@@ -132,15 +135,17 @@ public sealed class HookRequestHandler : IDisposable
     /// <paramref name="holder"/> now holds a write token: watch it so the token is released when it exits. Call after
     /// the holder was added, so an exit reported at once finds it.
     /// </summary>
-    private void WatchHolder(long clientId, ProcessKey holder)
+    private void WatchHolder(ProcessKey holder)
     {
-        if (_processes is null)
+        if (_processes is null || _processes.Watch(holder) == ProcessWatchResult.Unavailable)
             return;
-        bool watched = _processes.Watch(holder) != ProcessWatchResult.Unavailable;
         lock (_clientsLock)
         {
-            if (_clients.TryGetValue(clientId, out ClientState? client) && client.Key == holder)
-                client.Watched |= watched;
+            foreach (ClientState client in _clients.Values)
+            {
+                if (client.Key == holder)
+                    client.Watched = true;
+            }
         }
     }
 
@@ -193,12 +198,17 @@ public sealed class HookRequestHandler : IDisposable
         switch (type)
         {
             case HookIpcMessageType.Hello:
-                Read(request, HookHelloRequest.Read);
+            {
+                HookHelloRequest hello = Read(request, HookHelloRequest.Read);
+                ProcessKey seen = GetHolder(clientId);
+                if (seen.CreationTime != 0 && (long)hello.ProcessCreationTime != seen.CreationTime)
+                    System.Diagnostics.Trace.TraceWarning($"ProcBridge: hook of process {hello.ProcessId} claims another creation time than pipe client {clientId}.");
                 return new HookHelloReply
                 {
                     VirtualRoots = _mappings.Select(x => x.VirtualRoot).ToArray(),
                     Flags = _writeThrough ? HookIpcProtocol.HelloFlagWriteThrough : (ushort)0,
                 };
+            }
 
             case HookIpcMessageType.Stat:
             {
@@ -317,11 +327,52 @@ public sealed class HookRequestHandler : IDisposable
                 return new HookEmptyReply { Type = type };
             }
 
-            case HookIpcMessageType.Retain:
+            case HookIpcMessageType.Share:
             {
-                HookTokenRequest retain = Read(request, (ref HookIpcReader r) => HookTokenRequest.Read(ref r, type));
-                _writeBack?.Retain(retain.WriteToken);
+                HookShareRequest share = Read(request, HookShareRequest.Read);
+                ProcessKey sender = GetHolder(clientId);
+                var target = new ProcessKey((int)share.TargetProcessId, (long)share.TargetCreationTime);
+                if (_writeBack is null || share.TargetProcessId == 0 || share.TargetProcessId > int.MaxValue)
+                    return new HookEmptyReply { Type = type };
+                // Only a holder may share a token: anything else could keep a file open for another process.
+                if (!_writeBack.IsHolder(share.WriteToken, sender))
+                {
+                    System.Diagnostics.Trace.TraceWarning($"ProcBridge: process {sender.ProcessId} shared write token {share.WriteToken} it does not hold; ignored.");
+                    return new HookEmptyReply { Type = type };
+                }
+                if (_writeBack.AddHolder(share.WriteToken, target))
+                    WatchHolder(target);
                 return new HookEmptyReply { Type = type };
+            }
+
+            case HookIpcMessageType.Adopt:
+            {
+                HookAdoptRequest adopt = Read(request, HookAdoptRequest.Read);
+                string remotePath = ToRemotePath(adopt.MappingIndex, adopt.RelativePath);
+                FsEntry entry = await _cache.StatAsync(remotePath, cancellationToken).ConfigureAwait(false);
+                HookFileInfo info = ToFileInfo(entry) with { RangeId = _cache.GetRangeId(remotePath) };
+                if (_writeBack is null || entry.IsDirectory)
+                    return new HookAdoptReply { Info = info };
+                ProcessKey holder = GetHolder(clientId);
+                bool write = (adopt.Flags & HookIpcProtocol.AdoptFlagWrite) != 0;
+                ulong token = _writeBack.Adopt(remotePath, holder, write, entry.Version, out bool created);
+                if (token == 0)
+                    return new HookAdoptReply { Info = info };
+                if (created && _holds is not null)
+                {
+                    // A writer nobody holds any more (its opener closed or died): machine B holds the file for it with
+                    // the widest share mode, its own is not known.
+                    try
+                    {
+                        await _holds.OpenAsync(token, remotePath, ShareAll, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (Exception e) when (e is not OutOfMemoryException)
+                    {
+                        System.Diagnostics.Trace.TraceWarning($"ProcBridge: cannot hold '{remotePath}' on machine B for an adopted handle: {e.Message}");
+                    }
+                }
+                WatchHolder(holder);
+                return new HookAdoptReply { Info = info, WriteToken = token };
             }
 
             case HookIpcMessageType.Flush:
@@ -486,7 +537,7 @@ public sealed class HookRequestHandler : IDisposable
                     throw;
                 }
             }
-            WatchHolder(clientId, holder);
+            WatchHolder(holder);
         }
         return new HookResolveReply { Info = ToFileInfo(item.Entry) with { RangeId = item.RangeId }, CachePath = item.LocalPath, WriteToken = token };
     }

@@ -125,8 +125,20 @@ namespace ProcBridge::Hook
         /// The last handle holding writeToken was closed (Close) or flushed (Flush): write back if changed.
         virtual NTSTATUS CloseWrite(uint64_t /*writeToken*/) const noexcept { return STATUS_NOT_SUPPORTED; }
         virtual NTSTATUS FlushWrite(uint64_t /*writeToken*/) const noexcept { return STATUS_NOT_SUPPORTED; }
-        /// A child inherited a handle holding writeToken: the Broker then expects one more CloseWrite (the child's).
-        virtual NTSTATUS RetainWrite(uint64_t /*writeToken*/) const noexcept { return STATUS_NOT_SUPPORTED; }
+        /// A handle holding writeToken went to targetProcess (duplicated into it, inherited by it): that process holds
+        /// the token too, until it closes it or exits. Send it before this process's own CloseWrite. STATUS_ACCESS_DENIED
+        /// when the target cannot be identified (its handle lacks query access): the token then stays with this process.
+        virtual NTSTATUS ShareWrite(uint64_t /*writeToken*/, HANDLE /*targetProcess*/) const noexcept { return STATUS_NOT_SUPPORTED; }
+
+        /// A handle this process did not open (duplicated into it, inherited) is the cache copy of path: machine B's
+        /// metadata (with RangeId) and the write token this process now holds for it (0 = none; writable = the handle can
+        /// change the content). The caller sends CloseWrite for a non-zero token when its last copy closes.
+        virtual NTSTATUS Adopt(int mapping, const UNICODE_STRING& path, PathKind kind, ACCESS_MASK /*grantedAccess*/,
+            bool /*writable*/, HookIpc::FileInfo& info, uint64_t& writeToken) const noexcept
+        {
+            writeToken = 0;
+            return Stat(mapping, path, kind, info);
+        }
 
         /// True when every write on a handle with a write token must be followed by FlushWrite.
         virtual bool IsWriteThrough() const noexcept { return false; }

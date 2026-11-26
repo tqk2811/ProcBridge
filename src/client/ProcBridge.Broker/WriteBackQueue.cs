@@ -143,16 +143,40 @@ public sealed class WriteBackQueue : IAsyncDisposable
     }
 
     /// <summary>
-    /// Some process holds <paramref name="token"/> too, which one is not known (Hook IPC Retain: a handle inherited by a
-    /// child): one later Close from a process that is not a holder lets it go. Unknown tokens are ignored.
+    /// Process <paramref name="holder"/> found a handle of <paramref name="remotePath"/> it did not open (Hook IPC Adopt,
+    /// HandleSharing-Design-vi.md section 5.2). Returns the token it holds for the file: one it already holds (shared with
+    /// it), else, when the handle may write, an open token of the file it now holds too (it pulled the handle itself), else
+    /// a new token (no writer left, the copy it writes must still reach machine B). A read-only handle gets 0.
     /// </summary>
-    public void Retain(ulong token)
+    /// <param name="baseVersion">Machine B's version of the file now, for a new token.</param>
+    public ulong Adopt(string remotePath, ProcessKey holder, bool write, FsVersion? baseVersion, out bool created)
     {
+        created = false;
         lock (_lock)
         {
-            if (_tokens.TryGetValue(token, out TokenState? held))
-                held.UnknownHolders++;
+            ulong open = 0;
+            if (_paths.TryGetValue(remotePath, out PathState? state))
+            {
+                foreach (KeyValuePair<ulong, TokenState> pair in _tokens)
+                {
+                    if (pair.Value.State != state)
+                        continue;
+                    if (pair.Value.Holders.Contains(holder))
+                        return pair.Key;
+                    if (open == 0 || pair.Key < open)
+                        open = pair.Key;
+                }
+            }
+            if (!write)
+                return 0;
+            if (open != 0)
+            {
+                _tokens[open].Holders.Add(holder);
+                return open;
+            }
         }
+        created = true;
+        return Open(remotePath, baseVersion, holder);
     }
 
     /// <summary>Tokens process <paramref name="holder"/> holds now.</summary>
@@ -172,8 +196,7 @@ public sealed class WriteBackQueue : IAsyncDisposable
     /// <summary>
     /// Process <paramref name="holder"/> closed its last handle holding <paramref name="token"/>. Each close writes the
     /// cache copy back; the token ends with its last holder, and the end of the file's last token is the final
-    /// write-back. A close from a process that does not hold the token lets one unknown holder (<see cref="Retain"/>) go,
-    /// or is ignored.
+    /// write-back. A close from a process that does not hold the token is ignored.
     /// </summary>
     public async Task CloseAsync(ulong token, ProcessKey holder, CancellationToken cancellationToken)
     {
@@ -186,14 +209,10 @@ public sealed class WriteBackQueue : IAsyncDisposable
                 return;
             if (!held.Holders.Remove(holder))
             {
-                if (held.UnknownHolders == 0)
-                {
-                    Trace.TraceWarning($"ProcBridge: process {holder.ProcessId} closed write token {token} it does not hold; ignored.");
-                    return;
-                }
-                held.UnknownHolders--;
+                Trace.TraceWarning($"ProcBridge: process {holder.ProcessId} closed write token {token} it does not hold; ignored.");
+                return;
             }
-            ended = held.Holders.Count == 0 && held.UnknownHolders == 0;
+            ended = held.Holders.Count == 0;
             if (ended)
                 _tokens.TryRemove(token, out _);
             state = held.State;
@@ -693,9 +712,6 @@ public sealed class WriteBackQueue : IAsyncDisposable
 
         /// <summary>Processes holding the token (under the queue lock).</summary>
         public HashSet<ProcessKey> Holders { get; } = [];
-
-        /// <summary>Holders added by <see cref="Retain"/>, process not known (under the queue lock).</summary>
-        public int UnknownHolders { get; set; }
     }
 
     private sealed class GateRelease(SemaphoreSlim[] gates) : IDisposable

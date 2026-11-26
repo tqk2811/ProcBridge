@@ -15,7 +15,7 @@ namespace ProcBridge.HookIpc;
 /// </remarks>
 public static class HookIpcProtocol
 {
-    public const ushort Version = 5;
+    public const ushort Version = 6;
 
     public const int HeaderSize = 16;
 
@@ -56,6 +56,9 @@ public static class HookIpcProtocol
 
     /// <summary>Bit 1 of the Lock flags: fail at once instead of waiting (NtLockFile FailImmediately).</summary>
     public const ushort LockFlagFailImmediately = 2;
+
+    /// <summary>Bit 0 of the Adopt flags: the handle can change the file's content (it needs a write token).</summary>
+    public const ushort AdoptFlagWrite = 1;
 
     /// <summary>
     /// Header status of a progress message (STATUS_PENDING, no body): the Broker is still working on the request (a large

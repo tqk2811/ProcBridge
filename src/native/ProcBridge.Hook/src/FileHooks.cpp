@@ -2622,7 +2622,7 @@ namespace ProcBridge::Hook
             HookIpc::FileInfo Info;
             uint32_t PathBytes;
             uint32_t Reserved;
-            uint64_t WriteToken; // retained for the child by RetainForChild; 0 = none
+            uint64_t WriteToken; // shared with the child by ShareWithChild; 0 = none
         };
         static_assert(sizeof(InheritedRemoteRecord) == HookIpc::FileInfoSize + 16, "record layout must not depend on the architecture");
 
@@ -2689,7 +2689,7 @@ namespace ProcBridge::Hook
                     }
                     memcpy(path.Buffer, extra + pathOffset, record.PathBytes);
                     path.Length = static_cast<USHORT>(record.PathBytes);
-                    // The parent retained the token for this process: its last close sends Close like the parent's.
+                    // The parent shared the token with this process: its last close sends Close like the parent's.
                     g_remoteHandles.Add(handle, mapping, path, record.Info, record.WriteToken);
                     if (record.Info.RangeId != 0)
                     {
@@ -2699,9 +2699,10 @@ namespace ProcBridge::Hook
                 }
             }
 
-            void RetainForChild(const std::vector<Inject::InheritedHandle>& handles, const std::vector<BYTE>& extra) const noexcept override
+            void ShareWithChild(const std::vector<Inject::InheritedHandle>& handles, const std::vector<BYTE>& extra,
+                HANDLE childProcess) const noexcept override
             {
-                // One retain per token, as the child's table counts its copies and closes the token once.
+                // One share per token: the Broker holds a set of processes per token.
                 std::vector<uint64_t> retained;
                 for (const Inject::InheritedHandle& handle : handles)
                 {
@@ -2722,9 +2723,14 @@ namespace ProcBridge::Hook
                     }
                     catch (...)
                     {
-                        // Out of memory: retain anyway (a duplicate retain only keeps the file open until the session ends).
+                        // Out of memory: share anyway (sharing twice changes nothing).
                     }
-                    g_resolver->RetainWrite(record.WriteToken);
+                    if (!NT_SUCCESS(g_resolver->ShareWrite(record.WriteToken, childProcess)))
+                    {
+                        // The token stays with this process only: what the child writes after this process closed its
+                        // copy may not reach machine B.
+                        OutputDebugStringW(L"ProcBridge.Hook: cannot share a write token with a child process\n");
+                    }
                 }
             }
 

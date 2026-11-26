@@ -39,8 +39,11 @@
 //   Close   request : TokenRequest (handle with a write token closed: write the cache copy back if it changed)
 //           reply   : no body
 //   Flush   request : TokenRequest; reply: no body
-//   Retain  request : TokenRequest (a child inherited a handle holding the token: Close is then expected once more)
+//   Share   request : ShareRequest (a handle holding the token went to another process, duplicated or inherited: that
+//                     process holds the token too, until it closes it or exits; sent before the sender's own Close)
 //           reply   : no body
+//   Adopt   request : AdoptRequest, then String RelativePath (a handle the hook did not open is the cache copy of a
+//                     virtual path); reply: FileInfo, uint64 WriteToken (the token this process now holds, 0 = none)
 //   SetInfo request : SetInfoRequest, then String RelativePath; reply: FileInfo
 //   Rename  request : RenameRequest, then String RelativePath, String NewRelativePath
 //           reply   : FileInfo, then String NewCachePath (machine B renamed; rename the cache handle to it)
@@ -56,7 +59,7 @@
 
 namespace ProcBridge::HookIpc
 {
-    constexpr uint16_t ProtocolVersion = 5;
+    constexpr uint16_t ProtocolVersion = 6;
     constexpr uint32_t HeaderSize = 16;
     constexpr uint32_t MaxMessageSize = 65536;
     constexpr uint32_t FileInfoSize = 64;
@@ -72,6 +75,7 @@ namespace ProcBridge::HookIpc
     constexpr uint32_t FetchReplyFlagComplete = 1;  // FetchRangeReply.Flags
     constexpr uint16_t LockFlagExclusive = 1;
     constexpr uint16_t LockFlagFailImmediately = 2;
+    constexpr uint16_t AdoptFlagWrite = 1;          // AdoptRequest.Flags: the handle can change the content
     constexpr uint32_t StatusInProgress = 0x103;   // progress message: the reply follows, wait the call timeout again
     constexpr const wchar_t* PipeNamePrefix = L"\\\\.\\pipe\\ProcBridge-";
 
@@ -89,11 +93,13 @@ namespace ProcBridge::HookIpc
         SetInfo = 10,
         Rename = 11,
         Delete = 12,
-        Retain = 13,
+        // 13 was Retain (protocol 5), replaced by Share: not to be used again.
         FetchRange = 14,
         Lock = 15,
         Unlock = 16,
         WaitAnyChanges = 17,
+        Share = 18,
+        Adopt = 19,
     };
 
     enum class Architecture : uint16_t
@@ -131,6 +137,7 @@ namespace ProcBridge::HookIpc
         uint32_t ProcessId;
         uint16_t Architecture;
         uint16_t Reserved;
+        uint64_t ProcessCreationTime; // FILETIME UTC (GetProcessTimes)
     };
 
     struct HelloReply
@@ -227,6 +234,21 @@ namespace ProcBridge::HookIpc
         uint64_t WriteToken;
     };
 
+    struct ShareRequest
+    {
+        uint64_t WriteToken;
+        uint32_t TargetProcessId;
+        uint32_t Reserved;
+        uint64_t TargetCreationTime; // FILETIME UTC: a reused process id is not taken for the target
+    };
+
+    struct AdoptRequest
+    {
+        uint16_t MappingIndex;
+        uint16_t Flags;         // AdoptFlagWrite
+        uint32_t GrantedAccess; // of the handle (ObjectBasicInformation)
+    };
+
     enum SetInfoField : uint16_t
     {
         SetAttributes = 1,
@@ -280,7 +302,7 @@ namespace ProcBridge::HookIpc
 
     static_assert(sizeof(MessageHeader) == HeaderSize);
     static_assert(sizeof(FileInfo) == FileInfoSize);
-    static_assert(sizeof(HelloRequest) == 8);
+    static_assert(sizeof(HelloRequest) == 16);
     static_assert(sizeof(HelloReply) == 4);
     static_assert(sizeof(PathRequest) == 4);
     static_assert(sizeof(ResolveRequest) == 24);
@@ -296,6 +318,8 @@ namespace ProcBridge::HookIpc
     static_assert(sizeof(ChangeEntry) == 4);
     static_assert(sizeof(UnwatchRequest) == 4);
     static_assert(sizeof(TokenRequest) == 8);
+    static_assert(sizeof(ShareRequest) == 24);
+    static_assert(sizeof(AdoptRequest) == 8);
     static_assert(sizeof(SetInfoRequest) == 40);
     static_assert(sizeof(RenameRequest) == 8);
     static_assert(sizeof(FetchRangeRequest) == 24);

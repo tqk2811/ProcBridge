@@ -32,6 +32,21 @@ namespace ProcBridge::Hook
             return ERROR_SUCCESS;
         }
 
+        /// Creation time of process (FILETIME UTC); false when it cannot be read (no query access).
+        bool GetCreationTime(HANDLE process, uint64_t& creationTime) noexcept
+        {
+            FILETIME created{};
+            FILETIME exited{};
+            FILETIME kernel{};
+            FILETIME user{};
+            if (!GetProcessTimes(process, &created, &exited, &kernel, &user))
+            {
+                return false;
+            }
+            creationTime = (static_cast<uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+            return true;
+        }
+
         HookIpc::Architecture CurrentArchitecture() noexcept
         {
 #if defined(_M_ARM64)
@@ -83,6 +98,9 @@ namespace ProcBridge::Hook
         HookIpc::HelloRequest request{};
         request.ProcessId = GetCurrentProcessId();
         request.Architecture = static_cast<uint16_t>(CurrentArchitecture());
+        uint64_t creationTime = 0;
+        GetCreationTime(GetCurrentProcess(), creationTime);
+        request.ProcessCreationTime = creationTime;
         hello.Put(&request, sizeof(request));
         BrokerReply reply;
         if (!NT_SUCCESS(hello.Send(reply)))
@@ -244,6 +262,45 @@ namespace ProcBridge::Hook
         call.Put(&request, sizeof(request));
         BrokerReply reply;
         return call.Send(reply);
+    }
+
+    NTSTATUS BrokerResolver::ShareWrite(uint64_t writeToken, HANDLE targetProcess) const noexcept
+    {
+        HookIpc::ShareRequest request{};
+        request.WriteToken = writeToken;
+        request.TargetProcessId = GetProcessId(targetProcess);
+        uint64_t creationTime = 0;
+        if (request.TargetProcessId == 0 || !GetCreationTime(targetProcess, creationTime))
+        {
+            return STATUS_ACCESS_DENIED;
+        }
+        request.TargetCreationTime = creationTime;
+        BrokerClient::Call call(_client, HookIpc::MessageType::Share);
+        call.Put(&request, sizeof(request));
+        BrokerReply reply;
+        return call.Send(reply);
+    }
+
+    NTSTATUS BrokerResolver::Adopt(int mapping, const UNICODE_STRING& path, PathKind kind, ACCESS_MASK grantedAccess,
+        bool writable, HookIpc::FileInfo& info, uint64_t& writeToken) const noexcept
+    {
+        writeToken = 0;
+        const UNICODE_STRING relative = RelativePath(mapping, path, kind);
+        BrokerClient::Call call(_client, HookIpc::MessageType::Adopt);
+        HookIpc::AdoptRequest request{};
+        request.MappingIndex = static_cast<uint16_t>(mapping);
+        request.Flags = writable ? HookIpc::AdoptFlagWrite : 0;
+        request.GrantedAccess = grantedAccess;
+        call.Put(&request, sizeof(request));
+        call.PutString(relative.Buffer, relative.Length);
+        BrokerReply reply;
+        const NTSTATUS status = call.Send(reply);
+        if (!NT_SUCCESS(status))
+        {
+            return status;
+        }
+        MessageReader reader(reply.Body, reply.BodySize);
+        return reader.Read(&info, sizeof(info)) && reader.Read(&writeToken, sizeof(writeToken)) ? STATUS_SUCCESS : STATUS_INVALID_NETWORK_RESPONSE;
     }
 
     NTSTATUS BrokerResolver::SendToken(HookIpc::MessageType type, uint64_t writeToken) const noexcept

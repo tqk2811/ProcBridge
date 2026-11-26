@@ -41,12 +41,32 @@ public sealed class HookIpcCodecTests
     [TestMethod]
     public void Hello_RoundTrips()
     {
-        HookHelloRequest request = RoundTrip(new HookHelloRequest { ProcessId = 4242, Architecture = HookArchitecture.X86 }, HookHelloRequest.Read);
+        HookHelloRequest request = RoundTrip(new HookHelloRequest { ProcessId = 4242, Architecture = HookArchitecture.X86, ProcessCreationTime = 0x01DB_0000_1234_5678 }, HookHelloRequest.Read);
         Assert.AreEqual(4242u, request.ProcessId);
         Assert.AreEqual(HookArchitecture.X86, request.Architecture);
+        Assert.AreEqual(0x01DB_0000_1234_5678ul, request.ProcessCreationTime);
 
         HookHelloReply reply = RoundTrip(new HookHelloReply { VirtualRoots = [@"D:\Remote\Proj", "V:", "Đường dẫn"] }, HookHelloReply.Read);
         CollectionAssert.AreEqual(new[] { @"D:\Remote\Proj", "V:", "Đường dẫn" }, reply.VirtualRoots.ToArray());
+    }
+
+    [TestMethod]
+    public void ShareAndAdopt_RoundTrip()
+    {
+        HookShareRequest share = RoundTrip(new HookShareRequest { WriteToken = 9, TargetProcessId = 1234, TargetCreationTime = ulong.MaxValue - 1 }, HookShareRequest.Read);
+        Assert.AreEqual(9ul, share.WriteToken);
+        Assert.AreEqual(1234u, share.TargetProcessId);
+        Assert.AreEqual(ulong.MaxValue - 1, share.TargetCreationTime);
+
+        HookAdoptRequest adopt = RoundTrip(new HookAdoptRequest { MappingIndex = 2, Flags = HookIpcProtocol.AdoptFlagWrite, GrantedAccess = 0x12019F, RelativePath = @"out\a.txt" }, HookAdoptRequest.Read);
+        Assert.AreEqual(2, adopt.MappingIndex);
+        Assert.AreEqual(HookIpcProtocol.AdoptFlagWrite, adopt.Flags);
+        Assert.AreEqual(0x12019Fu, adopt.GrantedAccess);
+        Assert.AreEqual(@"out\a.txt", adopt.RelativePath);
+
+        HookAdoptReply reply = RoundTrip(new HookAdoptReply { Info = SampleInfo with { RangeId = 5 }, WriteToken = 7 }, HookAdoptReply.Read);
+        Assert.AreEqual(SampleInfo with { RangeId = 5 }, reply.Info);
+        Assert.AreEqual(7ul, reply.WriteToken);
     }
 
     [TestMethod]
@@ -167,7 +187,7 @@ public sealed class HookIpcCodecTests
         // header(16) + u16 + u16 + u16 len + 2 chars
         Assert.AreEqual(16 + 2 + 2 + 2 + 4, size);
         CollectionAssert.AreEqual(
-            new byte[] { 26, 0, 0, 0, 5, 0, 2, 0, 4, 3, 2, 1, 0, 0, 0, 0, 0x0B, 0x0A, 0, 0, 2, 0, (byte)'a', 0, (byte)'b', 0 },
+            new byte[] { 26, 0, 0, 0, 6, 0, 2, 0, 4, 3, 2, 1, 0, 0, 0, 0, 0x0B, 0x0A, 0, 0, 2, 0, (byte)'a', 0, (byte)'b', 0 },
             buffer[..size]);
 
         size = HookIpcCodec.Encode(buffer, 0, new HookStatReply { Info = SampleInfo });

@@ -661,21 +661,92 @@ public sealed class BrokerWriteBackTests
         Assert.AreEqual("mine", File.ReadAllText(s.Share.Combine("own.txt")));
     }
 
+    private static Task ShareAsync(Session s, ulong token, ProcessKey target)
+        => s.Hook.CallOkAsync(new HookShareRequest { WriteToken = token, TargetProcessId = (uint)target.ProcessId, TargetCreationTime = (ulong)target.CreationTime }, (ref HookIpcReader _) => 0);
+
+    private static Task<HookAdoptReply> AdoptAsync(Session s, string path, bool write)
+        => s.Hook.CallOkAsync(new HookAdoptRequest { MappingIndex = 0, RelativePath = path, Flags = write ? HookIpcProtocol.AdoptFlagWrite : (ushort)0 }, HookAdoptReply.Read);
+
     [TestMethod]
-    public async Task RetainedToken_EndsWithTheCloseOfTheUnknownHolder()
+    public async Task Share_ThenParentCloses_ChildKeepsTheTokenUntilItExits()
     {
-        // Hook IPC Retain (a child inheriting the handle, process not named): one Close from a process that is not a
-        // holder stands for it.
         await using Session s = await Session.StartAsync();
-        HookResolveReply created = await s.ResolveAsync("kept.txt", GenericWrite, 2);
-        File.WriteAllText(created.CachePath, "kept");
-        await s.Hook.CallOkAsync(new HookTokenRequest { Type = HookIpcMessageType.Retain, WriteToken = created.WriteToken }, (ref HookIpcReader _) => 0);
+        HookResolveReply created = await s.ResolveAsync("dup.txt", GenericWrite, 2);
+        File.WriteAllText(created.CachePath, "parent");
+        using System.Diagnostics.Process child = StartIdleChild();
+        ProcessKey childKey = ProcessWatch.TryGetKey(child.Id)!.Value;
 
+        await ShareAsync(s, created.WriteToken, childKey);
         await s.CloseAsync(created.WriteToken);
-        Assert.IsTrue(s.Broker.WriteBack.IsBusy("kept.txt"));
-        await s.Broker.WriteBack.CloseAsync(created.WriteToken, new ProcessKey(4242, 1), CancellationToken.None);
 
-        Assert.IsFalse(s.Broker.WriteBack.IsBusy("kept.txt"));
-        Assert.AreEqual("kept", File.ReadAllText(s.Share.Combine("kept.txt")));
+        Assert.IsTrue(s.Broker.WriteBack.IsHolder(created.WriteToken, childKey));
+        Assert.IsTrue(s.Broker.Processes.IsWatching(childKey));
+        File.WriteAllText(created.CachePath, "parent+child");
+        child.StandardInput.Close();
+        for (int i = 0; i < 200 && s.Broker.WriteBack.IsBusy("dup.txt"); i++)
+            await Task.Delay(50);
+        Assert.AreEqual("parent+child", File.ReadAllText(s.Share.Combine("dup.txt")));
+    }
+
+    [TestMethod]
+    public async Task Share_FromAProcessNotHoldingTheToken_IsIgnored()
+    {
+        await using Session s = await Session.StartAsync();
+        HookResolveReply created = await s.ResolveAsync("not-mine.txt", GenericWrite, 2);
+        File.WriteAllText(created.CachePath, "x");
+        ProcessKey other = new(4242, 1);
+        ulong foreign = s.Broker.WriteBack.Open("foreign.txt", null, other);
+        using System.Diagnostics.Process child = StartIdleChild();
+        ProcessKey childKey = ProcessWatch.TryGetKey(child.Id)!.Value;
+
+        await ShareAsync(s, foreign, childKey);
+
+        Assert.IsFalse(s.Broker.WriteBack.IsHolder(foreign, childKey));
+        Assert.IsFalse(s.Broker.Processes.IsWatching(childKey));
+        await s.CloseAsync(created.WriteToken);
+        child.Kill();
+    }
+
+    [TestMethod]
+    public async Task Adopt_GivesTheTokenOfTheFile_AndANewOneWhenNoneIsOpen()
+    {
+        await using Session s = await Session.StartAsync();
+        s.Share.WriteFile("adopt.txt", "on B"u8.ToArray());
+        ProcessKey self = ProcessWatch.TryGetKey(Environment.ProcessId)!.Value;
+        ProcessKey other = new(4242, 1);
+
+        // Read only: metadata, no token.
+        HookAdoptReply read = await AdoptAsync(s, "adopt.txt", write: false);
+        Assert.AreEqual(0ul, read.WriteToken);
+        Assert.AreEqual(4, read.Info.Size);
+
+        // Pulled from another process holding the file open for writing: that token, held by this process too.
+        ulong open = s.Broker.WriteBack.Open("adopt.txt", null, other);
+        HookAdoptReply pulled = await AdoptAsync(s, "adopt.txt", write: true);
+        Assert.AreEqual(open, pulled.WriteToken);
+        Assert.IsTrue(s.Broker.WriteBack.IsHolder(open, self));
+        Assert.AreEqual(open, (await AdoptAsync(s, "adopt.txt", write: true)).WriteToken, "adopting again is idempotent");
+        Assert.AreEqual(open, (await AdoptAsync(s, "adopt.txt", write: false)).WriteToken, "a holder keeps its token");
+        await s.CloseAsync(open);
+        await s.Broker.WriteBack.CloseAsync(open, other, CancellationToken.None);
+        Assert.IsFalse(s.Broker.WriteBack.IsBusy("adopt.txt"));
+
+        // No writer left (the opener closed or died): a new token, so the adopter's writes still reach machine B.
+        HookAdoptReply fresh = await AdoptAsync(s, "adopt.txt", write: true);
+        Assert.AreNotEqual(0ul, fresh.WriteToken);
+        Assert.AreNotEqual(open, fresh.WriteToken);
+        Assert.IsTrue(s.Broker.WriteBack.IsBusy("adopt.txt"));
+        await s.CloseAsync(fresh.WriteToken);
+        Assert.IsFalse(s.Broker.WriteBack.IsBusy("adopt.txt"));
+    }
+
+    [TestMethod]
+    public async Task Adopt_OfAMissingFile_Fails()
+    {
+        await using Session s = await Session.StartAsync();
+
+        (uint status, _) = await s.Hook.CallAsync(new HookAdoptRequest { MappingIndex = 0, RelativePath = "gone.txt", Flags = HookIpcProtocol.AdoptFlagWrite });
+
+        Assert.AreEqual((uint)NtStatus.ObjectNameNotFound, status);
     }
 }

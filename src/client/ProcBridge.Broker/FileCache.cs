@@ -353,6 +353,10 @@ public sealed class FileCache
     /// <summary>Bytes downloaded into ranged copies so far (M8), for tests and measurements.</summary>
     public long RangeBytesDownloaded => _rangesById.Values.Sum(x => x.BytesDownloaded);
 
+    /// <summary>Range id of the unfinished ranged cache copy of <paramref name="remotePath"/>; 0 when the copy is whole (or none).</summary>
+    public uint GetRangeId(string remotePath)
+        => _ranges.TryGetValue(remotePath, out RangeFile? range) && !range.IsComplete ? range.Id : 0;
+
     /// <summary>
     /// Brings [<paramref name="offset"/>, +<paramref name="length"/>) of ranged copy <paramref name="rangeId"/> in, or the
     /// whole file with <paramref name="whole"/>. Returns true when the copy is complete.

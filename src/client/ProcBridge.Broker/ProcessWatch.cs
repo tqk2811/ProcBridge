@@ -45,6 +45,13 @@ public sealed class ProcessWatch : IAsyncDisposable
         }
     }
 
+    /// <summary>True while <paramref name="key"/> is watched (its exit not reported yet).</summary>
+    public bool IsWatching(ProcessKey key)
+    {
+        lock (_lock)
+            return _watched.ContainsKey(key);
+    }
+
     /// <summary>
     /// The key of process <paramref name="processId"/> as it runs now; null when it cannot be opened (gone, or access
     /// denied).

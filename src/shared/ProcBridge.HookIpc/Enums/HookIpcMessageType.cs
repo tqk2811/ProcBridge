@@ -27,8 +27,7 @@ public enum HookIpcMessageType : ushort
     Rename = 11,
     /// <summary>Delete a virtual file or empty directory (disposition, delete-on-close, NtDeleteFile).</summary>
     Delete = 12,
-    /// <summary>A child process inherited a handle holding a write token: the token stays open until the child closes it too.</summary>
-    Retain = 13,
+    // 13 was Retain (protocol 5): replaced by Share, not to be used again.
     /// <summary>A read (or a mapping) on a handle whose cache copy is only partly downloaded: bring the range in first (M8).</summary>
     FetchRange = 14,
     /// <summary>NtLockFile on a handle with a write token: the lock is taken on machine B too (M8).</summary>
@@ -37,4 +36,8 @@ public enum HookIpcMessageType : ushort
     Unlock = 16,
     /// <summary>Long poll for every watch of the process at once: waits until one of them has changes and returns them by watch.</summary>
     WaitAnyChanges = 17,
+    /// <summary>A handle holding a write token went to another process (duplicated, inherited): that process holds the token too.</summary>
+    Share = 18,
+    /// <summary>A handle the hook did not open turned out to be a virtual one: machine B's metadata and the write token of this process.</summary>
+    Adopt = 19,
 }

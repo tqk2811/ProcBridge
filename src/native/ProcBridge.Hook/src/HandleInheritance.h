@@ -19,9 +19,10 @@ namespace ProcBridge::Hook
         /// extra receives the records the ExtraOffset of the handles point into. Throws std::bad_alloc.
         virtual void ExportForChild(std::vector<Inject::InheritedHandle>& handles, std::vector<BYTE>& extra) const = 0;
 
-        /// Parent side, once the child's list is final (after ExportForChild and the handle list filter): the
-        /// Broker's write tokens of those handles stay open until the child closes its copies as well.
-        virtual void RetainForChild(const std::vector<Inject::InheritedHandle>& handles, const std::vector<BYTE>& extra) const noexcept = 0;
+        /// Parent side, once the child's list is final (after ExportForChild and the handle list filter): the child
+        /// holds the Broker's write tokens of those handles too (Share), until it closes its copies or exits.
+        virtual void ShareWithChild(const std::vector<Inject::InheritedHandle>& handles, const std::vector<BYTE>& extra,
+            HANDLE childProcess) const noexcept = 0;
 
         /// Child side: adopts the entries received from the parent.
         virtual void ImportFromParent(const Inject::InheritedHandle* handles, size_t count, const BYTE* extra,

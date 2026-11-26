@@ -338,7 +338,7 @@ namespace ProcBridge::Hook
         /// another process is its parent (it inherits that process's handles) or the attributes cannot
         /// be read. Throws std::bad_alloc.
         std::vector<Inject::InheritedHandle> CaptureInheritedHandles(ULONG processFlags, const void* attributeList,
-            std::vector<BYTE>& extra)
+            HANDLE childProcess, std::vector<BYTE>& extra)
         {
             std::vector<Inject::InheritedHandle> handles;
             InheritanceAttributes attributes;
@@ -350,7 +350,7 @@ namespace ProcBridge::Hook
             g_inheritance->ExportForChild(handles, extra);
             if (!attributes.HasHandleList || handles.empty())
             {
-                g_inheritance->RetainForChild(handles, extra);
+                g_inheritance->ShareWithChild(handles, extra, childProcess);
                 return handles;
             }
             std::vector<HANDLE> listed(attributes.HandleListBytes / sizeof(HANDLE));
@@ -364,7 +364,7 @@ namespace ProcBridge::Hook
                     const HANDLE value = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(handle.Handle));
                     return std::find(listed.begin(), listed.end(), value) == listed.end();
                 });
-            g_inheritance->RetainForChild(handles, extra);
+            g_inheritance->ShareWithChild(handles, extra, childProcess);
             return handles;
         }
 
@@ -413,7 +413,7 @@ namespace ProcBridge::Hook
                 child->ProcessId = GetProcessId(process);
                 child->ThreadId = GetThreadId(thread);
                 std::vector<BYTE> extra;
-                const std::vector<Inject::InheritedHandle> inherited = CaptureInheritedHandles(processFlags, attributeList, extra);
+                const std::vector<Inject::InheritedHandle> inherited = CaptureInheritedHandles(processFlags, attributeList, process, extra);
                 child->InitBlock = Inject::BuildInitBlock(g_environment + image.ChildEnvironment(), inherited, extra);
             }
             catch (...)
