@@ -110,7 +110,10 @@ public sealed class RelayPairingTests
         Assert.IsTrue(await seen.Completion.WaitAsync(Timeout));
         Assert.AreEqual(m.BrokerKey.Fingerprint, seen.PeerFingerprint, "B shows A's real fingerprint.");
         Assert.AreEqual(m.AgentKey.Fingerprint, shownAgentFingerprint, "A shows B's real fingerprint.");
-        Assert.AreEqual(m.AgentKey.Fingerprint, connector.ExpectedPeerFingerprint, "The relay named B's HostId.");
+        // MSTEST0017 guesses the expected side from names, and "ExpectedPeerFingerprint" reads as one: read it into a
+        // local first so the analyzer sees the real order (actual = what the relay named).
+        string? relayNamedFingerprint = connector.ExpectedPeerFingerprint;
+        Assert.AreEqual(m.AgentKey.Fingerprint, relayNamedFingerprint, "The relay named B's HostId.");
         Assert.AreEqual(m.AgentKey.Fingerprint, agent.Fingerprint);
         Assert.AreEqual(relay.Endpoint.BaseUrl, RelayPairingConnector.TryParseRelayAddress(agent.Address));
         Assert.IsTrue(m.AgentTrust.IsTrusted(m.BrokerKey.PublicKey));
