@@ -54,6 +54,29 @@ dùng nó qua hook có tra handle thì Hook con không biết token, `NtClose` k
 lúc con thoát. Con chạy lâu (server) giữ file "đang mở": không tải đè, ghi ngược trễ. Hướng: kiểm lười cả trong `NtClose`
 khi process đang có token được `Share` tới (Broker báo cờ trong reply). User chấp nhận tạm, ghi 2026-11-27.
 
+## [Thấp] Process Broker không theo dõi được: token trả khi kết nối pipe cuối đóng dù process còn chạy
+
+Process mà `ProcessWatch` không mở được (thiếu quyền, vd chạy quyền cao hơn Broker) có khoá holder `(pid, 0)` và được coi là
+đã thoát khi kết nối pipe cuối của nó đóng ([HookRequestHandler.cs:97](../src/client/ProcBridge.Broker/HookRequestHandler.cs#L97)),
+kể cả khi nó vẫn chạy và vẫn giữ handle ghi. Token được trả, ghi ngược sớm; phần ghi sau đó chỉ về máy B khi nó `Adopt` lại
+(lúc đó Broker `Open` token mới). Hướng: Hook giữ một kết nối pipe sống suốt đời process, hoặc Broker xin quyền
+`SYNCHRONIZE` qua handle do Hook nhân bản sang. Xem [HandleSharing-Design-vi.md](HandleSharing-Design-vi.md) mục 5.4. Ghi 2026-11-27.
+
+## [Thấp] Holder có thể `Share` token tới pid bất kỳ sống lâu
+
+`Share` chỉ kiểm bên gửi đang giữ token ([HookRequestHandler.cs:378](../src/client/ProcBridge.Broker/HookRequestHandler.cs#L378)),
+không kiểm đích có thật sự nhận handle. Holder (lỗi hoặc cố ý) `Share` tới một process sống lâu (dịch vụ, explorer) thì token
+và file "đang mở" bị giữ tới khi process đó thoát: không tải đè, ghi ngược cuối trễ. Không hỏng dữ liệu. Hướng: chỉ nhận đích là
+process trong cây hook của phiên (đã `Hello`), hoặc hạn sống cho holder chưa từng `Adopt`. Ghi 2026-11-27.
+
+## [Thấp] `Share` thất bại khi handle process đích thiếu quyền query
+
+Hook lấy pid và thời điểm tạo của đích từ handle process app đưa vào `NtDuplicateObject`/`CreateProcess`
+([BrokerResolver.cpp:267](../src/native/ProcBridge.Hook/src/BrokerResolver.cpp#L267)); handle thiếu
+`PROCESS_QUERY_LIMITED_INFORMATION` thì không `Share` được, token ở lại bên gửi, con chỉ có token qua `Adopt` (chiều kéo khi
+bên gửi còn giữ, hoặc token mới khi bên gửi đã đóng: thêm một lần ghi ngược). Hướng cải tiến: Hook gửi pid lấy bằng cách khác
+(vd `NtQueryInformationProcess` nếu được, hoặc chỉ pid) và Broker tự `OpenProcess` theo pid để lấy thời điểm tạo. Ghi 2026-11-27.
+
 ## [Thấp] Cache âm handle lạ không có hạn sống
 
 Theo [HandleSharing-Design-vi.md](HandleSharing-Design-vi.md) (mục 4.4, Q2): handle bị process khác đóng hộ rồi giá trị

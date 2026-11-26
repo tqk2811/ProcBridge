@@ -242,15 +242,20 @@ HolderState
 |---|---|
 | `Resolve` cấp token T cho process P | `Holders = {P: Adopted}`, `ProcessWatch.Watch(P)` |
 | `Share(T, Q)` từ process P (P phải đang giữ T) | thêm `Q: !Adopted` nếu chưa có; `Watch(Q)`. P không giữ T → bỏ qua, ghi log |
-| `Adopt(path)` từ Q | Q có trong `Holders` của token đang mở của `path` → trả T, đánh dấu `Adopted`. Không có nhưng có token đang mở của `path` và handle có quyền ghi → thêm Q (chiều kéo) và trả T. Không có token nào và có quyền ghi → `Open` token mới cho Q. Chỉ đọc → token 0 |
+| `Adopt(path)` từ Q | Q có trong `Holders` của token đang mở của `path` → trả T, đánh dấu `Adopted`. Không có nhưng có token đang mở của `path` và handle có quyền ghi → thêm Q (chiều kéo) và trả T. Không có token nào và có quyền ghi → `Open` token mới cho Q (cùng lock với lượt tìm: hai `Adopt` cùng lúc dùng chung một token); máy B giữ file cho token này với share mode rộng nhất (`7`, đọc + ghi + xoá) vì share mode của lần mở gốc không còn biết. Chỉ đọc → token 0 |
 | `Close(T)` từ P | bỏ P khỏi `Holders`; `Holders` rỗng → ghi ngược như `CloseAsync` hôm nay |
 | Process P thoát (wait handle báo) | bỏ P khỏi mọi token; token nào rỗng → ghi ngược; nhả hold máy B |
-| `Flush(T)`, `Lock(T)` từ P | như hôm nay; P không giữ T → `STATUS_INVALID_HANDLE` |
+| `Flush(T)`, `Lock(T)`, `Unlock(T)` từ P | như hôm nay; P không giữ T → `STATUS_INVALID_HANDLE` (token là số tăng dần, đoán được). Con nhận handle qua `Share`, kế thừa hay `Adopt` đã là holder trước lần dùng đầu nên không bị chặn |
 | Hết phiên | `SyncOpenAsync` như hôm nay (còn token nào thì ghi ngược) |
 
 Pid của bên gọi lấy từ `GetNamedPipeClientProcessId` ([HookIpcServer.cs:153-164](../src/client/ProcBridge.Broker/HookIpcServer.cs#L153-L164));
 thời điểm tạo của process lấy từ `Hello` (mục 6) và đối chiếu với `GetProcessTimes` của handle Broker mở. Kết nối có
 `clientId` âm (hệ thống không trả pid) thì token của nó giữ kiểu cũ: một holder ảo theo kết nối, trả khi kết nối đóng.
+
+Khoá holder được chuẩn hoá về một dạng: process Broker không mở được (thiếu quyền) có khoá `(pid, 0)` cả khi chính nó kết nối
+lẫn khi process khác `Share` tới nó (dù bên gửi biết thời điểm tạo thật). Nhờ vậy `Close`/`Adopt` từ kết nối của nó tìm đúng
+holder và kết nối cuối của nó trả phần giữ. Process đã thoát (hoặc pid đã thuộc process khác) giữ nguyên khoá được gửi để
+`Watch` báo thoát ngay.
 
 ### 5.3 Luồng nhân bản đẩy
 
@@ -295,6 +300,12 @@ sequenceDiagram
     chạy trong lock).
   - `ERROR_ACCESS_DENIED` (vd con chạy quyền cao hơn Broker) → dự phòng bằng kết nối pipe cuối của pid đóng (cách
     `RemoteHolds` làm hôm nay); process chưa từng kết nối thì giữ tới hết phiên, log cảnh báo.
+  - Giới hạn của đường dự phòng: process không theo dõi được bị coi là đã thoát khi kết nối pipe cuối của nó đóng, kể cả
+    khi nó vẫn chạy và vẫn giữ handle (vd Hook đóng hết kết nối rồi mở lại sau): token được trả và ghi ngược sớm, phần ghi
+    sau đó chỉ về máy B khi nó `Adopt` lại. Ghi ở [Backlog-vi.md](Backlog-vi.md).
+- Đã thoát được nhận bằng handle process đã báo (`WaitForSingleObject(h, 0) == WAIT_OBJECT_0`), không chỉ bằng mã thoát:
+  process thoát với mã `259` (`STILL_ACTIVE`) trông như còn chạy nếu chỉ xem `GetExitCodeProcess`. Mã thoát khác `259` vẫn
+  được tính là đã thoát (process đang bị kết thúc có mã thoát trước khi handle báo).
 - Callback thoát chỉ đẩy `ProcessKey` vào một `Channel`; một task đọc channel gọi `ReleaseProcessAsync(key)` (ghi ngược là
   async, không chạy trên luồng wait của thread pool).
 
