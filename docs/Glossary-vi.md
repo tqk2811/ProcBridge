@@ -81,3 +81,14 @@ từ máy đã ghép cặp.
 với exe, kernel mở và ánh xạ file ngay trong `NtCreateUserProcess`, rồi loader của process mới nạp các DLL mà exe
 import (tìm trước tiên trong thư mục của exe) và ghi tên mỗi module vào danh sách module của PEB, nơi
 `GetModuleFileName` đọc ra.
+
+## Write token
+
+Số Broker cấp cho một lần mở file ảo có thể đổi nội dung. Hook gửi kèm token khi flush, khoá vùng và khi đóng;
+Broker ghi ngược file cache về máy B khi không còn process nào giữ token (xem `HandleSharing-Design-vi.md` mục 5).
+
+## Kiểm lười handle (lazy adopt) và cache âm (negative cache)
+
+Kiểm lười: chỉ khi hook gặp một handle chưa có trong bảng mới hỏi tên thật của nó để biết có phải handle ảo không,
+thay vì được báo trước. Cache âm: nhớ các handle đã kiểm là *không* ảo để lần sau khỏi hỏi lại; mục bị xoá khi handle
+đóng hoặc giá trị handle được cấp lại.

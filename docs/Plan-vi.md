@@ -939,6 +939,8 @@ Nhận xét:
   - Bên nhận: đầu mọi hook tra handle đọc số thứ tự (`ReadAcquire`), đổi thì nhận các ô: hash gốc phải khớp ánh xạ cùng chỉ
     số; handle phải là file đĩa và tên thật (`NtQueryObject`) nằm dưới thư mục phía sau của ánh xạ; đường dẫn ảo suy từ tên
     đó; qua Broker thì metadata lấy bằng `Stat`. Không đạt thì bỏ mục.
+  - Thiết kế thay thế (bỏ hộp thư, kiểm lười, write token đếm theo process), chờ user duyệt:
+    [HandleSharing-Design-vi.md](HandleSharing-Design-vi.md).
   - Write token **không** chuyển sang bên nhận: thứ bên nhận ghi được ghi ngược khi bên gửi đóng bản cuối cùng của nó; kèm
     `DUPLICATE_CLOSE_SOURCE` thì bên gửi `CloseWrite` ngay khi đó như `NtClose`. Nhờ vậy không có token treo khi hộp thư đầy
     hay mục bị bỏ, và Broker không phải tin pid nào.

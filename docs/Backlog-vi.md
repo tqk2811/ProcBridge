@@ -9,7 +9,7 @@ write token ở process gửi. Ca thường gặp: process cha nhân bản handl
 (`DUPLICATE_CLOSE_SOURCE`, hoặc chuyển hướng stdout của con vào file ảo rồi đóng). Khi đó ghi ngược về máy B chạy ngay lúc
 cha đóng trong khi con vẫn đang ghi; những gì con ghi sau đó mất lặng lẽ, không báo lỗi. Đây là sai dữ liệu nên xếp `[Cao]`.
 Hướng đề xuất: Broker đếm tham chiếu write token theo PID (bên nhận báo đã nhận bản sao, token chỉ ghi ngược khi bản cuối ở
-mọi process đóng). Cần user chốt thiết kế trước khi làm. Ghi 2026-11-26.
+mọi process đóng). Đã có thiết kế, chờ user duyệt: [HandleSharing-Design-vi.md](HandleSharing-Design-vi.md) (mục 5). Ghi 2026-11-26.
 
 ## [Thấp] Thư mục gốc ảo trong thư mục cha: các ca chưa phủ
 
@@ -54,7 +54,7 @@ muộn thì mở cửa sổ tái dùng giá trị handle (handle đã đóng, gi
 kéo (bên nhận tự `DuplicateHandle` từ process khác về) và handle kế thừa qua `CreateProcess(bInheritHandles)` cũng không
 được theo dõi. Vì sao: handle ảo đi qua process khác là bình thường với công cụ build (stdout/stderr vào file, pipeline).
 Hướng thay thế: bỏ hộp thư shared memory, khi gặp handle lạ thì kiểm lười bằng `IsBackedByMapping` kèm cache âm (handle đã
-kiểm là không thuộc thư mục ảo), phủ được cả chiều kéo lẫn kế thừa. Cần user chọn hướng. Ghi 2026-11-26.
+kiểm là không thuộc thư mục ảo), phủ được cả chiều kéo lẫn kế thừa. Đã có thiết kế, chờ user duyệt: [HandleSharing-Design-vi.md](HandleSharing-Design-vi.md) (mục 4). Ghi 2026-11-26.
 
 ## [Vừa] Inject con: các đường chưa phủ
 
