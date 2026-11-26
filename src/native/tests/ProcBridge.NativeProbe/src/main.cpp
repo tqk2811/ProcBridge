@@ -3076,11 +3076,10 @@ namespace
         return CloseHandle(handle) ? 0 : 1;
     }
 
-    /// --dup-to-child <file> [child exe] [squat|close-source|write|write-close-source]: opens file without inheritance, starts a child
+    /// --dup-to-child <file> [child exe] [close-source|write|write-close-source|write-threads]: opens file without inheritance, starts a child
     /// (--read-handle, this probe or child exe) that inherits nothing but its standard handles, duplicates the handle into
     /// the child with DuplicateHandle and sends the value through the child's stdin (as a process passes a handle over
-    /// IPC). Prints its own view of the handle, then the child's. squat: the child is created suspended and its handle
-    /// inbox name is taken first with a section anyone may write. close-source: DUPLICATE_CLOSE_SOURCE.
+    /// IPC). Prints its own view of the handle, then the child's. close-source: DUPLICATE_CLOSE_SOURCE.
     /// write, write-close-source: the file is created for writing with "parent" in it, the child (--write-read-handle)
     /// appends through the copy after this process closed its own handle (or DUPLICATE_CLOSE_SOURCE closed it); nothing
     /// is printed but errors. write-threads <machine B file>: like write, the child (--write-read-handle-threads) appends
@@ -3148,8 +3147,7 @@ namespace
         }
         startup.lpAttributeList = attributes.Get();
         PROCESS_INFORMATION info{};
-        const DWORD suspend = mode == L"squat" ? CREATE_SUSPENDED : 0;
-        if (!CreateProcessW(path.c_str(), commandLine.data(), nullptr, nullptr, TRUE, EXTENDED_STARTUPINFO_PRESENT | suspend, nullptr, nullptr,
+        if (!CreateProcessW(path.c_str(), commandLine.data(), nullptr, nullptr, TRUE, EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr,
             &startup.StartupInfo, &info))
         {
             WriteLine(L"create: " + Error(GetLastError()));
@@ -3159,18 +3157,6 @@ namespace
         child.Process = info.hProcess;
         child.Thread = info.hThread;
         childInput.Reset();
-        Handle squatter(nullptr);
-        if (suspend != 0)
-        {
-            // Null DACL: any process could write fake entries into it. The child's hook must refuse the name.
-            SECURITY_DESCRIPTOR open{};
-            InitializeSecurityDescriptor(&open, SECURITY_DESCRIPTOR_REVISION);
-            SetSecurityDescriptorDacl(&open, TRUE, nullptr, FALSE);
-            SECURITY_ATTRIBUTES anyone{ sizeof(anyone), &open, FALSE };
-            const std::wstring name = L"Local\\ProcBridge-HandleInbox-" + std::to_wstring(info.dwProcessId);
-            squatter.Reset(CreateFileMappingW(INVALID_HANDLE_VALUE, &anyone, PAGE_READWRITE, 0, 1024 * 1024, name.c_str()));
-            ResumeThread(child.Thread);
-        }
         if (!write)
         {
             WriteLine(L"parent: " + FinalPath(opened.Get()) + L" " + Identity(opened.Get()));
@@ -3445,6 +3431,16 @@ namespace
         return CloseHandle(handle) ? 0 : 1;
     }
 
+    /// --inbox-section: prints "inbox: absent" when no section Local\ProcBridge-HandleInbox-<pid of this process> exists
+    /// (the hook no longer creates one), "inbox: present" otherwise.
+    int InboxSection()
+    {
+        const std::wstring name = L"Local\\ProcBridge-HandleInbox-" + std::to_wstring(GetCurrentProcessId());
+        Handle section(OpenFileMappingW(FILE_MAP_READ, FALSE, name.c_str()));
+        WriteLine(section.IsValid() ? L"inbox: present" : L"inbox: absent");
+        return 0;
+    }
+
     /// --pid-read-handle: prints this process's id, reads a handle value from stdin (the process that read the id
     /// duplicated it in) and prints "child: <final path> <identity>".
     int PidReadHandle()
@@ -3645,6 +3641,10 @@ namespace
         if (command == L"--pid-count-queries" && argc == 2)
         {
             return PidCountQueries();
+        }
+        if (command == L"--inbox-section" && argc == 2)
+        {
+            return InboxSection();
         }
         if (command == L"--pid-read-handle" && argc == 2)
         {

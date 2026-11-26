@@ -76,7 +76,6 @@
     <ClCompile Include="src\DirectoryNameCache.cpp" />
     <ClCompile Include="src\DirectoryWatches.cpp" />
     <ClCompile Include="src\FileHooks.cpp" />
-    <ClCompile Include="src\HandleInbox.cpp" />
     <ClCompile Include="src\HandleTable.cpp" />
     <ClCompile Include="src\ImageMaterializer.cpp" />
     <ClCompile Include="src\ImageRedirect.cpp" />
@@ -123,7 +122,6 @@
     <ClInclude Include="src\DirectoryWatches.h" />
     <ClInclude Include="src\FileHooks.h" />
     <ClInclude Include="src\HandleInheritance.h" />
-    <ClInclude Include="src\HandleInbox.h" />
     <ClInclude Include="src\HandleTable.h" />
     <ClInclude Include="src\HookGuard.h" />
     <ClInclude Include="src\ImageMaterializer.h" />

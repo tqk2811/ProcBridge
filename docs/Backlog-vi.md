@@ -29,23 +29,10 @@ User chọn chỉ để backlog (2026-11-26).
 
 ## [Thấp] Handle nhân bản sang process khác: các ca chưa phủ
 
-Process có hook nhân bản handle ảo vào process khác có hook thì bên nhận theo dõi bản sao qua hộp thư chung (Plan mục 13,
-"Hook: đường dẫn và handle ngoài thư mục ảo"). Chưa phủ: bên nhận tự kéo handle về (`DuplicateHandle(nguồn khác, ...,
-chính nó)`, bên gửi không chạy hook); handle process đích thiếu quyền query; hộp thư đầy (16 ô chưa đọc); tên hộp thư bị
-chiếm trước (tính năng tắt cho process đó); bên gửi không lấy được pid/thời điểm tạo của đích (thiếu quyền query) thì
-write token không được `Share`, ở lại bên gửi như trước 2026-11-27; delete-on-close không chuyển; range id trong mục được tin (mục giả
-chỉ làm Broker tải thừa). Process cùng user, cùng integrity level vẫn ghi được vào hộp thư, chặn bằng kiểm tra phía nhận.
-Ghi 2026-11-26.
-
-## [Vừa] Hộp thư handle chỉ được đọc ở hook tra handle; chiều kéo và handle kế thừa không được theo dõi
-
-Bên nhận chỉ rút hộp thư (`AdoptIncomingHandles`, [FileHooks.cpp](../src/native/ProcBridge.Hook/src/FileHooks.cpp) ~125)
-trong các hook có tra handle. Process nhận ít gọi các hook đó thì 16 ô đầy, lượt gửi sau bị bỏ (chỉ còn log debug); rút
-muộn thì mở cửa sổ tái dùng giá trị handle (handle đã đóng, giá trị được cấp lại cho file khác trước khi mục được đọc). Chiều
-kéo (bên nhận tự `DuplicateHandle` từ process khác về) và handle kế thừa qua `CreateProcess(bInheritHandles)` cũng không
-được theo dõi. Vì sao: handle ảo đi qua process khác là bình thường với công cụ build (stdout/stderr vào file, pipeline).
-Hướng thay thế: bỏ hộp thư shared memory, khi gặp handle lạ thì kiểm lười bằng `IsBackedByMapping` kèm cache âm (handle đã
-kiểm là không thuộc thư mục ảo), phủ được cả chiều kéo lẫn kế thừa. Đã có thiết kế, chờ user duyệt: [HandleSharing-Design-vi.md](HandleSharing-Design-vi.md) (mục 4). Ghi 2026-11-26.
+Bên nhận nhận ra handle ảo đến từ process khác bằng kiểm lười (Plan mục 13, "Hook: đường dẫn và handle ngoài thư mục ảo";
+[HandleSharing-Design-vi.md](HandleSharing-Design-vi.md) mục 4). Chưa phủ: bên gửi không lấy được pid/thời điểm tạo của đích
+(thiếu quyền query) thì write token không được `Share`, ở lại bên gửi như trước 2026-11-27; delete-on-close không chuyển
+theo handle (chỉ process mở gốc xoá máy B). Ghi 2026-11-26, sửa 2026-11-27 (bỏ hộp thư).
 
 ## [Vừa] NtClose không kiểm lười handle ảo nhận từ process khác
 

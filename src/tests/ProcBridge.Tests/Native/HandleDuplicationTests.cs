@@ -93,19 +93,16 @@ public sealed class HandleDuplicationTests
     [TestMethod]
     [DataRow("x64")]
     [DataRow("Win32")]
-    public void SquattedInbox_IsNotUsed(string platform)
+    public void HookedProcess_HasNoHandleInbox(string platform)
     {
-        // Another process took the child's inbox name first (with a DACL that lets anyone write): the child's hook must
-        // not use it; the handle is still recognised by the lazy check of its real name.
+        // The shared memory inbox (Local\ProcBridge-HandleInbox-<pid>) is gone: lazy adopt finds duplicated handles, so
+        // no name is created that another process could take first or write fake entries into.
         using HookSandbox sandbox = new(platform);
-        string file = sandbox.VirtualRoot + "\\a.txt";
 
-        ProcessResult result = sandbox.RunHooked($"\"{sandbox.Binaries.Probe}\" --dup-to-child \"{file}\" \"\" squat");
+        ProcessResult result = sandbox.RunHooked($"\"{sandbox.Binaries.Probe}\" --inbox-section");
 
         Assert.AreEqual(0, result.ExitCode, result.StandardOutput + result.StandardError);
-        string[] lines = result.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-        Assert.HasCount(2, lines, result.StandardOutput);
-        Assert.StartsWith($"child: \\\\?\\{file} id ", lines[1]);
+        Assert.AreEqual("inbox: absent", result.StandardOutput.Trim());
     }
 
     [TestMethod]

@@ -23,7 +23,6 @@
 #include "DirectoryNameCache.h"
 #include "DirectoryWatches.h"
 #include "HandleInheritance.h"
-#include "HandleInbox.h"
 #include "HandleTable.h"
 #include "HookGuard.h"
 #include "ParentScans.h"
@@ -51,7 +50,6 @@ namespace ProcBridge::Hook
         RemoteHandleTable g_remoteHandles;
         DirectoryWatches g_watches;
         ParentScans g_parentScans;
-        HandleInbox g_inbox;
 
         using NtQueryDirectoryFileFn = NTSTATUS(NTAPI*)(HANDLE, HANDLE, PIO_APC_ROUTINE, PVOID, PIO_STATUS_BLOCK, PVOID, ULONG,
             ULONG, BOOLEAN, PUNICODE_STRING, BOOLEAN);
@@ -2539,23 +2537,10 @@ namespace ProcBridge::Hook
             return process == GetCurrentProcess() || (process != nullptr && GetProcessId(process) == GetCurrentProcessId());
         }
 
-        /// A virtual handle duplicated into another process: the hook of that process is told (HandleInbox) and tracks the
-        /// copy at its next handle lookup, after checking the handle itself. The write token is shared with that process
-        /// before (Share in HookNtDuplicateObject), so it gets it from Adopt.
-        void SendDuplicate(HANDLE targetProcess, HANDLE copy, int mapping, uint32_t rangeId) noexcept
-        {
-            DuplicatedHandle entry;
-            entry.Handle = HandleToULong(copy);
-            entry.Mapping = mapping;
-            entry.RootHash = HandleInbox::RootHash(g_resolver->GetMapping(mapping).VirtualNt);
-            entry.RangeId = rangeId;
-            HandleInbox::Send(targetProcess, entry); // no inbox, other process with that id, full: the copy stays untracked
-        }
-
         /// DuplicateHandle inside the process: the copy of a virtual handle is virtual too, a copy that
         /// lands on a stale value replaces its entry, and DUPLICATE_CLOSE_SOURCE closes like NtClose.
-        /// Duplicates into other hooked processes go through SendDuplicate; a handle pulled from another process is checked
-        /// right away (lazy adopt).
+        /// A copy pushed into another process is found there by lazy adopt at its first use (the write token is shared with
+        /// that process first, so its Adopt gets it); a handle pulled from another process is checked right away.
         NTSTATUS NTAPI HookNtDuplicateObject(HANDLE sourceProcess, HANDLE sourceHandle, HANDLE targetProcess, PHANDLE targetHandle,
             ACCESS_MASK desiredAccess, ULONG handleAttributes, ULONG options)
         {
@@ -2644,10 +2629,6 @@ namespace ProcBridge::Hook
                     // No query access to the target (or no Broker): the token stays with this process, and what the
                     // target writes after this process closed its last copy may not reach machine B.
                     OutputDebugStringW(L"ProcBridge.Hook: cannot share a write token with the target of DuplicateHandle\n");
-                }
-                if (copied && mapping >= 0)
-                {
-                    SendDuplicate(targetProcess, copy, mapping, remote ? remoteInfo.RangeId : 0);
                 }
                 // The source left this process: like NtClose, its last reference to the write token ends here (a copy in
                 // this process above kept it instead). After Share: the Broker always sees the target as a holder before
@@ -3012,8 +2993,6 @@ namespace ProcBridge::Hook
     {
         g_resolver = &resolver;
         CollectParentRoots();
-        // Without an inbox, virtual handles duplicated into this process stay untracked (as before): not fatal.
-        g_inbox.Open();
         const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
         if (ntdll == nullptr)
         {
