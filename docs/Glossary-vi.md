@@ -90,5 +90,8 @@ Broker ghi ngược file cache về máy B khi không còn process nào giữ to
 ## Kiểm lười handle (lazy adopt) và cache âm (negative cache)
 
 Kiểm lười: chỉ khi hook gặp một handle chưa có trong bảng mới hỏi tên thật của nó để biết có phải handle ảo không,
-thay vì được báo trước. Cache âm: nhớ các handle đã kiểm là *không* ảo để lần sau khỏi hỏi lại; mục bị xoá khi handle
-đóng hoặc giá trị handle được cấp lại.
+thay vì được báo trước (handle do process khác nhân bản vào, kéo về hoặc kế thừa). Tên thật nằm dưới thư mục phía sau của
+một ánh xạ thì là handle ảo; qua Broker, Hook gửi `Adopt` để lấy metadata máy B và write token.
+Cache âm: nhớ các handle đã kiểm là *không* ảo để lần sau khỏi hỏi lại tên (chỉ còn một truy vấn rẻ của object manager để
+so "dấu vân tay": quyền và thuộc tính của handle). Mỗi ô có một số thế hệ tăng khi giá trị handle bị đóng hoặc được cấp lại
+qua Hook; số thế hệ đổi thì mục cũ hết hiệu lực.

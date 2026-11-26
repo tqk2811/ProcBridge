@@ -922,32 +922,35 @@ Nhận xét:
   để nguyên.
 - Kiểm (`PathSpellingTests.cs`, x64 và Win32): mở bằng `\DosDevices\`, `\GLOBAL??\`; đường dẫn và gốc khai báo bằng tên
   8.3 (thư mục tên dài trong `%TEMP%`); `OpenFileById` dưới thư mục ảo và thư mục thật, và qua Agent. Ba bài đỏ trên Hook cũ.
-- **Handle nhân bản sang process khác** (`DuplicateHandle` với process đích khác, vd cha truyền handle cho con qua pipe):
-  thay cho ý "bên nhận hỏi Broker theo `(pid nguồn, handle)`". Chọn hộp thư bộ nhớ chung cho cả hai chế độ thay vì đi qua
-  Broker ở chế độ Broker, vì bên nhận không tin gì trong mục ngoài giá trị handle: mọi thứ khác được dựng lại từ chính handle
-  và từ Broker, nên mục giả chỉ làm bên nhận coi một handle *thật sự* nằm dưới thư mục phía sau là handle ảo (đúng như process
-  đó tự mở qua đường ảo). Đi qua Broker cần thêm lệnh IPC, bảng theo pid ở Broker và gắn token theo pid mà không thêm được kiểm
-  tra nào mạnh hơn.
-  - Hộp thư (`HandleInbox`, 16 ô): section `Local\ProcBridge-HandleInbox-<pid>` mỗi process có hook tạo lúc khởi động. DACL chỉ
-    cho user của process và SYSTEM, nhãn bắt buộc bằng integrity level của process, cờ no-write-up: process integrity thấp
-    hơn không ghi vào được. Tên đã có sẵn (bị chiếm trước, hoặc còn của process chết cùng pid) thì **tắt** tính năng cho
-    process đó. Header mang magic, phiên bản, thời điểm tạo của process chủ; bên gửi so với `GetProcessTimes` của handle
-    process đích (handle giữ process đó sống nên không lẫn pid dùng lại). Bố cục cố định 32 byte mỗi ô, giống nhau x64/x86
-    (`static_assert`). Ô kẹt ở trạng thái đang ghi quá 5 giây (bên gửi chết) được thu hồi. Section không bao giờ unmap.
-  - Bên gửi: ngay khi `NtDuplicateObject` thành công, trước khi trả về cho bên gọi (nên trước khi giá trị handle kịp tới bên
-    nhận), ghi giá trị handle, pid bên gửi, chỉ số ánh xạ kèm hash của gốc ảo, range id (M8), rồi tăng số thứ tự.
-  - Bên nhận: đầu mọi hook tra handle đọc số thứ tự (`ReadAcquire`), đổi thì nhận các ô: hash gốc phải khớp ánh xạ cùng chỉ
-    số; handle phải là file đĩa và tên thật (`NtQueryObject`) nằm dưới thư mục phía sau của ánh xạ; đường dẫn ảo suy từ tên
-    đó; qua Broker thì metadata lấy bằng `Stat`. Không đạt thì bỏ mục.
-  - Thiết kế thay thế (bỏ hộp thư, kiểm lười, write token đếm theo process), chờ user duyệt:
-    [HandleSharing-Design-vi.md](HandleSharing-Design-vi.md).
-  - Write token **không** chuyển sang bên nhận: thứ bên nhận ghi được ghi ngược khi bên gửi đóng bản cuối cùng của nó; kèm
-    `DUPLICATE_CLOSE_SOURCE` thì bên gửi `CloseWrite` ngay khi đó như `NtClose`. Nhờ vậy không có token treo khi hộp thư đầy
-    hay mục bị bỏ, và Broker không phải tin pid nào.
-  - Kiểm (`HandleDuplicationTests.cs`): con chỉ kế thừa handle chuẩn, cha nhân bản handle ảo vào con rồi gửi giá trị qua
-    stdin; con thấy tên ảo, file ID và thời gian giống cha (qua Agent là của máy B), x64 và Win32, cục bộ và qua Agent, có và
-    không `DUPLICATE_CLOSE_SOURCE`, con khác kiến trúc; tên hộp thư bị chiếm trước (DACL rỗng, ai cũng ghi được) thì con không
-    dùng nó. Bài cơ bản và bài chiếm tên đỏ trên Hook cũ; các bài còn lại là phủ thêm (Hook cũ cũng qua).
+- **Handle nhân bản sang process khác** (`DuplicateHandle` với process đích khác, vd cha truyền handle cho con qua pipe;
+  thiết kế đầy đủ ở [HandleSharing-Design-vi.md](HandleSharing-Design-vi.md)). Từ 2026-11-27 không còn hộp thư bộ nhớ chung
+  (`HandleInbox`): bên nhận tự nhận ra handle ảo bằng **kiểm lười** ([Glossary](Glossary-vi.md#L90)) nên phủ mọi hướng: nhân bản đẩy, nhân bản kéo (bên nhận
+  tự `DuplicateHandle` từ process khác về), kế thừa đi qua process không có hook, handle do process không có hook đưa sang.
+  - Kiểm lười (`TryAdoptUnknownHandle`): mọi hook tra handle (trừ `NtClose`) gặp handle không có trong bảng thì kiểm một lần:
+    `NtQueryObject(ObjectBasicInformation)` lấy dấu vân tay (quyền, thuộc tính), tra cache âm; trượt thì `GetFileType` +
+    một lần truy vấn tên (`FindBackingMapping`, so với thư mục phía sau của mọi ánh xạ, lấy thư mục dài nhất). Tên nằm dưới
+    thư mục phía sau thì là handle ảo: chế độ cục bộ ghi vào `g_handles`; chế độ Broker gửi `Adopt` (metadata máy B, range
+    id, write token nếu process được chia) rồi ghi cả `g_remoteHandles`. Một khoá riêng cho lượt nhận: hai luồng gặp cùng
+    handle lạ chỉ thêm một mục, một `Adopt`. Nhân bản kéo được kiểm ngay sau `NtDuplicateObject`.
+  - Cache âm: 1024 ô, chỉ số theo giá trị handle, mỗi ô một bộ đếm thế hệ (`g_closeEpoch`) tăng khi Hook thấy giá trị đó
+    bị đóng (`NtClose`, `DUPLICATE_CLOSE_SOURCE`, tăng *trước* lần đóng) hoặc được cấp lại (mở qua Hook, nhân bản vào chính
+    nó). Lượt nhận thấy thế hệ đổi trong lúc chờ Broker thì bỏ kết quả (trả token bằng `Close`). Handle Hook mở cho đường dẫn
+    thật (và bản sao của nó) được ghi luôn là "không ảo": ở chế độ cục bộ thư mục phía sau là thư mục thường, mở thẳng
+    đường thật thì không bị coi là handle ảo. Hook `NtWriteFile` (hot path) chỉ tra giá trị + thế hệ, không truy vấn dấu
+    vân tay.
+  - `NtWriteFile` được hook mỗi khi có Broker (trước đây chỉ ở chế độ ghi thẳng): process chỉ ghi rồi đóng handle nhận được
+    vẫn nhận nó ở lần ghi đầu, nên lần đóng trả token và ghi ngược ngay chứ không đợi process thoát.
+  - Write token đi theo process (Broker đếm holder theo process, `Share` khi nhân bản đẩy và khi kế thừa; mục 5 của thiết
+    kế). Giới hạn đã chấp nhận: `NtClose` không kiểm lười (handle chưa dùng lần nào thì phần giữ trả lúc process thoát); cache
+    âm không có hạn sống (giá trị bị process khác đóng hộ rồi cấp lại cho object trùng dấu vân tay thì handle ảo bị coi là
+    thật tới khi giá trị đóng qua Hook); ở chế độ cục bộ handle tới đường thật dưới thư mục phía sau mà Hook không thấy lúc
+    mở (kế thừa, nhân bản từ process khác, bị đẩy khỏi cache âm) bị coi là handle ảo. Xem Backlog.
+  - Kiểm (`HandleDuplicationTests.cs`, x64 và Win32): con chỉ kế thừa handle chuẩn, cha nhân bản handle ảo vào con rồi gửi
+    giá trị qua stdin; con thấy tên ảo, file ID và thời gian giống cha (qua Agent là của máy B), cục bộ và qua Agent, có và
+    không `DUPLICATE_CLOSE_SOURCE`, con khác kiến trúc; con ghi sau khi cha đóng thì máy B đủ dữ liệu; nhân bản kéo; handle do
+    process không có hook đẩy vào; giá trị vừa đóng được cấp lại cho handle ảo; một lần truy vấn tên cho handle thật dùng
+    nhiều lần (`ProcBridgeHookNameQueries`); hai luồng cùng gặp handle lạ; process có hook không tạo section
+    `Local\ProcBridge-HandleInbox-<pid>`.
 - **Ký tự ổ giả (`V:\`), thiết kế, chưa làm**: hiện gốc `V:\dir` chạy được nhờ mượn volume của thư mục thật làm
   `VirtualDevicePath` (`VirtualDriveMissing`), nên `GetFinalPathNameByHandle` ra sai ổ, còn gốc ổ `V:\` bị từ chối và
   `GetVolumeInformation`/`GetDriveType`/`GetLogicalDrives` không biết `V:`. Đủ cho ổ giả cần một volume giả trọn vẹn:

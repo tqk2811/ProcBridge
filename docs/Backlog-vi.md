@@ -38,7 +38,8 @@ theo handle (chỉ process mở gốc xoá máy B). Ghi 2026-11-26, sửa 2026-1
 
 Theo [HandleSharing-Design-vi.md](HandleSharing-Design-vi.md) (mục 4.1, Q3): con nhận handle ghi qua `Share` mà chưa từng
 dùng nó qua hook có tra handle thì Hook con không biết token, `NtClose` không gửi `Close`; phần giữ của con chỉ được trả
-lúc con thoát. Con chạy lâu (server) giữ file "đang mở": không tải đè, ghi ngược trễ. Hướng: kiểm lười cả trong `NtClose`
+lúc con thoát. Từ 2026-11-27 `NtWriteFile` được hook khi có Broker nên con chỉ ghi rồi đóng vẫn trả token lúc đóng; còn
+lại ca con đóng handle mà chưa từng dùng qua Hook. Con chạy lâu (server) giữ file "đang mở": không tải đè, ghi ngược trễ. Hướng: kiểm lười cả trong `NtClose`
 khi process đang có token được `Share` tới (Broker báo cờ trong reply). User chấp nhận tạm, ghi 2026-11-27.
 
 ## [Thấp] Process Broker không theo dõi được: token trả khi kết nối pipe cuối đóng dù process còn chạy
@@ -68,7 +69,17 @@ bên gửi còn giữ, hoặc token mới khi bên gửi đã đóng: thêm mộ
 
 Theo [HandleSharing-Design-vi.md](HandleSharing-Design-vi.md) (mục 4.4, Q2): handle bị process khác đóng hộ rồi giá trị
 được cấp lại cho object trùng quyền, trùng thuộc tính thì handle ảo bị coi là thật tới khi giá trị đóng qua Hook. User
-chấp nhận, không thêm TTL. Áp dụng khi làm bước 6 (kiểm lười + cache âm). Ghi 2026-11-27.
+chấp nhận, không thêm TTL. Đường `NtWriteFile` (hot path) chỉ so giá trị + thế hệ, không so dấu vân tay, nên ở đó lỗ hở rộng
+hơn một chút (object khác quyền cũng lọt). Ghi 2026-11-27.
+
+## [Thấp] Chế độ cục bộ: handle tới đường thật dưới thư mục phía sau bị kiểm lười coi là handle ảo
+
+Kiểm lười nhận diện handle ảo bằng tên thật nằm dưới thư mục phía sau. Ở chế độ cục bộ (`PROCBRIDGE_MAP`) thư mục phía sau
+là thư mục thường, nên handle tới đường *thật* dưới nó mà Hook không thấy lúc mở (kế thừa từ cha, nhân bản từ process khác,
+hoặc handle Hook đã mở nhưng ô cache âm của nó bị giá trị khác cùng ô đè, process có trên 1024 handle) bị đổi tên sang
+đường ảo. Handle Hook tự mở cho đường thật được ghi "không ảo" ngay lúc mở. Chế độ Broker không bị: thư mục phía sau là
+cache riêng của phiên. Hướng nếu cần: cha gửi kèm danh sách handle thật trong khối khởi tạo, hoặc cache âm theo bảng băm
+không đè. Ghi 2026-11-27.
 
 ## [Vừa] Inject con: các đường chưa phủ
 
@@ -296,7 +307,11 @@ Chưa tái hiện được nên chưa chứng minh đây là nguyên nhân; đ�
   chờ kết nối chậm thay vì theo thời gian tuyệt đối.
 - `RemoteWriteTests.WriteScenario_ThroughAgent_MatchesRealFolder` (x64): đỏ một lần trên CI (2026-11-26, nhánh
   `feature/launcher-ux`, không đụng tới đường ghi của Hook): ở bước "share writer denied" mong `err=32` (sharing
-  violation) nhưng nhận `err=5` (access denied). Chạy lại job thì xanh, local đều xanh.
+  violation) nhưng nhận `err=5` (access denied). Chạy lại job thì xanh, local đều xanh. Đỏ lần nữa local (2026-11-27,
+  nhánh `feature/handle-lazy-adopt`, cả bộ test): bước "create always" mong `last=183` (`ERROR_ALREADY_EXISTS`) nhưng nhận
+  `last=0`; chạy riêng 4 lần đều xanh.
+- `ConnectionPoolTests.FailedSlotConnect_IsNotRetriedOnEveryRequest`: đỏ một lần khi chạy cả bộ test local (2026-11-27,
+  `attempts 3`, cận trên 2); chạy riêng xanh. Nghi máy đang tải nặng làm lượt thử lại tới sớm.
 - `HookPipeEndToEndTests.WatchDirectory_ChangeOnAgent_ReachesWaitChanges`: đỏ một lần trên CI (run 45699654609,
   2026-11-26) ở `Assert.IsTrue(overflow.Overflow)`; chạy lại thì xanh. Chưa rõ nguyên nhân, nghi đua thời gian giữa
   lượt thay đổi và lúc đánh dấu tràn.

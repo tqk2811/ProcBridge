@@ -1,17 +1,19 @@
 # Thiết kế: chia sẻ handle ảo giữa các process và đếm write token theo process
 
-Trạng thái: **đã duyệt; bước 1-5 xong** (2026-11-27, nhánh `feature/handle-sharing`, có lệch nhỏ: chiều kế thừa gửi `Share` ngay ở bước 4). Bước 6-8 làm sau ở nhánh khác.
+Trạng thái: **xong** (2026-11-27). Bước 1-5 ở nhánh `feature/handle-sharing` (lệch nhỏ: chiều kế thừa gửi `Share` ngay ở
+bước 4); bước 6-8 ở nhánh `feature/handle-lazy-adopt`, các chỗ lệch so với thiết kế ghi ở [mục 12](#12-kết-quả-bước-6-8).
 
 Gom hai mục backlog vào một thiết kế vì chúng chạm cùng một chỗ (handle ảo đi sang process khác):
 
 - `[Cao] Write token ở lại bên gửi khi nhân bản handle ghi sang process khác` (đã sửa ở bước 1-5, mục backlog đã xoá).
-- `[Vừa] Hộp thư handle chỉ được đọc ở hook tra handle; chiều kéo và handle kế thừa không được theo dõi` ([Backlog-vi.md](Backlog-vi.md#L40)).
+- `[Vừa] Hộp thư handle chỉ được đọc ở hook tra handle; chiều kéo và handle kế thừa không được theo dõi` (đã sửa ở bước 6-7,
+  mục backlog đã xoá).
 
 Hướng user đã chọn:
 
 1. Broker đếm tham chiếu write token **theo process** (không theo số lần `Close`); chỉ ghi ngược khi process giữ cuối cùng
    đóng handle hoặc thoát.
-2. Bỏ hộp thư shared memory (`HandleInbox`); khi hook gặp handle lạ thì **kiểm lười** bằng `IsBackedByMapping` (tên thật nằm
+2. Bỏ hộp thư shared memory (`HandleInbox`); khi hook gặp handle lạ thì **kiểm lười** bằng `IsBackedByMapping` ([lazy adopt](Glossary-vi.md#L90), tên thật nằm
    dưới thư mục phía sau + `Stat`/hỏi Broker), kèm **cache âm** theo handle + thế hệ.
 
 ## Mục lục
@@ -27,6 +29,7 @@ Hướng user đã chọn:
 9. [Các bước chuyển đổi (thứ tự commit)](#9-các-bước-chuyển-đổi-thứ-tự-commit)
 10. [Kế hoạch test](#10-kế-hoạch-test)
 11. [Câu hỏi mở cho user](#11-câu-hỏi-mở-cho-user)
+12. [Kết quả bước 6-8](#12-kết-quả-bước-6-8)
 
 ## 1. Mục tiêu và ngoài phạm vi
 
@@ -269,7 +272,7 @@ Trong `HookNtDuplicateObject`, nhánh đích là process khác ([FileHooks.cpp:2
 5. Không lấy được pid (thiếu quyền query) → giữ hành vi cũ (token ở lại cha) và log debug; xem [Q4](#11-câu-hỏi-mở-cho-user).
 
 Kế thừa: `RetainForChild` gửi `Share(T, pid con, creationTime con)` thay `Retain(T)`; Hook đã có handle process con lúc tạo.
-Con inject thất bại hoặc chết sớm thì `ProcessWatch` trả phần giữ khi con thoát, lấp lỗ hở ở [Backlog-vi.md](Backlog-vi.md#L160).
+Con inject thất bại hoặc chết sớm thì `ProcessWatch` trả phần giữ khi con thoát, lấp lỗ hở từng ghi ở Backlog (mục đã xoá ở bước 1-5).
 
 ```mermaid
 sequenceDiagram
@@ -452,3 +455,44 @@ User đã trả lời (2026-11-27), theo các đề xuất:
 - **Q5. Token mới khi `Adopt` không còn token đang mở**: **đồng ý** cấp token mới.
 - **Q6. Phạm vi**: **hai nhánh**. Nhánh `feature/handle-sharing` làm bước 1-5 (bản sửa `[Cao]`); bước 6-8 (kiểm lười, bỏ
   hộp thư, docs) làm ở nhánh sau.
+
+## 12. Kết quả bước 6-8
+
+Commit trên nhánh `feature/handle-lazy-adopt`: `feat(hook)` kiểm lười + cache âm, `refactor(hook)` bỏ `HandleInbox`, `docs`.
+Test T5, T7, T8, T9, T10 ở `HandleDuplicationTests.cs`; test chiếm tên hộp thư đổi thành `HookedProcess_HasNoHandleInbox`.
+T5, T7, T8, T9, T10 đỏ khi tắt kiểm lười; T8 đỏ riêng khi bỏ lần tăng thế hệ trong `NtClose`.
+
+### 12.1 Lệch so với thiết kế
+
+| Chỗ | Thiết kế | Đã làm | Vì sao |
+|---|---|---|---|
+| `NtWriteFile` | không nói tới (hook này chỉ cài ở chế độ ghi thẳng) | cài mỗi khi có Broker; lần ghi đầu của handle lạ kiểm lười | con chỉ ghi rồi đóng handle nhận được thì không gọi hook tra handle nào khác: không có token, lần đóng không ghi ngược (T1, T10 đỏ) |
+| Cache âm trên `NtWriteFile` | dấu vân tay mỗi lần | chỉ so giá trị + thế hệ (không thêm syscall) | `NtWriteFile` là hot path; lỗ hở Q2 rộng hơn chút, ghi ở Backlog |
+| Dấu vân tay | quyền + thuộc tính + loại từ `GetFileType` | quyền + thuộc tính | `GetFileType` là thêm một syscall mỗi lần tra; `GetFileType` vẫn chạy ở lần kiểm đầu |
+| Cache âm | bảng băm mở, thay mục cũ nhất | 1024 ô ánh xạ trực tiếp theo giá trị handle, mỗi ô một thế hệ (`g_closeEpoch` cùng kích thước) | đơn giản; hai giá trị cùng ô chỉ tốn thêm một lần kiểm |
+| Hai luồng cùng nhận | `AddIfAbsent` | một SRW lock cho lượt nhận, kiểm lại `g_handles` sau khi lấy khoá | cùng kết quả (một mục, một `Adopt`), không cần thêm API vào bảng |
+| Thời điểm tăng thế hệ khi đóng | sau khi `NtClose` thành công | trước lần đóng (`NtClose`, `DUPLICATE_CLOSE_SOURCE`) | tăng sau làm hỏng dấu "không ảo" luồng khác vừa ghi cho giá trị mới (`ConcurrentOpenClose_KeepsNamesApart` đỏ) |
+| Handle Hook mở cho đường thật | không nói tới | ghi "không ảo" ngay lúc mở, cả bản sao trong process | chế độ cục bộ: mở thẳng thư mục phía sau là đường thật, tên không phân biệt được với handle ảo |
+| `NtDuplicateObject` nguồn là chính nó | không nói tới | kiểm lười nguồn trước khi nhân bản | handle nhận được rồi đẩy tiếp sang process khác vẫn được `Share` token |
+| `NtQueryObject` | mọi lớp | chỉ `ObjectNameInformation` | các lớp khác không dùng bảng handle |
+| T7 | qua Agent | chế độ cục bộ; process không có hook là chính NativeProbe chạy ngoài Spawn | process ngoài phiên Broker không mở được bản cache |
+| T10 | đếm `Close` ở Broker | con đợi file máy B đủ dữ liệu ngay sau lần đóng của nó (trước khi thoát) | hai mục cùng giữ token thì lần đóng không gửi `Close`, file chỉ về máy B lúc thoát; không cần thêm bộ đếm vào Broker |
+
+Test cũ phải sửa: `ChildNotInheritingVirtualHandle_DoesNotReceiveItsEntry` dùng file thật nằm *ngoài* thư mục phía sau
+(handle tới file dưới thư mục phía sau chính là handle ảo, con kiểm lười đúng là nhận nó). Giới hạn mới của chế độ cục bộ ghi
+ở Backlog.
+
+### 12.2 Đo hiệu năng (B1)
+
+`ProcBridge.Bench` không đo được phần này: nó gửi request Hook IPC thẳng vào `HookRequestHandler` của Broker, không nạp
+Hook, mà bước 6-8 chỉ đổi Hook. Thay vào đó đo một cây nhiều process dưới `ProcBridge.Spawn --map` (chế độ cục bộ, x64
+Release): `cmd /c for /l %i in (1,1,60) do @(cmd /c type <ảo>\f1.txt > nul & findstr line <ảo>\*.txt <thật>\*.txt > nul)`,
+50 file mỗi thư mục, tức khoảng 120 process và khoảng 6000 lần mở file thật lẫn ảo. Mỗi bản chạy 4 lần, giây:
+
+| Bản | Lần 1 | Lần 2 | Lần 3 | Lần 4 |
+|---|---|---|---|---|
+| Trước (478fbc1) | 7,11 | 7,06 | 7,07 | 9,08 |
+| Sau bước 6 | 7,10 | 7,07 | 7,05 | 7,09 |
+| Sau bước 7 | 7,09 | 7,08 | 7,09 | 7,07 |
+
+Không chậm đi đo được (lần 4 của bản trước là nhiễu). Chưa đo chế độ Broker, nơi `NtWriteFile` giờ được hook.
