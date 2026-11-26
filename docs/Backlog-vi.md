@@ -56,20 +56,6 @@ kéo (bên nhận tự `DuplicateHandle` từ process khác về) và handle k�
 Hướng thay thế: bỏ hộp thư shared memory, khi gặp handle lạ thì kiểm lười bằng `IsBackedByMapping` kèm cache âm (handle đã
 kiểm là không thuộc thư mục ảo), phủ được cả chiều kéo lẫn kế thừa. Cần user chọn hướng. Ghi 2026-11-26.
 
-## [Thấp] Hộp thư handle: các ghi chú review còn lại
-
-Các điểm review của [HandleInbox.h](../src/native/ProcBridge.Hook/src/HandleInbox.h) /
-[HandleInbox.cpp](../src/native/ProcBridge.Hook/src/HandleInbox.cpp) chưa xử lý:
-- `Drain` (HandleInbox.h ~42-50) có thể trả về trước khi một thread khác nhận xong mục nó đã lấy: lượt tra handle ngay sau
-  đó chưa thấy bản sao. Chấp nhận trễ một lượt tra, hoặc thêm bộ đếm mục đang nhận dở để `Drain` chờ.
-- `volatile ULONGLONG Claimed` (HandleInbox.cpp ~118, đọc ~187, ghi ~191/205/250) có thể bị đọc rách trên x86 (64-bit không
-  nguyên tử); dùng `ReadNoFence64`/`WriteNoFence64`.
-- Bên gửi chết giữa lúc CAS sang `SlotWriting` và lúc ghi `Claimed` (~244-250) thì slot kẹt mãi: `Claimed == 0` nên nhánh
-  thu hồi slot kẹt ở `Take` (~187-192) không bao giờ chạy.
-- Comment ở ~256-257 gọi việc bên gửi cũ ghi đè các trường là "harmless" chỉ đúng một nửa: bên nhận kiểm từng mục nên
-  không nhận sai handle, nhưng mục của bên gửi khác có thể bị trộn trường và bị loại, làm mất theo dõi handle của bên đó.
-- Ghi 2026-11-26.
-
 ## [Vừa] Inject con: các đường chưa phủ
 
 - Process con chỉ được inject khi thread chính của nó được resume qua `NtResumeThread`/`NtResumeProcess`
