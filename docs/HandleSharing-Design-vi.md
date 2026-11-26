@@ -1,6 +1,6 @@
 # Thiết kế: chia sẻ handle ảo giữa các process và đếm write token theo process
 
-Trạng thái: **bản thiết kế chờ user duyệt** (2026-11-26). Chưa có dòng code nào theo tài liệu này.
+Trạng thái: **đã duyệt, đang làm bước 1-5** (2026-11-27, nhánh `feature/handle-sharing`). Bước 6-8 làm sau ở nhánh khác.
 
 Gom hai mục backlog vào một thiết kế vì chúng chạm cùng một chỗ (handle ảo đi sang process khác):
 
@@ -431,18 +431,13 @@ Test nằm cạnh các bài hiện có trong `src/tests/ProcBridge.Tests/Native/
 
 ## 11. Câu hỏi mở cho user
 
-- **Q1. Cây process ở Broker**: thiết kế không cần Broker biết cây (bên gửi báo pid đích, Broker tự chờ process thoát). Có
-  muốn Broker lấy thêm danh sách process từ Job Object của `ProcBridge.Spawn` (vd để chặn `Share` tới process ngoài cây) không?
-  Đề xuất: không, vì không thêm an toàn đáng kể (mọi process có hook đã cùng user và cùng phiên).
-- **Q2. Lỗ hở của cache âm**: handle bị process khác đóng hộ rồi giá trị được cấp lại cho object trùng quyền, trùng thuộc
-  tính: handle ảo bị coi là thật tới khi giá trị đóng qua Hook. Chấp nhận, hay thêm hạn sống cho mục cache âm (vd 2 giây,
-  đổi lại tốn thêm truy vấn tên)?
-- **Q3. `NtClose` không kiểm lười**: handle con nhận mà chưa từng dùng qua hook nào có tra handle thì phần giữ chỉ được trả lúc
-  con thoát. Con chạy lâu (vd server) sẽ giữ file "đang mở" (không tải đè, ghi ngược trễ). Chấp nhận, hay kiểm lười cả trong
-  `NtClose` nhưng chỉ khi process đang có ít nhất một token được `Share` tới (Broker báo cờ này trong reply `Hello`/mỗi `Adopt`)?
-- **Q4. Không lấy được pid đích** (handle process đích chỉ có `PROCESS_DUP_HANDLE`): giữ hành vi cũ (token ở cha, có thể mất
-  dữ liệu như hôm nay) hay để `DuplicateHandle` của app thất bại? Đề xuất: giữ hành vi cũ + log cảnh báo.
-- **Q5. Token mới khi `Adopt` không còn token đang mở** (cha crash, hoặc chiều kéo sau khi nguồn đã đóng): đồng ý cấp token mới
-  (thêm một lần ghi ngược) thay vì trả token 0?
-- **Q6. Phạm vi một nhánh hay hai**: làm cả 8 bước trên một nhánh, hay tách nhánh `[Cao]` (bước 1-5) merge trước rồi mới tới
-  bỏ hộp thư (bước 6-7)?
+User đã trả lời (2026-11-27), theo các đề xuất:
+
+- **Q1. Cây process ở Broker**: **không** lấy danh sách process từ Job Object. Broker chỉ tin pid đích bên gửi báo.
+- **Q2. Lỗ hở của cache âm**: **chấp nhận**, không thêm hạn sống. Ghi `[Thấp]` trong [Backlog-vi.md](Backlog-vi.md).
+- **Q3. `NtClose` không kiểm lười**: **chấp nhận** tạm thời; phần giữ của con trả lúc con thoát. Ghi `[Vừa]` trong
+  [Backlog-vi.md](Backlog-vi.md).
+- **Q4. Không lấy được pid đích**: **giữ hành vi cũ** (token ở cha) và log cảnh báo; không làm `DuplicateHandle` thất bại.
+- **Q5. Token mới khi `Adopt` không còn token đang mở**: **đồng ý** cấp token mới.
+- **Q6. Phạm vi**: **hai nhánh**. Nhánh `feature/handle-sharing` làm bước 1-5 (bản sửa `[Cao]`); bước 6-8 (kiểm lười, bỏ
+  hộp thư, docs) làm ở nhánh sau.
