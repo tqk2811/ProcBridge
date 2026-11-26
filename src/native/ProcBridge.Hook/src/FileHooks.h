@@ -6,4 +6,7 @@ namespace ProcBridge::Hook
     /// Creates the ntdll file hooks (MinHook must already be initialized; the caller enables them).
     /// resolver must outlive the hooks. Returns ERROR_SUCCESS or a Win32 error.
     DWORD InstallFileHooks(const IPathResolver& resolver) noexcept;
+
+    /// Name queries lazy adopt made so far (FindBackingMapping), for tests.
+    long NameQueryCount() noexcept;
 }

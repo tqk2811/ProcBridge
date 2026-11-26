@@ -31,11 +31,14 @@ public sealed class ChildCreationTests
     public void ChildNotInheritingVirtualHandle_DoesNotReceiveItsEntry(string platform, string mode)
     {
         // Exit code of the child: 0 = the value holding the real file shows the real name, 1 = it shows
-        // the virtual name of an entry the child should not have received.
+        // the virtual name of an entry the child should not have received. The real file lies outside the backing
+        // folder: a handle to a file under it is what a virtual handle is, and the child's lazy check would adopt it.
         using HookSandbox sandbox = new(platform);
+        string outside = Path.Combine(sandbox.BaseDirectory, "outside.txt");
+        File.WriteAllText(outside, "outside");
 
         ProcessResult result = sandbox.RunHooked(
-            $"\"{sandbox.Binaries.Probe}\" --child {mode} \"{sandbox.VirtualRoot}\\a.txt\" \"{sandbox.RealRoot}\\a.txt\"");
+            $"\"{sandbox.Binaries.Probe}\" --child {mode} \"{sandbox.VirtualRoot}\\a.txt\" \"{outside}\"");
 
         Assert.AreEqual(0, result.ExitCode, result.StandardOutput + result.StandardError);
         Assert.AreEqual("child: 0", result.StandardOutput.TrimEnd());

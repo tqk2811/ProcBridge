@@ -91,6 +91,8 @@ namespace ProcBridge::Hook
         NtUnlockFileFn g_ntUnlockFile = nullptr;
         // M8: set once a ranged cache copy was opened (or inherited); until then reads and mappings skip the table.
         std::atomic<bool> g_anyRange{ false };
+        // Name queries made by lazy adopt (FindBackingMapping); read by tests through ProcBridgeHookNameQueries.
+        std::atomic<long> g_nameQueries{ 0 };
 
         /// True when handle is a file or directory whose real name lies under the backing folder of mapping (what a handle
         /// opened through that virtual root is). virtualNt (optional) receives the matching virtual NT path (FreeString).
@@ -132,69 +134,229 @@ namespace ProcBridge::Hook
             ULONG Reserved[10];
         };
 
-        /// Access granted to handle (generic rights already mapped); 0 when it cannot be read.
-        ACCESS_MASK GrantedAccessOf(HANDLE handle) noexcept
+        /// The mapping whose backing folder holds the real name of handle (the longest such folder when roots nest), or -1:
+        /// one name query checked against every mapping. virtualNt (optional) receives the matching virtual NT path
+        /// (FreeString). Counted in g_nameQueries (read by tests through ProcBridgeHookNameQueries).
+        int FindBackingMapping(HANDLE handle, UNICODE_STRING* virtualNt) noexcept
         {
-            ObjectBasicInfo basic{};
-            return NT_SUCCESS(g_ntQueryObject(handle, 0 /* ObjectBasicInformation */, &basic, sizeof(basic), nullptr))
-                ? basic.GrantedAccess : 0;
+            if (GetFileType(handle) != FILE_TYPE_DISK)
+            {
+                return -1;
+            }
+            const size_t bufferBytes = sizeof(ObjectNameInfo) + MaxNameBytes;
+            HeapBuffer buffer(bufferBytes);
+            g_nameQueries.fetch_add(1, std::memory_order_relaxed);
+            if (!buffer || !NT_SUCCESS(g_ntQueryObject(handle, ObjectNameInformation, buffer.Get(), static_cast<ULONG>(bufferBytes), nullptr)))
+            {
+                return -1;
+            }
+            const UNICODE_STRING& name = reinterpret_cast<const ObjectNameInfo*>(buffer.Get())->Name;
+            if (name.Buffer == nullptr)
+            {
+                return -1;
+            }
+            int found = -1;
+            for (int mapping = 0; mapping < g_resolver->Count(); ++mapping)
+            {
+                const PathMapping& map = g_resolver->GetMapping(mapping);
+                if (map.RealDevicePath.Length != 0 && HasPathPrefix(name.Buffer, name.Length, map.RealDevicePath)
+                    && (found < 0 || map.RealDevicePath.Length > g_resolver->GetMapping(found).RealDevicePath.Length))
+                {
+                    found = mapping;
+                }
+            }
+            if (found < 0 || virtualNt == nullptr)
+            {
+                return found;
+            }
+            const PathMapping& map = g_resolver->GetMapping(found);
+            return ConcatString(*virtualNt, map.VirtualNt,
+                reinterpret_cast<const wchar_t*>(reinterpret_cast<const BYTE*>(name.Buffer) + map.RealDevicePath.Length),
+                static_cast<size_t>(name.Length) - map.RealDevicePath.Length) ? found : -1;
         }
 
-        /// Tracks the virtual handles other hooked processes duplicated into this one since the last call (HandleInbox).
-        /// Runs first in every hook that looks a handle up; one shared memory read when nothing arrived. An entry is only a
-        /// hint: it is dropped unless its mapping is the same root here and the handle really is a file under that root's
-        /// backing folder; the virtual path comes from the handle's own name, machine B's metadata and the write token this
-        /// process holds for it (the sender shared it, HandleSharing-Design-vi.md 5.3) from Adopt.
-        void AdoptIncomingHandles() noexcept
+        // Lazy adopt (HandleSharing-Design-vi.md 4): a handle the tables do not know may still be a virtual handle that
+        // came from elsewhere (pushed or pulled by DuplicateHandle, inherited past a process without a hook). The first
+        // lookup checks its real name once; a handle that is not virtual goes into a small negative cache, so the next
+        // lookups cost one object manager query (its fingerprint) instead of a name query that reaches the file system.
+        constexpr size_t HandleSlots = 1024; // power of two
+
+        /// Negative cache entry: a handle value seen not to be virtual, with the fingerprint of its object then
+        /// (granted access, handle attributes) and the close epoch of its slot when it was written.
+        struct NotVirtualEntry
         {
-            ReentryGuard guard; // Stat below goes to the Broker: its own calls must not drain again
-            if (!guard.IsOutermost())
+            HANDLE Handle;
+            ACCESS_MASK GrantedAccess;
+            ULONG Attributes;
+            LONG Epoch;
+        };
+
+        // Per slot (from the handle value): bumped when the hook sees a value of that slot closed or handed out again
+        // (NtClose, DUPLICATE_CLOSE_SOURCE, opens and duplicates returning it). A negative entry whose epoch differs is
+        // stale, and an adopt that saw the epoch change while it asked the Broker drops its result. Two values sharing
+        // a slot only cost an extra check.
+        volatile LONG g_closeEpoch[HandleSlots] = {};
+        NotVirtualEntry g_notVirtual[HandleSlots] = {};
+        SRWLOCK g_notVirtualLock = SRWLOCK_INIT;
+        // One adopt at a time: two threads meeting the same unknown handle give one table entry and one Adopt.
+        SRWLOCK g_adoptLock = SRWLOCK_INIT;
+
+        size_t HandleSlot(HANDLE handle) noexcept
+        {
+            return (static_cast<size_t>(reinterpret_cast<ULONG_PTR>(handle)) >> 2) & (HandleSlots - 1);
+        }
+
+        LONG ReadCloseEpoch(size_t slot) noexcept
+        {
+            return InterlockedCompareExchange(&g_closeEpoch[slot], 0, 0);
+        }
+
+        /// The value of handle was closed or now names another object: what lazy adopt learnt about it is stale.
+        void HandleValueChanged(HANDLE handle) noexcept
+        {
+            InterlockedIncrement(&g_closeEpoch[HandleSlot(handle)]);
+        }
+
+        bool IsKnownNotVirtual(HANDLE handle, const ObjectBasicInfo& basic, size_t slot, LONG epoch) noexcept
+        {
+            AcquireSRWLockShared(&g_notVirtualLock);
+            const NotVirtualEntry& entry = g_notVirtual[slot];
+            const bool known = entry.Handle == handle && entry.GrantedAccess == basic.GrantedAccess
+                && entry.Attributes == basic.Attributes && entry.Epoch == epoch;
+            ReleaseSRWLockShared(&g_notVirtualLock);
+            return known;
+        }
+
+        /// Hot path variant (NtWriteFile): the value and its slot's epoch only, without the fingerprint query. A value
+        /// reused behind the hook's back keeps its old answer until the value is closed through the hook, the hole the
+        /// fingerprint narrows elsewhere (accepted, HandleSharing-Design-vi.md 11 Q2).
+        bool IsKnownNotVirtualValue(HANDLE handle, size_t slot, LONG epoch) noexcept
+        {
+            AcquireSRWLockShared(&g_notVirtualLock);
+            const NotVirtualEntry& entry = g_notVirtual[slot];
+            const bool known = entry.Handle == handle && entry.Epoch == epoch;
+            ReleaseSRWLockShared(&g_notVirtualLock);
+            return known;
+        }
+
+        void RememberNotVirtual(HANDLE handle, const ObjectBasicInfo& basic, size_t slot, LONG epoch) noexcept
+        {
+            AcquireSRWLockExclusive(&g_notVirtualLock);
+            g_notVirtual[slot] = { handle, basic.GrantedAccess, basic.Attributes, epoch };
+            ReleaseSRWLockExclusive(&g_notVirtualLock);
+        }
+
+        /// A handle value this process just got through the hook for something that is not virtual (a real path, a copy of
+        /// a real handle): known not virtual from the start. In local mode a real path may lie under a backing folder,
+        /// where the name alone would make lazy adopt take it for a virtual handle.
+        void MarkNotVirtual(HANDLE handle) noexcept
+        {
+            HandleValueChanged(handle);
+            if (handle == nullptr || reinterpret_cast<LONG_PTR>(handle) < 0 || g_resolver->Count() == 0)
             {
                 return;
             }
-            g_inbox.Drain([](const DuplicatedHandle& entry)
+            const size_t slot = HandleSlot(handle);
+            const LONG epoch = ReadCloseEpoch(slot);
+            ObjectBasicInfo basic{};
+            if (NT_SUCCESS(g_ntQueryObject(handle, 0 /* ObjectBasicInformation */, &basic, sizeof(basic), nullptr)))
+            {
+                RememberNotVirtual(handle, basic, slot, epoch);
+            }
+        }
+
+        /// Tracks handle if it turns out to be virtual (its real name lies under a backing folder); with the Broker, Adopt
+        /// brings machine B's metadata and the write token this process holds (or gets) for it. The caller is the
+        /// outermost hook on this thread (its ReentryGuard keeps the Broker's own calls out of here) and found handle in
+        /// no table. NtClose never calls it (HandleSharing-Design-vi.md 4.1). hotPath: see IsKnownNotVirtualValue.
+        void TryAdoptUnknownHandle(HANDLE handle, bool hotPath = false) noexcept
+        {
+            // Null and pseudo handles (current process or thread: negative values) are never files.
+            if (handle == nullptr || reinterpret_cast<LONG_PTR>(handle) < 0 || g_resolver->Count() == 0)
+            {
+                return;
+            }
+            const size_t slot = HandleSlot(handle);
+            const LONG epoch = ReadCloseEpoch(slot);
+            if (hotPath && IsKnownNotVirtualValue(handle, slot, epoch))
+            {
+                return;
+            }
+            ObjectBasicInfo basic{};
+            if (!NT_SUCCESS(g_ntQueryObject(handle, 0 /* ObjectBasicInformation */, &basic, sizeof(basic), nullptr))
+                || IsKnownNotVirtual(handle, basic, slot, epoch))
+            {
+                return;
+            }
+            AcquireSRWLockExclusive(&g_adoptLock);
+            if (g_handles.Find(handle) >= 0)
+            {
+                ReleaseSRWLockExclusive(&g_adoptLock); // another thread adopted it meanwhile
+                return;
+            }
+            UNICODE_STRING virtualNt{};
+            const int mapping = FindBackingMapping(handle, &virtualNt);
+            HookIpc::FileInfo info{};
+            uint64_t writeToken = 0;
+            const bool writable = (basic.GrantedAccess & (FILE_WRITE_DATA | FILE_APPEND_DATA)) != 0;
+            if (mapping < 0
+                || (g_resolver->IsRemote()
+                    && !NT_SUCCESS(g_resolver->Adopt(mapping, virtualNt, PathKind::Nt, basic.GrantedAccess, writable, info, writeToken))))
+            {
+                // Not virtual, or machine B does not know the file (any more): a real handle until the value is closed.
+                FreeString(virtualNt);
+                RememberNotVirtual(handle, basic, slot, epoch);
+                ReleaseSRWLockExclusive(&g_adoptLock);
+                return;
+            }
+            if (ReadCloseEpoch(slot) != epoch)
+            {
+                // Closed (or reused) while the Broker answered: an entry now could describe another object.
+                if (writeToken != 0)
                 {
-                    const HANDLE handle = ULongToHandle(entry.Handle);
-                    if (entry.Mapping < 0 || entry.Mapping >= g_resolver->Count()
-                        || entry.RootHash != HandleInbox::RootHash(g_resolver->GetMapping(entry.Mapping).VirtualNt))
-                    {
-                        return;
-                    }
-                    UNICODE_STRING virtualNt{};
-                    if (!IsBackedByMapping(handle, entry.Mapping, &virtualNt))
-                    {
-                        return;
-                    }
-                    HookIpc::FileInfo info{};
-                    uint64_t writeToken = 0;
-                    if (g_resolver->IsRemote())
-                    {
-                        const ACCESS_MASK granted = GrantedAccessOf(handle);
-                        const bool writable = (granted & (FILE_WRITE_DATA | FILE_APPEND_DATA)) != 0;
-                        if (!NT_SUCCESS(g_resolver->Adopt(entry.Mapping, virtualNt, PathKind::Nt, granted, writable, info, writeToken)))
-                        {
-                            FreeString(virtualNt);
-                            return;
-                        }
-                    }
-                    g_directoryNames.Remove(handle);
-                    g_parentScans.Remove(handle);
-                    g_handles.Add(handle, entry.Mapping);
-                    if (g_resolver->IsRemote())
-                    {
-                        if (entry.RangeId != 0)
-                        {
-                            info.RangeId = entry.RangeId;
-                        }
-                        // Its last copy here sends Close for the token, like a handle this process opened.
-                        g_remoteHandles.Add(handle, entry.Mapping, virtualNt, info, writeToken);
-                        if (info.RangeId != 0)
-                        {
-                            g_anyRange.store(true, std::memory_order_relaxed);
-                        }
-                    }
-                    FreeString(virtualNt);
-                });
+                    g_resolver->CloseWrite(writeToken);
+                }
+                FreeString(virtualNt);
+                ReleaseSRWLockExclusive(&g_adoptLock);
+                return;
+            }
+            g_directoryNames.Remove(handle);
+            g_parentScans.Remove(handle);
+            g_handles.Add(handle, mapping);
+            if (g_resolver->IsRemote())
+            {
+                // Its last copy here sends Close for the token, like a handle this process opened.
+                g_remoteHandles.Add(handle, mapping, virtualNt, info, writeToken);
+                if (info.RangeId != 0)
+                {
+                    g_anyRange.store(true, std::memory_order_relaxed);
+                }
+            }
+            FreeString(virtualNt);
+            ReleaseSRWLockExclusive(&g_adoptLock);
+        }
+
+        /// Start of a hook that looks handle up: adopts it when no table knows it (lazy adopt).
+        void AdoptIfUnknown(HANDLE handle, bool hotPath = false) noexcept
+        {
+            if (g_resolver->Count() == 0 || g_handles.Find(handle) >= 0)
+            {
+                return;
+            }
+            ReentryGuard guard;
+            if (guard.IsOutermost())
+            {
+                TryAdoptUnknownHandle(handle, hotPath);
+            }
+        }
+
+        /// Like AdoptIfUnknown, for hooks that only use the tables with the Broker (write tokens, ranged copies, locks).
+        void AdoptIfUnknownRemote(HANDLE handle, bool hotPath = false) noexcept
+        {
+            if (g_resolver->IsRemote())
+            {
+                AdoptIfUnknown(handle, hotPath);
+            }
         }
 
         /// Calls visitor(const UNICODE_STRING& name) with the NT device name of a real directory handle
@@ -475,7 +637,7 @@ namespace ProcBridge::Hook
                 }
                 if (_attributes.RootDirectory != nullptr)
                 {
-                    AdoptIncomingHandles();
+                    AdoptIfUnknown(_attributes.RootDirectory);
                 }
                 if (_attributes.RootDirectory != nullptr && _intent != nullptr && (_intent->CreateOptions & FileOpenByFileIdOption) != 0)
                 {
@@ -813,10 +975,12 @@ namespace ProcBridge::Hook
             g_parentScans.Remove(handle);
             if (redirect.Matched() && (!redirect.ByFileId() || IsBackedByMapping(handle, redirect.Mapping(), nullptr)))
             {
+                HandleValueChanged(handle);
                 g_handles.Add(handle, redirect.Mapping());
             }
             else
             {
+                MarkNotVirtual(handle);
                 g_handles.Remove(handle);
             }
             TrackRemoteHandle(handle, redirect, deleteOnClose);
@@ -935,7 +1099,7 @@ namespace ProcBridge::Hook
         NTSTATUS NTAPI HookNtReadFile(HANDLE fileHandle, HANDLE event, PIO_APC_ROUTINE apcRoutine, PVOID apcContext,
             PIO_STATUS_BLOCK ioStatusBlock, PVOID buffer, ULONG length, PLARGE_INTEGER byteOffset, PULONG key)
         {
-            AdoptIncomingHandles();
+            AdoptIfUnknownRemote(fileHandle);
             if (g_anyRange.load(std::memory_order_relaxed))
             {
                 ReentryGuard guard;
@@ -961,7 +1125,7 @@ namespace ProcBridge::Hook
         NTSTATUS NTAPI HookNtReadFileScatter(HANDLE fileHandle, HANDLE event, PIO_APC_ROUTINE apcRoutine, PVOID apcContext,
             PIO_STATUS_BLOCK ioStatusBlock, PVOID segments, ULONG length, PLARGE_INTEGER byteOffset, PULONG key)
         {
-            AdoptIncomingHandles();
+            AdoptIfUnknownRemote(fileHandle);
             if (g_anyRange.load(std::memory_order_relaxed))
             {
                 ReentryGuard guard;
@@ -999,7 +1163,7 @@ namespace ProcBridge::Hook
         NTSTATUS NTAPI HookNtCreateSection(PHANDLE sectionHandle, ACCESS_MASK desiredAccess, POBJECT_ATTRIBUTES objectAttributes,
             PLARGE_INTEGER maximumSize, ULONG pageProtection, ULONG allocationAttributes, HANDLE fileHandle)
         {
-            AdoptIncomingHandles();
+            AdoptIfUnknownRemote(fileHandle);
             const NTSTATUS fetched = EnsureWholeForSection(fileHandle);
             if (!NT_SUCCESS(fetched))
             {
@@ -1012,7 +1176,7 @@ namespace ProcBridge::Hook
             PLARGE_INTEGER maximumSize, ULONG pageProtection, ULONG allocationAttributes, HANDLE fileHandle, PVOID extendedParameters,
             ULONG extendedParameterCount)
         {
-            AdoptIncomingHandles();
+            AdoptIfUnknownRemote(fileHandle);
             const NTSTATUS fetched = EnsureWholeForSection(fileHandle);
             if (!NT_SUCCESS(fetched))
             {
@@ -1074,7 +1238,7 @@ namespace ProcBridge::Hook
             PIO_STATUS_BLOCK ioStatusBlock, PLARGE_INTEGER byteOffset, PLARGE_INTEGER length, ULONG key, BOOLEAN failImmediately,
             BOOLEAN exclusiveLock)
         {
-            AdoptIncomingHandles();
+            AdoptIfUnknownRemote(fileHandle);
             ReentryGuard guard;
             uint64_t token = 0;
             LARGE_INTEGER offset{};
@@ -1097,7 +1261,7 @@ namespace ProcBridge::Hook
         NTSTATUS NTAPI HookNtUnlockFile(HANDLE fileHandle, PIO_STATUS_BLOCK ioStatusBlock, PLARGE_INTEGER byteOffset, PLARGE_INTEGER length,
             ULONG key)
         {
-            AdoptIncomingHandles();
+            AdoptIfUnknownRemote(fileHandle);
             ReentryGuard guard;
             uint64_t token = 0;
             LARGE_INTEGER offset{};
@@ -1462,7 +1626,7 @@ namespace ProcBridge::Hook
         NTSTATUS NTAPI HookNtQueryInformationFile(HANDLE fileHandle, PIO_STATUS_BLOCK ioStatusBlock, PVOID information,
             ULONG length, ULONG informationClass)
         {
-            AdoptIncomingHandles();
+            AdoptIfUnknown(fileHandle);
             const NTSTATUS status = QueryInformationFileNames(fileHandle, ioStatusBlock, information, length, informationClass);
             // STATUS_BUFFER_OVERFLOW (FileAllInformation with a long name) still filled the fixed part.
             if ((NT_SUCCESS(status) || (status == STATUS_BUFFER_OVERFLOW && informationClass == FileAllInformation))
@@ -1832,7 +1996,7 @@ namespace ProcBridge::Hook
         NTSTATUS NTAPI HookNtSetInformationFile(HANDLE fileHandle, PIO_STATUS_BLOCK ioStatusBlock, PVOID information,
             ULONG length, ULONG informationClass)
         {
-            AdoptIncomingHandles();
+            AdoptIfUnknown(fileHandle);
             constexpr size_t headerBytes = offsetof(FileRenameInfo, FileName);
             ReentryGuard guard;
             if (!guard.IsOutermost() || information == nullptr)
@@ -1905,11 +2069,11 @@ namespace ProcBridge::Hook
 
         NTSTATUS NTAPI HookNtQueryObject(HANDLE handle, ULONG informationClass, PVOID information, ULONG length, PULONG returnLength)
         {
-            AdoptIncomingHandles();
             if (informationClass != ObjectNameInformation)
             {
                 return g_ntQueryObject(handle, informationClass, information, length, returnLength);
             }
+            AdoptIfUnknown(handle);
             ReentryGuard guard;
             const int mapping = guard.IsOutermost() ? g_handles.Find(handle) : -1;
             if (mapping < 0 || length < sizeof(ObjectNameInfo))
@@ -1954,7 +2118,6 @@ namespace ProcBridge::Hook
 
         NTSTATUS NTAPI HookNtClose(HANDLE handle)
         {
-            AdoptIncomingHandles();
             // Remove only after the close succeeded (a failed close keeps the handle open). Once closed,
             // another thread may already have received the same value and a new entry: the generation
             // check leaves that entry alone.
@@ -1966,6 +2129,10 @@ namespace ProcBridge::Hook
             const bool tracked = g_handles.Find(handle, &generation) >= 0;
             ULONG64 remoteGeneration = 0;
             const bool remote = guard.IsOutermost() && g_remoteHandles.Find(handle, remoteGeneration);
+            // No lazy adopt here (one more query per close of every handle): an unknown virtual handle closed before any
+            // use keeps the Broker's share of this process until it exits. The value's epoch moves before the close: once
+            // closed, another thread may get the value for a new object and mark it, which a later bump would undo.
+            HandleValueChanged(handle);
             const NTSTATUS status = g_ntClose(handle);
             if (NT_SUCCESS(status))
             {
@@ -2002,7 +2169,7 @@ namespace ProcBridge::Hook
         /// A flush of a handle with a write token writes the cache copy back to machine B (plan 4.5).
         NTSTATUS NTAPI HookNtFlushBuffersFile(HANDLE fileHandle, PIO_STATUS_BLOCK ioStatusBlock)
         {
-            AdoptIncomingHandles();
+            AdoptIfUnknownRemote(fileHandle);
             const NTSTATUS status = g_ntFlushBuffersFile(fileHandle, ioStatusBlock);
             ReentryGuard guard;
             if (NT_SUCCESS(status) && guard.IsOutermost())
@@ -2016,14 +2183,17 @@ namespace ProcBridge::Hook
             return status;
         }
 
-        /// Write-through mode only (installed when the Broker asks): each completed write is sent to machine B.
+        /// Broker only. The first write of an unknown handle adopts it; in write-through mode (the Broker asks) each completed
+        /// write is sent to machine B.
         NTSTATUS NTAPI HookNtWriteFile(HANDLE fileHandle, HANDLE event, PIO_APC_ROUTINE apcRoutine, PVOID apcContext,
             PIO_STATUS_BLOCK ioStatusBlock, PVOID buffer, ULONG length, PLARGE_INTEGER byteOffset, PULONG key)
         {
-            AdoptIncomingHandles();
+            // A handle another process passed in and this one only writes and closes: its first write adopts it, so the
+            // close gives the write token back (write-back at the close, not when this process exits).
+            AdoptIfUnknownRemote(fileHandle, true);
             const NTSTATUS status = g_ntWriteFile(fileHandle, event, apcRoutine, apcContext, ioStatusBlock, buffer, length, byteOffset, key);
             ReentryGuard guard;
-            if (status == STATUS_SUCCESS && guard.IsOutermost())
+            if (status == STATUS_SUCCESS && g_resolver->IsWriteThrough() && guard.IsOutermost())
             {
                 const uint64_t token = g_remoteHandles.GetWriteToken(fileHandle);
                 if (token != 0)
@@ -2384,11 +2554,15 @@ namespace ProcBridge::Hook
 
         /// DuplicateHandle inside the process: the copy of a virtual handle is virtual too, a copy that
         /// lands on a stale value replaces its entry, and DUPLICATE_CLOSE_SOURCE closes like NtClose.
-        /// Duplicates into other hooked processes go through SendDuplicate.
+        /// Duplicates into other hooked processes go through SendDuplicate; a handle pulled from another process is checked
+        /// right away (lazy adopt).
         NTSTATUS NTAPI HookNtDuplicateObject(HANDLE sourceProcess, HANDLE sourceHandle, HANDLE targetProcess, PHANDLE targetHandle,
             ACCESS_MASK desiredAccess, ULONG handleAttributes, ULONG options)
         {
-            AdoptIncomingHandles();
+            if (IsCurrentProcess(sourceProcess))
+            {
+                AdoptIfUnknown(sourceHandle);
+            }
             ReentryGuard guard;
             if (!guard.IsOutermost())
             {
@@ -2405,6 +2579,10 @@ namespace ProcBridge::Hook
             bool remoteDeleteOnClose = false;
             const bool remote = sourceIsSelf && !g_remoteHandles.IsEmpty()
                 && g_remoteHandles.GetEntry(sourceHandle, remoteMapping, remotePath, remoteInfo, &remoteToken, &remoteDeleteOnClose);
+            if (sourceIsSelf && (options & DUPLICATE_CLOSE_SOURCE) != 0)
+            {
+                HandleValueChanged(sourceHandle); // before the close, as in NtClose
+            }
             const NTSTATUS status = g_ntDuplicateObject(sourceProcess, sourceHandle, targetProcess, targetHandle, desiredAccess,
                 handleAttributes, options);
             if (!NT_SUCCESS(status))
@@ -2428,6 +2606,7 @@ namespace ProcBridge::Hook
             const bool copied = targetHandle != nullptr && targetProcess != nullptr && SafeCopy(&copy, targetHandle, sizeof(copy));
             if (copied && IsCurrentProcess(targetProcess))
             {
+                HandleValueChanged(copy);
                 g_directoryNames.Remove(copy);
                 g_parentScans.Remove(copy);
                 if (mapping >= 0)
@@ -2446,6 +2625,15 @@ namespace ProcBridge::Hook
                 else
                 {
                     g_remoteHandles.Remove(copy);
+                }
+                if (!sourceIsSelf)
+                {
+                    // Pulled from another process: check the new handle now instead of at its first use.
+                    TryAdoptUnknownHandle(copy);
+                }
+                else if (mapping < 0 && !remote)
+                {
+                    MarkNotVirtual(copy); // a copy of a handle already found not virtual
                 }
             }
             else
@@ -2478,7 +2666,7 @@ namespace ProcBridge::Hook
             PIO_STATUS_BLOCK ioStatusBlock, PVOID information, ULONG length, ULONG informationClass, BOOLEAN returnSingleEntry,
             PUNICODE_STRING fileName, BOOLEAN restartScan)
         {
-            AdoptIncomingHandles();
+            AdoptIfUnknown(fileHandle);
             ReentryGuard guard;
             if (!guard.IsOutermost())
             {
@@ -2503,7 +2691,7 @@ namespace ProcBridge::Hook
             PIO_STATUS_BLOCK ioStatusBlock, PVOID information, ULONG length, ULONG informationClass, ULONG queryFlags,
             PUNICODE_STRING fileName)
         {
-            AdoptIncomingHandles();
+            AdoptIfUnknown(fileHandle);
             constexpr ULONG RestartScanFlag = 0x1;       // SL_RESTART_SCAN
             constexpr ULONG ReturnSingleEntryFlag = 0x2; // SL_RETURN_SINGLE_ENTRY
             ReentryGuard guard;
@@ -2576,7 +2764,7 @@ namespace ProcBridge::Hook
         NTSTATUS NTAPI HookNtNotifyChangeDirectoryFile(HANDLE fileHandle, HANDLE event, PIO_APC_ROUTINE apcRoutine, PVOID apcContext,
             PIO_STATUS_BLOCK ioStatusBlock, PVOID buffer, ULONG length, ULONG completionFilter, BOOLEAN watchTree)
         {
-            AdoptIncomingHandles();
+            AdoptIfUnknown(fileHandle);
             constexpr ULONG DirectoryNotifyInformation = 1;
             ReentryGuard guard;
             if (guard.IsOutermost())
@@ -2597,7 +2785,7 @@ namespace ProcBridge::Hook
             PIO_STATUS_BLOCK ioStatusBlock, PVOID buffer, ULONG length, ULONG completionFilter, BOOLEAN watchTree,
             ULONG informationClass)
         {
-            AdoptIncomingHandles();
+            AdoptIfUnknown(fileHandle);
             ReentryGuard guard;
             if (guard.IsOutermost())
             {
@@ -2815,6 +3003,11 @@ namespace ProcBridge::Hook
         };
     }
 
+    long NameQueryCount() noexcept
+    {
+        return g_nameQueries.load(std::memory_order_relaxed);
+    }
+
     DWORD InstallFileHooks(const IPathResolver& resolver) noexcept
     {
         g_resolver = &resolver;
@@ -2852,8 +3045,8 @@ namespace ProcBridge::Hook
             { "NtQueryDirectoryFileEx", reinterpret_cast<void*>(&HookNtQueryDirectoryFileEx),
                 reinterpret_cast<void**>(&g_ntQueryDirectoryFileEx), true },
             { "NtFlushBuffersFile", reinterpret_cast<void*>(&HookNtFlushBuffersFile), reinterpret_cast<void**>(&g_ntFlushBuffersFile) },
-            // Write-through only: NtWriteFile is the hottest call, leave it alone otherwise.
-            { resolver.IsWriteThrough() ? "NtWriteFile" : nullptr, reinterpret_cast<void*>(&HookNtWriteFile),
+            // Broker only (NtWriteFile is the hottest call): lazy adopt of handles that are only written, and write-through.
+            { remote ? "NtWriteFile" : nullptr, reinterpret_cast<void*>(&HookNtWriteFile),
                 reinterpret_cast<void**>(&g_ntWriteFile), true },
             // Change notifications come from machine B only with the Broker.
             { remote ? "NtNotifyChangeDirectoryFile" : nullptr, reinterpret_cast<void*>(&HookNtNotifyChangeDirectoryFile),

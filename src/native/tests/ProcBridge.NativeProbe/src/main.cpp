@@ -3083,14 +3083,16 @@ namespace
     /// inbox name is taken first with a section anyone may write. close-source: DUPLICATE_CLOSE_SOURCE.
     /// write, write-close-source: the file is created for writing with "parent" in it, the child (--write-read-handle)
     /// appends through the copy after this process closed its own handle (or DUPLICATE_CLOSE_SOURCE closed it); nothing
-    /// is printed but errors.
-    int DuplicateToChild(const wchar_t* file, const wchar_t* childExe, const wchar_t* modeArgument)
+    /// is printed but errors. write-threads <machine B file>: like write, the child (--write-read-handle-threads) appends
+    /// from two threads at once and reports whether its close wrote the file back.
+    int DuplicateToChild(const wchar_t* file, const wchar_t* childExe, const wchar_t* modeArgument, const wchar_t* extra)
     {
         std::wstring mode = modeArgument != nullptr ? modeArgument : L"";
-        const bool write = mode == L"write" || mode == L"write-close-source";
+        const bool threads = mode == L"write-threads";
+        const bool write = mode == L"write" || mode == L"write-close-source" || threads;
         if (write)
         {
-            mode = mode == L"write" ? L"" : L"close-source";
+            mode = mode == L"write-close-source" ? L"close-source" : L"";
         }
         Handle opened(write
             ? CreateFileW(file, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, CREATE_ALWAYS, 0, nullptr)
@@ -3129,6 +3131,10 @@ namespace
         }
         const std::wstring path = childExe != nullptr && *childExe != 0 ? std::wstring(childExe) : SelfPath();
         std::wstring commandLine = L"\"" + path + (write ? L"\" --write-read-handle" : L"\" --read-handle");
+        if (threads)
+        {
+            commandLine = L"\"" + path + L"\" --write-read-handle-threads \"" + (extra != nullptr ? extra : L"") + L"\" 10";
+        }
         STARTUPINFOEXW startup{};
         startup.StartupInfo.cb = sizeof(startup);
         startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -3188,6 +3194,344 @@ namespace
         DWORD written = 0;
         WriteFile(input.Get(), value.data(), static_cast<DWORD>(value.size()), &written, nullptr);
         input.Reset();
+        return static_cast<int>(WaitExitCode(child.Process));
+    }
+
+    /// Reads a handle value (decimal) from pipe; nullptr when nothing came.
+    HANDLE ReadHandleValue(HANDLE pipe)
+    {
+        char text[32] = {};
+        DWORD read = 0;
+        if (!ReadFile(pipe, text, sizeof(text) - 1, &read, nullptr) || read == 0)
+        {
+            return nullptr;
+        }
+        return reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(std::strtoull(text, nullptr, 10)));
+    }
+
+    bool SendHandleValue(HANDLE pipe, HANDLE value)
+    {
+        const std::string text = std::to_string(reinterpret_cast<ULONG_PTR>(value)) + "\n";
+        DWORD written = 0;
+        return WriteFile(pipe, text.data(), static_cast<DWORD>(text.size()), &written, nullptr) != FALSE;
+    }
+
+    /// --write-read-handle-threads <machine B file> <expected bytes>: reads a handle value from stdin, appends "+t" from
+    /// two threads that start together (both meet the handle for the first time), closes it, then waits until machine B's
+    /// file has the expected size: "child: landed" when the close wrote it back, "child: late <size>" when only the exit
+    /// of this process would.
+    int WriteReadHandleThreads(const wchar_t* machineBFile, const wchar_t* expected)
+    {
+        const HANDLE handle = ReadHandleValue(GetStdHandle(STD_INPUT_HANDLE));
+        if (handle == nullptr)
+        {
+            WriteLine(L"child: read " + Error(GetLastError()));
+            return 1;
+        }
+        struct Shared
+        {
+            HANDLE File;
+            HANDLE Start;
+            LONG Failures;
+        } shared{ handle, CreateEventW(nullptr, TRUE, FALSE, nullptr), 0 };
+        const auto writer = [](LPVOID parameter) -> DWORD
+        {
+            auto* state = static_cast<Shared*>(parameter);
+            WaitForSingleObject(state->Start, INFINITE);
+            DWORD written = 0;
+            if (!WriteFile(state->File, "+t", 2, &written, nullptr))
+            {
+                InterlockedIncrement(&state->Failures);
+            }
+            return 0;
+        };
+        HANDLE threads[2] = {};
+        for (HANDLE& thread : threads)
+        {
+            thread = CreateThread(nullptr, 0, writer, &shared, 0, nullptr);
+        }
+        Sleep(50);
+        SetEvent(shared.Start);
+        WaitForMultipleObjects(2, threads, TRUE, 60000);
+        for (HANDLE thread : threads)
+        {
+            CloseHandle(thread);
+        }
+        CloseHandle(shared.Start);
+        if (shared.Failures != 0 || !CloseHandle(handle))
+        {
+            WriteLine(L"child: write failed");
+            return 1;
+        }
+        const ULONGLONG want = std::wcstoull(expected, nullptr, 10);
+        ULONGLONG size = 0;
+        for (int attempt = 0; attempt < 100; ++attempt)
+        {
+            WIN32_FILE_ATTRIBUTE_DATA data{};
+            if (GetFileAttributesExW(machineBFile, GetFileExInfoStandard, &data))
+            {
+                size = (static_cast<ULONGLONG>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+                if (size == want)
+                {
+                    WriteLine(L"child: landed");
+                    return 0;
+                }
+            }
+            Sleep(100);
+        }
+        WriteLine(L"child: late " + std::to_wstring(size));
+        return 0;
+    }
+
+    /// --pull-write <parent pid> <handle> <pulled event> <closed event>: pulls the parent's handle into this process
+    /// (DuplicateHandle called here, the parent as source), prints its final path, lets the parent close its own handle,
+    /// then appends "+a", "+b" and "+c" through the copy and closes it.
+    int PullWrite(const wchar_t* parentId, const wchar_t* value, const wchar_t* pulledEvent, const wchar_t* closedEvent)
+    {
+        Handle parent(OpenProcess(PROCESS_DUP_HANDLE, FALSE, std::wcstoul(parentId, nullptr, 10)));
+        HANDLE copy = nullptr;
+        if (!parent.IsValid()
+            || !DuplicateHandle(parent.Get(), ParseHandleValue(value), GetCurrentProcess(), &copy, 0, FALSE, DUPLICATE_SAME_ACCESS))
+        {
+            WriteLine(L"child pull: " + Error(GetLastError()));
+            return 1;
+        }
+        WriteLine(L"child: " + FinalPath(copy));
+        SetEvent(ParseHandleValue(pulledEvent));
+        WaitForSingleObject(ParseHandleValue(closedEvent), 60000);
+        const char* parts[] = { "+a", "+b", "+c" };
+        for (const char* part : parts)
+        {
+            Sleep(100);
+            DWORD written = 0;
+            if (!WriteFile(copy, part, 2, &written, nullptr))
+            {
+                WriteLine(L"child write: " + Error(GetLastError()));
+                return 1;
+            }
+        }
+        return CloseHandle(copy) ? 0 : 1;
+    }
+
+    /// --pull-test <file>: creates file for writing with "parent" in it and starts a child (--pull-write) that pulls the
+    /// handle out of this process. Once it did, this process closes its own handle, then the child writes.
+    int PullTest(const wchar_t* file)
+    {
+        Handle opened(CreateFileW(file, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, CREATE_ALWAYS, 0, nullptr));
+        DWORD written = 0;
+        if (!opened.IsValid() || !WriteFile(opened.Get(), "parent", 6, &written, nullptr))
+        {
+            WriteLine(L"open: " + Error(GetLastError()));
+            return 1;
+        }
+        SECURITY_ATTRIBUTES inherit{ sizeof(inherit), nullptr, TRUE };
+        Handle pulled(CreateEventW(&inherit, TRUE, FALSE, nullptr));
+        Handle closed(CreateEventW(&inherit, TRUE, FALSE, nullptr));
+        ChildProcess child;
+        if (!StartProbe(L"", L"--pull-write " + std::to_wstring(GetCurrentProcessId()) + L" " + HandleText(opened.Get()) + L" "
+            + HandleText(pulled.Get()) + L" " + HandleText(closed.Get()), TRUE, 0, nullptr, child))
+        {
+            return 1;
+        }
+        HANDLE waits[] = { pulled.Get(), child.Process };
+        if (WaitForMultipleObjects(2, waits, FALSE, 60000) != WAIT_OBJECT_0)
+        {
+            WriteLine(L"pull: the child did not pull the handle");
+            TerminateProcess(child.Process, 1);
+            return 1;
+        }
+        opened.Reset();
+        SetEvent(closed.Get());
+        return static_cast<int>(WaitExitCode(child.Process));
+    }
+
+    /// --reuse-read-handle <outside file> <ready event> <pipe>: opens and names a file outside every virtual root (the
+    /// hook learns that handle value is not virtual), closes it, signals ready and reads from pipe the value of a virtual
+    /// handle the parent duplicated in. Prints "child: reused|fresh <final path>": reused when the value is the closed one.
+    int ReuseReadHandle(const wchar_t* outsideFile, const wchar_t* readyEvent, const wchar_t* pipe)
+    {
+        // Handle values come from per-processor free lists: on one processor with the parent, the value closed here is
+        // the next one handed out.
+        SetProcessAffinityMask(GetCurrentProcess(), 1);
+        const HANDLE outside = OpenRead(outsideFile);
+        if (outside == INVALID_HANDLE_VALUE)
+        {
+            WriteLine(L"child: open " + Error(GetLastError()));
+            return 1;
+        }
+        const std::wstring outsideName = FinalPath(outside);
+        CloseHandle(outside);
+        SetEvent(ParseHandleValue(readyEvent));
+        const HANDLE copy = ReadHandleValue(ParseHandleValue(pipe));
+        if (copy == nullptr)
+        {
+            WriteLine(L"child: read " + Error(GetLastError()));
+            return 1;
+        }
+        WriteLine(L"child: " + std::wstring(copy == outside ? L"reused " : L"fresh ") + FinalPath(copy));
+        return CloseHandle(copy) ? 0 : 1;
+    }
+
+    /// --dup-reuse <virtual file> <outside file>: starts a child (--reuse-read-handle) and, once it closed its handle to
+    /// outside file, duplicates a read handle of virtual file into it; the copy usually gets the value just closed.
+    int DuplicateIntoReusedValue(const wchar_t* virtualFile, const wchar_t* outsideFile)
+    {
+        Handle opened(OpenRead(virtualFile));
+        if (!opened.IsValid())
+        {
+            WriteLine(L"open: " + Error(GetLastError()));
+            return 1;
+        }
+        SECURITY_ATTRIBUTES inherit{ sizeof(inherit), nullptr, TRUE };
+        Handle ready(CreateEventW(&inherit, TRUE, FALSE, nullptr));
+        HANDLE readEnd = nullptr;
+        HANDLE writeEnd = nullptr;
+        if (!ready.IsValid() || !CreatePipe(&readEnd, &writeEnd, &inherit, 0) || !SetHandleInformation(writeEnd, HANDLE_FLAG_INHERIT, 0))
+        {
+            WriteLine(L"pipe: " + Error(GetLastError()));
+            return 1;
+        }
+        Handle childInput(readEnd);
+        Handle input(writeEnd);
+        ChildProcess child;
+        if (!StartProbe(L"", L"--reuse-read-handle \"" + std::wstring(outsideFile) + L"\" " + HandleText(ready.Get()) + L" "
+            + HandleText(readEnd), TRUE, 0, nullptr, child))
+        {
+            return 1;
+        }
+        SetThreadAffinityMask(GetCurrentThread(), 1);
+        HANDLE waits[] = { ready.Get(), child.Process };
+        HANDLE copy = nullptr;
+        if (WaitForMultipleObjects(2, waits, FALSE, 60000) != WAIT_OBJECT_0
+            || !DuplicateHandle(GetCurrentProcess(), opened.Get(), child.Process, &copy, 0, FALSE, DUPLICATE_SAME_ACCESS))
+        {
+            WriteLine(L"duplicate: " + Error(GetLastError()));
+            TerminateProcess(child.Process, 1);
+            return 1;
+        }
+        SendHandleValue(input.Get(), copy);
+        return static_cast<int>(WaitExitCode(child.Process));
+    }
+
+    /// --pid-count-queries: like --pid-read-handle, then queries the basic information of the received handle five times
+    /// and prints how many name queries the hook's lazy adopt made meanwhile (ProcBridgeHookNameQueries).
+    int PidCountQueries()
+    {
+        HMODULE hook = GetModuleHandleW(L"ProcBridge.Hook.x64.dll");
+        if (hook == nullptr)
+        {
+            hook = GetModuleHandleW(L"ProcBridge.Hook.x86.dll");
+        }
+        using CountFn = LONG(WINAPI*)();
+        const auto count = hook != nullptr ? reinterpret_cast<CountFn>(GetProcAddress(hook, "ProcBridgeHookNameQueries")) : nullptr;
+        WriteLine(L"pid " + std::to_wstring(GetCurrentProcessId()));
+        const HANDLE handle = ReadHandleValue(GetStdHandle(STD_INPUT_HANDLE));
+        if (handle == nullptr || count == nullptr)
+        {
+            WriteLine(L"child: no handle or no hook");
+            return 1;
+        }
+        const LONG before = count();
+        for (int i = 0; i < 5; ++i)
+        {
+            FILE_BASIC_INFO basic{};
+            if (!GetFileInformationByHandleEx(handle, FileBasicInfo, &basic, sizeof(basic)))
+            {
+                WriteLine(L"query: " + Error(GetLastError()));
+                return 1;
+            }
+        }
+        WriteLine(L"name queries: " + std::to_wstring(count() - before));
+        return CloseHandle(handle) ? 0 : 1;
+    }
+
+    /// --pid-read-handle: prints this process's id, reads a handle value from stdin (the process that read the id
+    /// duplicated it in) and prints "child: <final path> <identity>".
+    int PidReadHandle()
+    {
+        WriteLine(L"pid " + std::to_wstring(GetCurrentProcessId()));
+        const HANDLE handle = ReadHandleValue(GetStdHandle(STD_INPUT_HANDLE));
+        if (handle == nullptr)
+        {
+            WriteLine(L"child: read " + Error(GetLastError()));
+            return 1;
+        }
+        WriteLine(L"child: " + FinalPath(handle) + L" " + Identity(handle));
+        return CloseHandle(handle) ? 0 : 1;
+    }
+
+    /// --outside-push <real file> <spawn exe> <virtual root> <real root> [count]: run without a hook. Opens real file,
+    /// starts "<spawn> --map <virtual root> <real root> -- <this probe> --pid-read-handle" (count: --pid-count-queries)
+    /// with pipes for its input and output, reads the hooked child's id, duplicates the handle into it (no hook on this
+    /// side tells it anything) and passes the value on; forwards the child's other lines.
+    int OutsidePush(const wchar_t* realFile, const wchar_t* spawn, const wchar_t* virtualRoot, const wchar_t* realRoot, bool countQueries)
+    {
+        Handle opened(OpenRead(realFile));
+        SECURITY_ATTRIBUTES inherit{ sizeof(inherit), nullptr, TRUE };
+        HANDLE inRead = nullptr;
+        HANDLE inWrite = nullptr;
+        HANDLE outRead = nullptr;
+        HANDLE outWrite = nullptr;
+        if (!opened.IsValid() || !CreatePipe(&inRead, &inWrite, &inherit, 0) || !CreatePipe(&outRead, &outWrite, &inherit, 0)
+            || !SetHandleInformation(inWrite, HANDLE_FLAG_INHERIT, 0) || !SetHandleInformation(outRead, HANDLE_FLAG_INHERIT, 0))
+        {
+            WriteLine(L"setup: " + Error(GetLastError()));
+            return 1;
+        }
+        Handle childInput(inRead);
+        Handle input(inWrite);
+        Handle output(outRead);
+        Handle childOutput(outWrite);
+        std::wstring commandLine = L"\"" + std::wstring(spawn) + L"\" --map \"" + virtualRoot + L"\" \"" + realRoot + L"\" -- \""
+            + SelfPath() + (countQueries ? L"\" --pid-count-queries" : L"\" --pid-read-handle");
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        startup.dwFlags = STARTF_USESTDHANDLES;
+        startup.hStdInput = inRead;
+        startup.hStdOutput = outWrite;
+        startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+        PROCESS_INFORMATION info{};
+        if (!CreateProcessW(spawn, commandLine.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &startup, &info))
+        {
+            WriteLine(L"create: " + Error(GetLastError()));
+            return 1;
+        }
+        ChildProcess child;
+        child.Process = info.hProcess;
+        child.Thread = info.hThread;
+        childInput.Reset();
+        childOutput.Reset();
+        std::string text;
+        char buffer[512];
+        DWORD read = 0;
+        while (text.find('\n') == std::string::npos && ReadFile(output.Get(), buffer, sizeof(buffer), &read, nullptr) && read != 0)
+        {
+            text.append(buffer, read);
+        }
+        if (text.rfind("pid ", 0) != 0)
+        {
+            WriteLine(L"outside: no pid");
+            TerminateProcess(child.Process, 1);
+            return 1;
+        }
+        const size_t end = text.find('\n');
+        Handle target(OpenProcess(PROCESS_DUP_HANDLE, FALSE, static_cast<DWORD>(std::strtoul(text.c_str() + 4, nullptr, 10))));
+        HANDLE copy = nullptr;
+        if (!target.IsValid() || !DuplicateHandle(GetCurrentProcess(), opened.Get(), target.Get(), &copy, 0, FALSE, DUPLICATE_SAME_ACCESS))
+        {
+            WriteLine(L"outside duplicate: " + Error(GetLastError()));
+            TerminateProcess(child.Process, 1);
+            return 1;
+        }
+        SendHandleValue(input.Get(), copy);
+        input.Reset();
+        std::string rest = text.substr(end + 1);
+        while (ReadFile(output.Get(), buffer, sizeof(buffer), &read, nullptr) && read != 0)
+        {
+            rest.append(buffer, read);
+        }
+        DWORD written = 0;
+        WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), rest.data(), static_cast<DWORD>(rest.size()), &written, nullptr);
         return static_cast<int>(WaitExitCode(child.Process));
     }
 
@@ -3274,9 +3618,41 @@ namespace
         {
             return OpenById(argv[2], argv[3]);
         }
-        if (command == L"--dup-to-child" && argc >= 3 && argc <= 5)
+        if (command == L"--dup-to-child" && argc >= 3 && argc <= 6)
         {
-            return DuplicateToChild(argv[2], argc >= 4 ? argv[3] : nullptr, argc >= 5 ? argv[4] : nullptr);
+            return DuplicateToChild(argv[2], argc >= 4 ? argv[3] : nullptr, argc >= 5 ? argv[4] : nullptr, argc >= 6 ? argv[5] : nullptr);
+        }
+        if (command == L"--write-read-handle-threads" && argc == 4)
+        {
+            return WriteReadHandleThreads(argv[2], argv[3]);
+        }
+        if (command == L"--pull-write" && argc == 6)
+        {
+            return PullWrite(argv[2], argv[3], argv[4], argv[5]);
+        }
+        if (command == L"--pull-test" && argc == 3)
+        {
+            return PullTest(argv[2]);
+        }
+        if (command == L"--reuse-read-handle" && argc == 5)
+        {
+            return ReuseReadHandle(argv[2], argv[3], argv[4]);
+        }
+        if (command == L"--dup-reuse" && argc == 4)
+        {
+            return DuplicateIntoReusedValue(argv[2], argv[3]);
+        }
+        if (command == L"--pid-count-queries" && argc == 2)
+        {
+            return PidCountQueries();
+        }
+        if (command == L"--pid-read-handle" && argc == 2)
+        {
+            return PidReadHandle();
+        }
+        if (command == L"--outside-push" && (argc == 6 || (argc == 7 && std::wstring(argv[6]) == L"count")))
+        {
+            return OutsidePush(argv[2], argv[3], argv[4], argv[5], argc == 7);
         }
         if (command == L"--write-read-handle" && argc == 2)
         {

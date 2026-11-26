@@ -212,6 +212,12 @@ namespace
     }
 }
 
+/// Test hook: how many handle name queries lazy adopt made in this process (HandleSharing-Design-vi.md 10, T9).
+extern "C" LONG WINAPI ProcBridgeHookNameQueries()
+{
+    return ProcBridge::Hook::NameQueryCount();
+}
+
 /// Thread-start compatible initializer. parameter: an init block (ProcBridge/InitBlock.h) allocated in
 /// this process by the injector, freed here; or nullptr (configuration from the environment only).
 /// Returns ERROR_SUCCESS or a Win32 error code.

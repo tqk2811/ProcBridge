@@ -96,7 +96,7 @@ public sealed class HandleDuplicationTests
     public void SquattedInbox_IsNotUsed(string platform)
     {
         // Another process took the child's inbox name first (with a DACL that lets anyone write): the child's hook must
-        // not use it, so the duplicated handle stays untracked there and shows its real name.
+        // not use it; the handle is still recognised by the lazy check of its real name.
         using HookSandbox sandbox = new(platform);
         string file = sandbox.VirtualRoot + "\\a.txt";
 
@@ -105,7 +105,102 @@ public sealed class HandleDuplicationTests
         Assert.AreEqual(0, result.ExitCode, result.StandardOutput + result.StandardError);
         string[] lines = result.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries);
         Assert.HasCount(2, lines, result.StandardOutput);
-        Assert.StartsWith($"child: \\\\?\\{sandbox.RealRoot}\\a.txt id ", lines[1]);
+        Assert.StartsWith($"child: \\\\?\\{file} id ", lines[1]);
+    }
+
+    [TestMethod]
+    [DataRow("x64")]
+    [DataRow("Win32")]
+    public async Task ChildPullingHandleFromParent_ThroughAgent_SeesVirtualNameAndWritesBack(string platform)
+    {
+        // Pull direction (HandleSharing-Design-vi.md 10, T5): the child calls DuplicateHandle with the parent as source, so
+        // no hook ever sends anything. The child's hook checks the new handle right away, Adopt makes it a holder of the
+        // parent's write token, and what it writes after the parent closed its own handle reaches machine B.
+        using HookSandbox sandbox = new(platform);
+        await using RemoteSession session = RemoteSession.Start(sandbox, writable: true);
+        string file = sandbox.VirtualRoot + "\\out.txt";
+
+        ProcessResult result = session.Run($"\"{sandbox.Binaries.Probe}\" --pull-test \"{file}\"");
+
+        Assert.AreEqual(0, result.ExitCode, result.StandardOutput + result.StandardError);
+        Assert.AreEqual($"child: \\\\?\\{file}", result.StandardOutput.Trim());
+        // Checked before the session ends: the child's close wrote it back, not the final sync of open files.
+        Assert.AreEqual("parent+a+b+c", File.ReadAllText(Path.Combine(sandbox.RealRoot, "out.txt")));
+        Assert.AreEqual(0, session.Broker.WriteBack.PendingCount);
+    }
+
+    [TestMethod]
+    [DataRow("x64")]
+    [DataRow("Win32")]
+    public void HandlePushedByProcessWithoutHook_IsRecognisedByHookedReceiver(string platform)
+    {
+        // T7: a process without a hook (run directly, not under Spawn) holds a handle to the backing file and duplicates it
+        // into a hooked process; nothing announces it, the receiver's first lookup finds the real name under the root.
+        using HookSandbox sandbox = new(platform);
+        string realFile = Path.Combine(sandbox.RealRoot, "a.txt");
+
+        ProcessResult result = sandbox.Run(sandbox.Binaries.Probe,
+            $"--outside-push \"{realFile}\" \"{sandbox.Binaries.Spawn}\" \"{sandbox.VirtualRoot}\" \"{sandbox.RealRoot}\"");
+
+        Assert.AreEqual(0, result.ExitCode, result.StandardOutput + result.StandardError);
+        Assert.StartsWith($"child: \\\\?\\{sandbox.VirtualRoot}\\a.txt id ", result.StandardOutput.Trim());
+    }
+
+    [TestMethod]
+    [DataRow("x64")]
+    [DataRow("Win32")]
+    public void VirtualHandleOnValueOfClosedRealHandle_IsRecognised(string platform)
+    {
+        // T8: the child names a file outside the root (its handle value goes into the negative cache) and closes it; the
+        // parent then duplicates a virtual handle in, which gets the same value and the same access: the close must have
+        // made the hook forget what it knew about that value.
+        using HookSandbox sandbox = new(platform);
+        string outside = Path.Combine(sandbox.BaseDirectory, "outside.txt");
+        File.WriteAllText(outside, "outside");
+        string file = sandbox.VirtualRoot + "\\a.txt";
+
+        ProcessResult result = sandbox.RunHooked($"\"{sandbox.Binaries.Probe}\" --dup-reuse \"{file}\" \"{outside}\"");
+
+        Assert.AreEqual(0, result.ExitCode, result.StandardOutput + result.StandardError);
+        Assert.AreEqual($"child: reused \\\\?\\{file}", result.StandardOutput.Trim());
+    }
+
+    [TestMethod]
+    [DataRow("x64")]
+    [DataRow("Win32")]
+    public void RealHandleUsedManyTimes_IsNamedOnce(string platform)
+    {
+        // T9: a real handle the hook never saw opened (pushed in by a process without a hook) is named once at its first
+        // lookup; the later lookups hit the negative cache.
+        using HookSandbox sandbox = new(platform);
+        string outside = Path.Combine(sandbox.BaseDirectory, "outside.txt");
+        File.WriteAllText(outside, "outside");
+
+        ProcessResult result = sandbox.Run(sandbox.Binaries.Probe,
+            $"--outside-push \"{outside}\" \"{sandbox.Binaries.Spawn}\" \"{sandbox.VirtualRoot}\" \"{sandbox.RealRoot}\" count");
+
+        Assert.AreEqual(0, result.ExitCode, result.StandardOutput + result.StandardError);
+        Assert.AreEqual("name queries: 1", result.StandardOutput.Trim());
+    }
+
+    [TestMethod]
+    [DataRow("x64")]
+    [DataRow("Win32")]
+    public async Task TwoThreadsMeetingPushedHandleAtOnce_CloseWritesBack(string platform)
+    {
+        // T10: two threads of the child use the pushed handle for the first time together. One entry must hold the token,
+        // so the child's single close ends its share and the file is written back right then (a second entry would keep
+        // the token counted in the child until it exits; the child waits for machine B before exiting).
+        using HookSandbox sandbox = new(platform);
+        await using RemoteSession session = RemoteSession.Start(sandbox, writable: true);
+        string machineBFile = Path.Combine(sandbox.RealRoot, "out.txt");
+
+        ProcessResult result = session.Run(
+            $"\"{sandbox.Binaries.Probe}\" --dup-to-child \"{sandbox.VirtualRoot}\\out.txt\" \"\" write-threads \"{machineBFile}\"");
+
+        Assert.AreEqual(0, result.ExitCode, result.StandardOutput + result.StandardError);
+        Assert.AreEqual("child: landed", result.StandardOutput.Trim());
+        Assert.AreEqual("parent+t+t", File.ReadAllText(machineBFile));
     }
 
     private static void AssertChildSeesParentView(string file, ProcessResult result)
